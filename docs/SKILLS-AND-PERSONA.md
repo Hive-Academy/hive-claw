@@ -80,7 +80,7 @@ Creates:
 Use it for context that's specific to *this* project — tech stack, conventions, gotchas, command conventions. Example:
 
 ```markdown
-# Anubis in pro-estate
+# Bot persona for pro-estate
 
 You are working in an Nx monorepo:
 - NestJS backend in `apps/api/`

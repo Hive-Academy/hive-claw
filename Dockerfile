@@ -17,9 +17,14 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 RUN npm install -g openclaw@2026.4.24 \
     && openclaw --version
 
+# Ptah CLI — first-class project orchestration (discover, scaffold, GitHub auth).
+# Shares ~/.ptah with the host so a single `ptah auth login` works for both sides.
+RUN npm install -g @hive-academy/ptah-cli \
+    && ptah --version || true
+
 RUN useradd --create-home --shell /bin/bash --uid 1000 agent \
-    && mkdir -p /workspace /home/agent/.openclaw \
-    && chown -R agent:agent /workspace /home/agent/.openclaw
+    && mkdir -p /workspace /home/agent/.openclaw /home/agent/.ptah \
+    && chown -R agent:agent /workspace /home/agent/.openclaw /home/agent/.ptah
 
 COPY --chown=root:root config/openclaw.json.tmpl /etc/openclaw/openclaw.json.tmpl
 COPY --chown=root:root entrypoint.sh /usr/local/bin/entrypoint.sh

@@ -179,7 +179,7 @@ docker compose exec -it openclaw openclaw tui
 After verifying the bot works, you'll likely want to:
 
 1. **Personalize `~/projects/USER.md`** — fill in your name, timezone, what you're working on.
-2. **Customize `~/projects/IDENTITY.md`** — give the bot a name and vibe that fits you (currently seeds "Anubis" if you used the templates).
+2. **Customize `~/projects/IDENTITY.md`** — give the bot a name and vibe that fits you. The seed file ships with placeholder fields; the bot will ask you to fill them in on first chat (driven by `BOOTSTRAP.md`), or you can edit the file directly.
 3. **Initialize your first project**:
    ```bash
    cd ~/projects
@@ -188,6 +188,66 @@ After verifying the bot works, you'll likely want to:
    nano ~/projects/myapp/.openclaw/persona.md   # edit project-specific persona
    ```
 4. **Test cross-project memory** — mention the bot, ask it to summarize what's in `~/projects/myapp/`. It should respond using the persona override you set.
+
+---
+
+## Step 7 — Ptah CLI (project orchestration + GitHub auth)
+
+The container ships with [`@hive-academy/ptah-cli`](https://www.npmjs.com/package/@hive-academy/ptah-cli) preinstalled. Its config dir `~/.ptah` is **bind-mounted from the host**, so a single auth login covers both the agent inside the container and your shell on the host.
+
+### One-time GitHub auth
+
+Pick whichever side is convenient — both write the same `~/.ptah/settings.json`:
+
+```bash
+# Option A — interactive OAuth on the host (recommended):
+ptah auth login github
+
+# Option B — inside the container:
+docker compose exec openclaw ptah auth login github
+
+# Option C — drop a token into .env and let entrypoint.sh seed it on first boot:
+# (only seeds if no existing auth is detected — never clobbers an interactive login)
+echo 'GITHUB_TOKEN=ghp_xxx' >> .env
+docker compose up -d --force-recreate
+```
+
+Verify with:
+
+```bash
+docker compose exec openclaw ptah auth test --provider github
+```
+
+### Discover existing projects
+
+```bash
+docker compose exec openclaw ptah harness scan
+```
+
+This emits JSON describing every project under `$WORKSPACE_DIR` plus the agents and skills available there. The bot will use this automatically when you ask "what projects do I have?".
+
+### Scaffold a new project (Ptah wizard + OpenClaw overlay in one shot)
+
+```bash
+~/Desktop/fixing-openclaw/bin/openclaw-init-project.sh --with-ptah myapp
+```
+
+This:
+1. Runs `ptah new-project select-type` inside the container (interactive).
+2. Lays down the `.openclaw/` overlay (persona, HEARTBEAT, project skills).
+
+After the wizard prompts, finish the plan with:
+
+```bash
+docker compose exec -w /home/agent/.openclaw/workspace/myapp openclaw \
+    ptah new-project submit-answers --file answers.json
+docker compose exec -w /home/agent/.openclaw/workspace/myapp openclaw \
+    ptah new-project get-plan
+docker compose exec -w /home/agent/.openclaw/workspace/myapp openclaw \
+    ptah new-project approve-plan
+```
+
+> **Security note:** `~/.ptah/settings.json` holds your auth tokens. The bind mount means a token leak on either side compromises both. Don't commit that file or paste its contents anywhere.
 
 ---
 

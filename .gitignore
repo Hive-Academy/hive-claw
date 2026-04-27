@@ -1,4 +1,7 @@
 .env
+.env.local
+.env.*.local
+secrets/
 config/openclaw.json
 data/
 *.log

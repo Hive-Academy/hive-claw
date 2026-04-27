@@ -59,9 +59,20 @@ bold "[3/7] .env"
 if [ ! -f .env ]; then
     cp .env.example .env
     chmod 600 .env
-    info ".env created from .env.example — edit it to set DISCORD_BOT_TOKEN/DISCORD_GUILD_ID before talking to the bot"
+    info ".env created from .env.example — edit it to set LLM_PROVIDER + matching API key, and DISCORD_BOT_TOKEN/DISCORD_GUILD_ID before talking to the bot"
 else
     ok ".env exists"
+    chmod 600 .env 2>/dev/null || true
+fi
+
+# Refuse to continue if .env is tracked by git — it likely contains live secrets.
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if git ls-files --error-unmatch .env >/dev/null 2>&1; then
+        fail ".env is tracked by git! Remove it from the index before continuing: 'git rm --cached .env && git commit -m \"untrack .env\"'. Then rotate any tokens that were ever committed."
+    fi
+    if [ -d secrets ] && git ls-files --error-unmatch secrets >/dev/null 2>&1; then
+        warn "secrets/ directory is tracked by git — review and untrack if it holds live secrets."
+    fi
 fi
 
 if ! grep -qE '^OPENCLAW_AUTH_TOKEN=.+$' .env; then
@@ -102,6 +113,17 @@ bold "[5/7] Skills directory"
 mkdir -p skills commands
 ok "skills/ + commands/ present"
 
+# Ptah CLI config dir — bind-mounted into the container so a single
+# `ptah auth login` works for both host and agent.
+if ! grep -qE '^PTAH_CONFIG_DIR=' .env; then
+    echo "PTAH_CONFIG_DIR=${HOME}/.ptah" >> .env
+    ok "set PTAH_CONFIG_DIR=${HOME}/.ptah"
+fi
+PTAH_CONFIG_DIR=$(grep -E '^PTAH_CONFIG_DIR=' .env | tail -1 | cut -d= -f2- | sed "s|\${HOME}|$HOME|;s|^~|$HOME|")
+PTAH_CONFIG_DIR=${PTAH_CONFIG_DIR:-$HOME/.ptah}
+mkdir -p "$PTAH_CONFIG_DIR"
+ok "ptah config dir: $PTAH_CONFIG_DIR (shared with container)"
+
 bold "[6/7] Build image"
 docker compose build
 ok "image built: openclaw-local:latest"
@@ -125,6 +147,10 @@ cat <<EOF
   Stop:        docker compose down
 
   New project init:  bin/openclaw-init-project.sh <name>
+  New project (Ptah wizard):  bin/openclaw-init-project.sh --with-ptah <name>
+  GitHub auth (one-time):     docker compose exec openclaw ptah auth login github
+                              (or run on host: ptah auth login github)
+  Discover projects:          docker compose exec openclaw ptah harness scan
   Refresh skills:    bin/sync-ptah-skills.sh   (only if Ptah is installed)
 
 If Discord credentials are set in .env, the bot will appear online in your guild

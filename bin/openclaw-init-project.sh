@@ -4,6 +4,7 @@
 # Usage:
 #   bin/openclaw-init-project.sh <project-name>
 #   bin/openclaw-init-project.sh ~/projects/foo
+#   bin/openclaw-init-project.sh --with-ptah <project-name>   # also runs `ptah new-project` wizard inside the container
 #
 # Creates:
 #   <dir>/.openclaw/
@@ -15,12 +16,19 @@
 
 set -euo pipefail
 
+WITH_PTAH=0
+if [ "${1:-}" = "--with-ptah" ]; then
+    WITH_PTAH=1
+    shift
+fi
+
 if [ $# -lt 1 ]; then
-    echo "Usage: $0 <project-name | absolute-path>"
+    echo "Usage: $0 [--with-ptah] <project-name | absolute-path>"
     echo
     echo "Examples:"
-    echo "  $0 my-app                  # creates \$WORKSPACE_DIR/my-app/.openclaw/"
-    echo "  $0 ~/projects/foo          # creates ~/projects/foo/.openclaw/"
+    echo "  $0 my-app                       # creates \$WORKSPACE_DIR/my-app/.openclaw/"
+    echo "  $0 ~/projects/foo               # creates ~/projects/foo/.openclaw/"
+    echo "  $0 --with-ptah my-app           # runs Ptah wizard, then drops .openclaw/ on top"
     exit 1
 fi
 
@@ -34,9 +42,36 @@ else
 fi
 
 if [ ! -d "$PROJ_DIR" ]; then
-    echo "Project dir does not exist: $PROJ_DIR"
-    echo "Create it first (e.g. clone a repo into it), then re-run."
-    exit 1
+    if [ "$WITH_PTAH" -eq 1 ]; then
+        echo "Project dir does not exist: $PROJ_DIR — creating (Ptah wizard will populate it)."
+        mkdir -p "$PROJ_DIR"
+    else
+        echo "Project dir does not exist: $PROJ_DIR"
+        echo "Create it first (e.g. clone a repo into it), then re-run."
+        echo "Or pass --with-ptah to scaffold from scratch via the Ptah wizard."
+        exit 1
+    fi
+fi
+
+# --- Optional: run Ptah new-project wizard before laying down .openclaw/ -----
+if [ "$WITH_PTAH" -eq 1 ]; then
+    if docker compose ps --status running --services 2>/dev/null | grep -q '^openclaw$'; then
+        IN_CONTAINER_PATH="/home/agent/.openclaw/workspace/$(basename "$PROJ_DIR")"
+        echo "→ Running Ptah new-project wizard in the container at $IN_CONTAINER_PATH"
+        echo "  (Ptah will prompt for project type / stack / options.)"
+        docker compose exec -w "$IN_CONTAINER_PATH" openclaw \
+            ptah new-project select-type --human || true
+        echo
+        echo "  Next manual steps inside the container:"
+        echo "    docker compose exec -w '$IN_CONTAINER_PATH' openclaw ptah new-project submit-answers --file answers.json"
+        echo "    docker compose exec -w '$IN_CONTAINER_PATH' openclaw ptah new-project get-plan"
+        echo "    docker compose exec -w '$IN_CONTAINER_PATH' openclaw ptah new-project approve-plan"
+        echo
+    else
+        echo "WARN: openclaw container not running — skipping Ptah wizard."
+        echo "      Start the stack (docker compose up -d) and re-run with --with-ptah,"
+        echo "      or run 'ptah new-project select-type' manually."
+    fi
 fi
 
 OC_DIR="$PROJ_DIR/.openclaw"
