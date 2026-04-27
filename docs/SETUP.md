@@ -244,13 +244,16 @@ docker compose exec -w $WS openclaw ptah new-project submit-answers --file answe
 docker compose exec -w $WS openclaw ptah new-project get-plan
 docker compose exec -w $WS openclaw ptah new-project approve-plan
 
-# Install whichever skills / MCP servers / agent packs match the project:
-docker compose exec -w $WS openclaw ptah harness install-skill github
-docker compose exec -w $WS openclaw ptah plugin enable filesystem
-docker compose exec -w $WS openclaw ptah agent packs install backend-developer
+# Install whichever skills / agents match the project (FREE tier):
+docker compose exec -w $WS openclaw ptah skill recommended           # auto-detect
+docker compose exec -w $WS openclaw ptah skill install steipete/clawdis
+docker compose exec -w $WS openclaw ptah agent apply backend-developer
+docker compose exec -w $WS openclaw ptah agent apply senior-tester
 ```
 
-The `skills/ptah-projects/SKILL.md` skill teaches Anubis a stack→skills/MCP/packs lookup table so it picks the right ones without you naming them.
+> **Pro-gated commands.** `ptah harness design-agents`, `ptah agent packs install`, and `ptah harness generate-document` return a "Pro subscription required" error on the free tier. The `ptah-projects` skill teaches Anubis to use `agent apply` / hand-written `.ptah/agents/mcp-*.json` instead, so the agent silently routes around the gate without bugging you.
+
+The `skills/ptah-projects/SKILL.md` skill includes a stack→skills/agents lookup table with verified registry slugs (e.g. `steipete/clawdis` for Discord) so Anubis picks the right ones without you naming them.
 
 > **Security note:** `~/.ptah/settings.json` holds your auth tokens. The bind mount means a token leak on either side compromises both. Don't commit that file or paste its contents anywhere.
 

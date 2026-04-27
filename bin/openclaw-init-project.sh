@@ -76,10 +76,11 @@ if [ "$WITH_PTAH" -eq 1 ]; then
         echo "    docker compose exec -w '$IN_CONTAINER_PATH' openclaw ptah new-project get-plan"
         echo "    docker compose exec -w '$IN_CONTAINER_PATH' openclaw ptah new-project approve-plan"
         echo
-        echo "  After the plan is approved, install skills & MCP servers as needed:"
-        echo "    docker compose exec -w '$IN_CONTAINER_PATH' openclaw ptah harness install-skill <name>"
-        echo "    docker compose exec -w '$IN_CONTAINER_PATH' openclaw ptah plugin enable <mcp-server>"
-        echo "    docker compose exec -w '$IN_CONTAINER_PATH' openclaw ptah agent packs install <pack>"
+        echo "  After the plan is approved, install free-tier skills & agents:"
+        echo "    docker compose exec -w '$IN_CONTAINER_PATH' openclaw ptah skill recommended"
+        echo "    docker compose exec -w '$IN_CONTAINER_PATH' openclaw ptah skill install <owner>/<name>"
+        echo "    docker compose exec -w '$IN_CONTAINER_PATH' openclaw ptah agent apply <name>"
+        echo "  (NOTE: 'agent packs install' and 'harness design-agents' are Pro-gated.)"
         echo
     else
         echo "WARN: openclaw container not running — skipping Ptah harness scaffold."

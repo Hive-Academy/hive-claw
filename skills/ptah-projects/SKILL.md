@@ -59,31 +59,55 @@ user and they can redirect:
    the human-readable summary (use `--human` if needed). Ask for approval
    before executing.
 6. On approval: **`ptah new-project approve-plan`** to persist.
-7. Install the skills, MCP servers, and agent packs that match the project's
-   needs — call these explicitly so the user sees what's being added:
-   - `ptah harness install-skill <name>` — e.g. `github`, `mcp-server`
-   - `ptah plugin enable <mcp-server>` — e.g. `filesystem`, `discord`
-   - `ptah agent packs install <pack>` — e.g. `senior-architect`,
-     `technical-content-writer`, `frontend-developer`
+7. Install skills and agents using the **real** (free-tier) command surface:
+   - **Skills** — `ptah skill install <source>` where `<source>` is a
+     `<owner>/<name>` from the skills.sh registry. Use
+     `ptah skill recommended` first to let Ptah auto-detect what fits, or
+     `ptah skill search <query>` to explore.
+   - **Agents** — `ptah agent apply <name>` writes a built-in agent
+     template into `.ptah/agents/<name>.md`. Use `ptah agent list` to see
+     what's already applied. (`ptah agent packs install <pack>` exists
+     but is **Pro-gated** — avoid it on the free tier.)
+   - **MCP servers** — Ptah does not expose a `plugin enable` command.
+     MCP server definitions live as JSON files inside `.ptah/agents/mcp-*.json`
+     and are picked up by the harness. For free-tier projects, write these
+     by hand (or copy from another project) — examples: `mcp-discord.json`,
+     `mcp-filesystem.json`. Reference upstream MCP servers via their
+     `command` + `args` + `env` keys.
 8. Drop the OpenClaw overlay on top so HEARTBEAT/persona/per-project skills
    work: `bin/openclaw-init-project.sh <name>`. The `--with-ptah` flag
    chains steps 1–2 + 8 in one shot; finish 3–7 manually or via a
    follow-up agent turn.
 
-### Picking skills / MCP servers / agent packs
+### Picking skills / agents — concrete values that work today
 
-Match to the project type — examples for common stacks:
+The skills.sh registry uses `<owner>/<name>` slugs. These ones are known to
+exist (verified via `ptah skill search`):
 
-| Project type           | Skills                       | MCP servers          | Agent packs                                        |
-|------------------------|------------------------------|----------------------|----------------------------------------------------|
-| Discord/social bot     | `github`, `mcp-server`       | `filesystem`, `discord` | `backend-developer`, `senior-tester`            |
-| Angular SaaS frontend  | `github`, `angular-frontend-patterns` | `filesystem`, `playwright` | `frontend-developer`, `ui-ux-designer`   |
-| NestJS API             | `github`, `ddd-architecture` | `filesystem`, `postgres` | `backend-developer`, `software-architect`      |
-| Marketing/content      | `github`, `technical-content-writer` | `filesystem`, `web-search` | `technical-content-writer`              |
-| CLI tool / lib         | `github`                     | `filesystem`         | `backend-developer`, `senior-tester`               |
+| Project type           | Skills (`ptah skill install …`)                         | Agents (`ptah agent apply …`)                  | MCP servers (write `.ptah/agents/mcp-*.json`)      |
+|------------------------|---------------------------------------------------------|-------------------------------------------------|----------------------------------------------------|
+| Discord/social bot     | `steipete/clawdis`, `kostja94/marketing-skills`, `resciencelab/opc-skills`, `openclaw/skills` | `backend-developer`, `senior-tester`, `content-publisher` | `mcp-discord.json`, `mcp-filesystem.json`     |
+| Angular frontend       | `openclaw/skills`                                       | `frontend-developer`, `ui-ux-designer`          | `mcp-filesystem.json`, `mcp-playwright.json`       |
+| NestJS API             | `openclaw/skills`                                       | `backend-developer`, `software-architect`       | `mcp-filesystem.json`, `mcp-postgres.json`         |
+| CLI tool / lib         | `openclaw/skills`                                       | `backend-developer`, `senior-tester`            | `mcp-filesystem.json`                              |
 
-If `ptah harness install-skill <x>` errors with "skill not found", run
-`ptah skill install <x>` first (the registry-fetch variant) then re-try.
+Always start with `ptah skill recommended` — it inspects `package.json`,
+file extensions, and frameworks in the project to suggest skills the user
+hasn't asked for. Show the recommendations to the user before installing.
+
+### Pro-gated features — avoid on the free tier
+
+These commands return `{"ptah_code":"internal_failure","message":"Pro
+subscription required..."}` and should NOT be invoked unless the user has
+explicitly purchased a Pro subscription:
+
+- `ptah harness design-agents` (use `ptah agent apply` of built-in templates instead)
+- `ptah agent packs install <pack>` (use `ptah agent apply <name>` instead)
+- `ptah harness generate-document --kind prd|spec` (write `PLAN.md` directly)
+
+Detect the gate by the `internal_failure` ptah_code with the "Pro
+subscription required" message and switch to the free-tier alternative
+without prompting the user — they already know.
 
 ## GitHub auth
 
