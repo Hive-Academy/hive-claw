@@ -36,22 +36,54 @@ ptah harness scan
 Emits `workspace_context`, `available_agents`, `available_skills` as JSON. Parse
 and summarize for the user — don't dump raw JSON unless asked.
 
-## Scaffold a new project (wizard flow)
+## Scaffold a new project (full Ptah harness + wizard flow)
 
-The wizard is multi-step. Each step is a separate CLI call so you can show
-progress and let the user redirect:
+You are NOT scaffolding a bare folder — you are using `ptah-cli` to generate
+a complete Ptah harness (subagents, skills, MCP servers) just like the
+desktop app would, sharing the **same `~/.ptah/settings.json`** the user's
+host already has set up.
 
-1. **`ptah new-project select-type`** — fetches the discovery questions for
-   project archetypes.
-2. Present the questions to the user (use `AskUserQuestion`-style structured
-   choices, not bullet lists).
-3. Write the answers to a JSON file, then **`ptah new-project submit-answers
-   --file answers.json`**.
-4. **`ptah new-project get-plan`** — load the generated plan. Show it to the
-   user and ask for approval before executing.
-5. On approval: **`ptah new-project approve-plan`** to persist.
-6. Drop the OpenClaw overlay on top so HEARTBEAT/persona work:
-   `bin/openclaw-init-project.sh <name>` (or use `--with-ptah` to chain both).
+Run these IN ORDER. Each is a separate CLI call so progress streams to the
+user and they can redirect:
+
+1. **`ptah harness init --dir .`** — creates `<project>/.ptah/` with the
+   default subagent set, skills registry, and MCP server slots. Idempotent.
+2. **`ptah new-project select-type`** — fetches discovery questions
+   (project archetype, language, framework, deploy target).
+3. Present the questions to the user via `AskUserQuestion` structured
+   options (NOT bullet lists). One question per call when there are
+   meaningful trade-offs.
+4. Write the user's answers to `answers.json`, then
+   **`ptah new-project submit-answers --file answers.json`**.
+5. **`ptah new-project get-plan`** — load the generated plan. Show the user
+   the human-readable summary (use `--human` if needed). Ask for approval
+   before executing.
+6. On approval: **`ptah new-project approve-plan`** to persist.
+7. Install the skills, MCP servers, and agent packs that match the project's
+   needs — call these explicitly so the user sees what's being added:
+   - `ptah harness install-skill <name>` — e.g. `github`, `mcp-server`
+   - `ptah plugin enable <mcp-server>` — e.g. `filesystem`, `discord`
+   - `ptah agent packs install <pack>` — e.g. `senior-architect`,
+     `technical-content-writer`, `frontend-developer`
+8. Drop the OpenClaw overlay on top so HEARTBEAT/persona/per-project skills
+   work: `bin/openclaw-init-project.sh <name>`. The `--with-ptah` flag
+   chains steps 1–2 + 8 in one shot; finish 3–7 manually or via a
+   follow-up agent turn.
+
+### Picking skills / MCP servers / agent packs
+
+Match to the project type — examples for common stacks:
+
+| Project type           | Skills                       | MCP servers          | Agent packs                                        |
+|------------------------|------------------------------|----------------------|----------------------------------------------------|
+| Discord/social bot     | `github`, `mcp-server`       | `filesystem`, `discord` | `backend-developer`, `senior-tester`            |
+| Angular SaaS frontend  | `github`, `angular-frontend-patterns` | `filesystem`, `playwright` | `frontend-developer`, `ui-ux-designer`   |
+| NestJS API             | `github`, `ddd-architecture` | `filesystem`, `postgres` | `backend-developer`, `software-architect`      |
+| Marketing/content      | `github`, `technical-content-writer` | `filesystem`, `web-search` | `technical-content-writer`              |
+| CLI tool / lib         | `github`                     | `filesystem`         | `backend-developer`, `senior-tester`               |
+
+If `ptah harness install-skill <x>` errors with "skill not found", run
+`ptah skill install <x>` first (the registry-fetch variant) then re-try.
 
 ## GitHub auth
 

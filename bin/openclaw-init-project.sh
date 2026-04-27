@@ -53,24 +53,37 @@ if [ ! -d "$PROJ_DIR" ]; then
     fi
 fi
 
-# --- Optional: run Ptah new-project wizard before laying down .openclaw/ -----
+# --- Optional: scaffold a full Ptah harness before laying down .openclaw/ ----
+# This is the agent's path: ptah-cli generates the harness (subagents, skills,
+# MCP servers) inside the project directory using the SAME ~/.ptah config the
+# host's desktop app uses.
 if [ "$WITH_PTAH" -eq 1 ]; then
     if docker compose ps --status running --services 2>/dev/null | grep -q '^openclaw$'; then
         IN_CONTAINER_PATH="/home/agent/.openclaw/workspace/$(basename "$PROJ_DIR")"
-        echo "→ Running Ptah new-project wizard in the container at $IN_CONTAINER_PATH"
-        echo "  (Ptah will prompt for project type / stack / options.)"
+
+        echo "→ Step 1/3: ptah harness init  (creates .ptah/ with subagents + skills)"
+        docker compose exec -w "$IN_CONTAINER_PATH" openclaw \
+            ptah harness init --dir . || true
+
+        echo "→ Step 2/3: ptah new-project select-type  (stack discovery wizard)"
+        echo "  (Anubis or you will answer the prompts; output written to answers.json)"
         docker compose exec -w "$IN_CONTAINER_PATH" openclaw \
             ptah new-project select-type --human || true
+
         echo
-        echo "  Next manual steps inside the container:"
+        echo "  Step 3/3 — finish the wizard from inside the container:"
         echo "    docker compose exec -w '$IN_CONTAINER_PATH' openclaw ptah new-project submit-answers --file answers.json"
         echo "    docker compose exec -w '$IN_CONTAINER_PATH' openclaw ptah new-project get-plan"
         echo "    docker compose exec -w '$IN_CONTAINER_PATH' openclaw ptah new-project approve-plan"
         echo
+        echo "  After the plan is approved, install skills & MCP servers as needed:"
+        echo "    docker compose exec -w '$IN_CONTAINER_PATH' openclaw ptah harness install-skill <name>"
+        echo "    docker compose exec -w '$IN_CONTAINER_PATH' openclaw ptah plugin enable <mcp-server>"
+        echo "    docker compose exec -w '$IN_CONTAINER_PATH' openclaw ptah agent packs install <pack>"
+        echo
     else
-        echo "WARN: openclaw container not running — skipping Ptah wizard."
-        echo "      Start the stack (docker compose up -d) and re-run with --with-ptah,"
-        echo "      or run 'ptah new-project select-type' manually."
+        echo "WARN: openclaw container not running — skipping Ptah harness scaffold."
+        echo "      Start the stack (docker compose up -d) and re-run with --with-ptah."
     fi
 fi
 

@@ -193,7 +193,9 @@ After verifying the bot works, you'll likely want to:
 
 ## Step 7 — Ptah CLI (project orchestration + GitHub auth)
 
-The container ships with [`@hive-academy/ptah-cli`](https://www.npmjs.com/package/@hive-academy/ptah-cli) preinstalled. Its config dir `~/.ptah` is **bind-mounted from the host**, so a single auth login covers both the agent inside the container and your shell on the host.
+The container ships with [`@hive-academy/ptah-cli`](https://www.npmjs.com/package/@hive-academy/ptah-cli) preinstalled. Its config dir `~/.ptah` is **bind-mounted from the host**, so the agent uses the **exact same Ptah configuration as your desktop app** — same auth, same provider keys, same installed skills, same registered MCP servers, same agent packs. There is no separate setup. If `ptah` works on your desktop, Anubis can already use it.
+
+> **Path translation caveat.** Workspace entries inside `~/.ptah/settings.json` may reference host-absolute paths like `/home/you/projects/foo`; inside the container that same folder is `/home/agent/.openclaw/workspace/foo`. The agent's first-boot bootstrap registers its own workspace under the container path, so both your desktop app and Anubis see the same projects via different path entries in one shared config.
 
 ### One-time GitHub auth
 
@@ -226,26 +228,33 @@ docker compose exec openclaw ptah harness scan
 
 This emits JSON describing every project under `$WORKSPACE_DIR` plus the agents and skills available there. The bot will use this automatically when you ask "what projects do I have?".
 
-### Scaffold a new project (Ptah wizard + OpenClaw overlay in one shot)
+### Scaffold a new project (full Ptah harness + OpenClaw overlay)
 
 ```bash
 ~/Desktop/fixing-openclaw/bin/openclaw-init-project.sh --with-ptah myapp
 ```
 
-This:
-1. Runs `ptah new-project select-type` inside the container (interactive).
-2. Lays down the `.openclaw/` overlay (persona, HEARTBEAT, project skills).
+This drives `ptah-cli` to generate a real Ptah harness — subagents, skills, MCP servers — exactly as your desktop app would, then layers OpenClaw's per-project files on top. Three stages:
 
-After the wizard prompts, finish the plan with:
+1. **`ptah harness init`** — creates `<project>/.ptah/` with default subagents and skill slots.
+2. **`ptah new-project select-type`** — interactive stack-discovery wizard.
+3. `.openclaw/` overlay — persona override, HEARTBEAT, project-only skills.
+
+Finish stages 4-6 from inside the container (or just ask Anubis to do them):
 
 ```bash
-docker compose exec -w /home/agent/.openclaw/workspace/myapp openclaw \
-    ptah new-project submit-answers --file answers.json
-docker compose exec -w /home/agent/.openclaw/workspace/myapp openclaw \
-    ptah new-project get-plan
-docker compose exec -w /home/agent/.openclaw/workspace/myapp openclaw \
-    ptah new-project approve-plan
+WS=/home/agent/.openclaw/workspace/myapp
+docker compose exec -w $WS openclaw ptah new-project submit-answers --file answers.json
+docker compose exec -w $WS openclaw ptah new-project get-plan
+docker compose exec -w $WS openclaw ptah new-project approve-plan
+
+# Install whichever skills / MCP servers / agent packs match the project:
+docker compose exec -w $WS openclaw ptah harness install-skill github
+docker compose exec -w $WS openclaw ptah plugin enable filesystem
+docker compose exec -w $WS openclaw ptah agent packs install backend-developer
 ```
+
+The `skills/ptah-projects/SKILL.md` skill teaches Anubis a stack→skills/MCP/packs lookup table so it picks the right ones without you naming them.
 
 > **Security note:** `~/.ptah/settings.json` holds your auth tokens. The bind mount means a token leak on either side compromises both. Don't commit that file or paste its contents anywhere.
 
