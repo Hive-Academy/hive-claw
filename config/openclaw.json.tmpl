@@ -1,0 +1,72 @@
+{
+  "agents": {
+    "defaults": {
+      "model": { "primary": "ollama/${OLLAMA_MODEL}" },
+      "timeoutSeconds": 600
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "ollama": {
+        "baseUrl": "${OLLAMA_BASE_URL}",
+        "apiKey": "not-needed",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "${OLLAMA_MODEL}",
+            "name": "ollama/${OLLAMA_MODEL}",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 131072,
+            "maxTokens": 4096
+          }
+        ]
+      }
+    }
+  },
+  "channels": {
+    "defaults": {},
+    "discord": {
+      "enabled": true,
+      "accounts": {
+        "default": {
+          "token": "${DISCORD_BOT_TOKEN}",
+          "enabled": true,
+          "healthMonitor": { "enabled": false }
+        }
+      },
+      "groupPolicy": "allowlist",
+      "guilds": {
+        "${DISCORD_GUILD_ID}": { "requireMention": true }
+      }
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "bind": "lan",
+    "auth": {
+      "mode": "token",
+      "token": "${OPENCLAW_AUTH_TOKEN}"
+    },
+    "controlUi": {
+      "allowInsecureAuth": true,
+      "allowedOrigins": ["http://127.0.0.1:18789", "http://localhost:18789"]
+    },
+    "trustedProxies": ["127.0.0.1", "::1"]
+  },
+  "plugins": {
+    "entries": {
+      "bonjour": { "enabled": false }
+    }
+  },
+  "commands": {
+    "useAccessGroups": false
+  },
+  "update": { "checkOnStart": false },
+  "meta": {
+    "lastTouchedVersion": "${OPENCLAW_VERSION}",
+    "lastTouchedAt": "${OPENCLAW_NOW}"
+  }
+}

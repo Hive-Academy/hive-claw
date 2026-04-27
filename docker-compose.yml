@@ -1,0 +1,27 @@
+services:
+  openclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: openclaw-local:latest
+    container_name: openclaw
+    restart: unless-stopped
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:18789:18789"
+    volumes:
+      - ${WORKSPACE_DIR:-${HOME}/projects}:/home/agent/.openclaw/workspace:rw
+      - ${SKILLS_DIR:-./skills}:/home/agent/.openclaw/skills:rw
+      - openclaw-state:/home/agent/.openclaw
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18789/ | grep -qE '^(200|301|302|401|403|404)$' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+
+volumes:
+  openclaw-state:

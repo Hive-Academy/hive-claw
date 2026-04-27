@@ -1,0 +1,9 @@
+.env
+config/openclaw.json
+data/
+*.log
+log.md
+.DS_Store
+node_modules/
+.claude/
+.ptah/
