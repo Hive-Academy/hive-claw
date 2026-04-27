@@ -124,6 +124,76 @@ PTAH_CONFIG_DIR=${PTAH_CONFIG_DIR:-$HOME/.ptah}
 mkdir -p "$PTAH_CONFIG_DIR"
 ok "ptah config dir: $PTAH_CONFIG_DIR (shared with container)"
 
+# ---------- gh CLI auth (so the agent inherits GitHub access) ----------
+# Modern gh stores OAuth tokens in the OS keyring by default, which the
+# container can't reach. We detect that and offer to re-login with file
+# storage so the bind mount actually carries the token across.
+if ! grep -qE '^GH_CONFIG_DIR=' .env; then
+    echo 'GH_CONFIG_DIR=${HOME}/.config/gh' >> .env
+fi
+if ! grep -qE '^GH_AUTH_MODE=' .env; then
+    echo 'GH_AUTH_MODE=file' >> .env
+fi
+GH_CONFIG_DIR=$(grep -E '^GH_CONFIG_DIR=' .env | tail -1 | cut -d= -f2- | sed "s|\${HOME}|$HOME|;s|^~|$HOME|")
+GH_CONFIG_DIR=${GH_CONFIG_DIR:-$HOME/.config/gh}
+GH_AUTH_MODE=$(grep -E '^GH_AUTH_MODE=' .env | tail -1 | cut -d= -f2-)
+GH_AUTH_MODE=${GH_AUTH_MODE:-file}
+mkdir -p "$GH_CONFIG_DIR"
+
+if ! command -v gh >/dev/null 2>&1; then
+    warn "gh CLI not installed on host — skipping GitHub auth"
+    info "install: https://cli.github.com/  (then re-run setup.sh)"
+elif [ "$GH_AUTH_MODE" = "skip" ]; then
+    info "GH_AUTH_MODE=skip — leaving gh auth alone"
+elif [ "$GH_AUTH_MODE" = "token" ]; then
+    if grep -qE '^GITHUB_TOKEN=.+$' .env; then
+        ok "GH_AUTH_MODE=token — agent will use GITHUB_TOKEN from .env"
+    else
+        warn "GH_AUTH_MODE=token but GITHUB_TOKEN is empty in .env"
+        info "either fill it in, or switch to GH_AUTH_MODE=file"
+    fi
+else
+    # GH_AUTH_MODE=file (or anything else default-y) — make sure the token
+    # actually lives in hosts.yml, not in the keyring.
+    HOSTS_YML="$GH_CONFIG_DIR/hosts.yml"
+    if [ -f "$HOSTS_YML" ] && grep -qE '^[[:space:]]+oauth_token:' "$HOSTS_YML"; then
+        ok "gh auth: token already in $HOSTS_YML (agent can read it)"
+    elif gh auth status >/dev/null 2>&1; then
+        warn "gh is logged in but token is in the OS keyring — agent can't read it"
+        if [ -t 0 ]; then
+            read -r -p "  Re-login with file storage now? (one browser OAuth) [Y/n] " ans
+            case "${ans:-Y}" in
+                [Yy]*)
+                    gh auth logout -h github.com >/dev/null 2>&1 || true
+                    if gh auth login --hostname github.com --git-protocol https --web --insecure-storage; then
+                        ok "gh re-logged in with file storage — $HOSTS_YML now has oauth_token"
+                    else
+                        warn "gh login failed — falling back to GITHUB_TOKEN if set"
+                    fi
+                    ;;
+                *)  info "skipped — set GITHUB_TOKEN in .env, or re-run: gh auth login --insecure-storage" ;;
+            esac
+        else
+            info "non-interactive shell — skipping prompt; run later: gh auth login --insecure-storage"
+        fi
+    else
+        info "gh not authenticated yet"
+        if [ -t 0 ]; then
+            read -r -p "  Run 'gh auth login --insecure-storage' now? [Y/n] " ans
+            case "${ans:-Y}" in
+                [Yy]*)
+                    if gh auth login --hostname github.com --git-protocol https --web --insecure-storage; then
+                        ok "gh authenticated — agent will inherit it via bind mount"
+                    else
+                        warn "gh login failed — set GITHUB_TOKEN in .env as a fallback"
+                    fi
+                    ;;
+                *)  info "skipped — agent will need GITHUB_TOKEN in .env to use GitHub" ;;
+            esac
+        fi
+    fi
+fi
+
 bold "[6/7] Build image"
 docker compose build
 ok "image built: openclaw-local:latest"

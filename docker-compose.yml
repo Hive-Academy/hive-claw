@@ -8,6 +8,12 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      # .env's GH_CONFIG_DIR / PTAH_CONFIG_DIR hold HOST paths (used as bind-mount
+      # sources by docker compose). Inside the container those paths don't exist —
+      # override with container-internal paths so `gh` and `ptah` find their config.
+      GH_CONFIG_DIR: /home/agent/.config/gh
+      PTAH_CONFIG_DIR: /home/agent/.ptah
     extra_hosts:
       - "host.docker.internal:host-gateway"
     security_opt:
@@ -23,6 +29,9 @@ services:
       # Share Ptah CLI config (auth, providers, settings) with the host so a single
       # `ptah auth login` on either side works for both. See docs/SETUP.md > Ptah.
       - ${PTAH_CONFIG_DIR:-${HOME}/.ptah}:/home/agent/.ptah:rw
+      # Share `gh` CLI auth with the host so a single `gh auth login` on the
+      # host gives the agent access to private repos / PR creation / etc.
+      - ${GH_CONFIG_DIR:-${HOME}/.config/gh}:/home/agent/.config/gh:rw
     healthcheck:
       test: ["CMD-SHELL", "curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18789/ | grep -qE '^(200|301|302|401|403|404)$' || exit 1"]
       interval: 30s

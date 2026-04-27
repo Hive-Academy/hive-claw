@@ -165,26 +165,30 @@ if command -v ptah >/dev/null 2>&1; then
             && echo "  ✓ workspace registered: $WS_NAME" \
             || echo "  i workspace add skipped (already present or unsupported)"
 
-        # Seed GitHub token if provided AND not already configured.
-        if [ -n "$GITHUB_TOKEN" ]; then
-            if ! ptah auth test --provider github >/dev/null 2>&1; then
-                if ptah provider set-key --provider github --key "$GITHUB_TOKEN" >/dev/null 2>&1; then
-                    echo "  ✓ GitHub token seeded into Ptah"
-                else
-                    echo "  ! could not seed GitHub token via 'ptah provider set-key'"
-                    echo "    Run 'ptah auth login github' inside the container or on the host."
-                fi
-            else
-                echo "  i existing GitHub auth detected — leaving it alone"
-            fi
-        fi
-
         touch "$PTAH_STAMP"
     else
         echo "[entrypoint] Ptah CLI: already bootstrapped (delete ${PTAH_STAMP} to re-run)"
     fi
 else
     echo "[entrypoint] WARNING: ptah CLI missing from image — rebuild with current Dockerfile"
+fi
+
+# ---------- gh CLI auth probe ----------
+# ~/.config/gh is bind-mounted from the host (see docker-compose.yml).
+# A single `gh auth login` on the host authenticates the agent too.
+# IMPORTANT: GH_CONFIG_DIR / PTAH_CONFIG_DIR carry HOST paths from .env which
+# don't exist inside the container — unset them so gh falls back to $HOME/.config/gh.
+unset GH_CONFIG_DIR PTAH_CONFIG_DIR
+if command -v gh >/dev/null 2>&1; then
+    if gh auth status >/dev/null 2>&1; then
+        GH_USER="$(gh api user -q .login 2>/dev/null || echo unknown)"
+        echo "[entrypoint] gh CLI: authenticated as ${GH_USER}"
+    elif [ -n "${GITHUB_TOKEN:-}" ]; then
+        echo "[entrypoint] gh CLI: using GITHUB_TOKEN from .env"
+        export GH_TOKEN="$GITHUB_TOKEN"
+    else
+        echo "[entrypoint] gh CLI: NOT authenticated — run 'gh auth login' on the host (preferred) or set GITHUB_TOKEN in .env"
+    fi
 fi
 
 echo "[entrypoint] Dashboard:  http://127.0.0.1:18789/?token=${OPENCLAW_AUTH_TOKEN}"

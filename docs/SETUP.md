@@ -199,25 +199,21 @@ The container ships with [`@hive-academy/ptah-cli`](https://www.npmjs.com/packag
 
 ### One-time GitHub auth
 
-Pick whichever side is convenient — both write the same `~/.ptah/settings.json`:
+`./setup.sh` handles this for you. It detects three states and acts accordingly, driven by `GH_AUTH_MODE` in `.env`:
+
+| `GH_AUTH_MODE` | What setup.sh does |
+|---|---|
+| `file` (default) | If `gh` already logged in via OS keyring, prompts to re-login with `--insecure-storage` so the token writes to `~/.config/gh/hosts.yml`. The container's bind mount then picks it up. If not logged in at all, offers to run `gh auth login --insecure-storage` interactively. |
+| `token` | Skip OAuth — agent uses `GITHUB_TOKEN` from `.env` (set a PAT from <https://github.com/settings/tokens>). |
+| `skip` | Leaves gh auth alone — you'll handle it yourself. |
+
+**Why `--insecure-storage`?** Modern `gh` stores OAuth tokens in your OS keyring (GNOME Keyring / libsecret) by default. The container can't reach the keyring, so the bind mount of `~/.config/gh/` would be useless. `--insecure-storage` writes the token into `hosts.yml` instead — same `chmod 600` security posture as `~/.ssh/id_rsa`.
+
+Verify after setup:
 
 ```bash
-# Option A — interactive OAuth on the host (recommended):
-ptah auth login github
-
-# Option B — inside the container:
-docker compose exec openclaw ptah auth login github
-
-# Option C — drop a token into .env and let entrypoint.sh seed it on first boot:
-# (only seeds if no existing auth is detected — never clobbers an interactive login)
-echo 'GITHUB_TOKEN=ghp_xxx' >> .env
-docker compose up -d --force-recreate
-```
-
-Verify with:
-
-```bash
-docker compose exec openclaw ptah auth test --provider github
+docker compose exec openclaw gh auth status      # should print your username
+docker compose exec openclaw gh repo list --limit 3   # smoke test
 ```
 
 ### Discover existing projects
