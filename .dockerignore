@@ -1,0 +1,21 @@
+# Reduce build context — only Dockerfile/entrypoint/template are needed at build time.
+.git/
+.gitignore
+.env
+.env.example
+README.md
+LICENSE
+docs/
+skills/
+commands/
+templates/
+bin/
+setup.sh
+docker-compose.yml
+log.md
+*.md
+.vscode/
+.claude/
+.ptah/
+.mcp.json
+node_modules/
