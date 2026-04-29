@@ -192,5 +192,13 @@ if command -v gh >/dev/null 2>&1; then
 fi
 
 echo "[entrypoint] Dashboard:  http://127.0.0.1:18789/?token=${OPENCLAW_AUTH_TOKEN}"
+
+# ---------- openclaw-control: daemon + multi-agent bot bridge ----------
+# Boots in background so all agents share the same workspace and shared-memory tree.
+# Disable with OPENCLAW_CONTROL_DISABLE=1.
+if [ "${OPENCLAW_CONTROL_DISABLE:-0}" != "1" ] && [ -x /usr/local/bin/entrypoint-control.sh ]; then
+    /usr/local/bin/entrypoint-control.sh || echo "[entrypoint] WARNING: openclaw-control launcher returned non-zero"
+fi
+
 echo "[entrypoint] Starting openclaw gateway on :18789 (bind=lan, log=debug)"
 exec openclaw --log-level debug gateway --port 18789 --bind lan --verbose

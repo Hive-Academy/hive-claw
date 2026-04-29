@@ -14,30 +14,72 @@ services:
       # override with container-internal paths so `gh` and `ptah` find their config.
       GH_CONFIG_DIR: /home/agent/.config/gh
       PTAH_CONFIG_DIR: /home/agent/.ptah
+      # openclaw-control daemon — paths inside the container.
+      OPENCLAW_HOST: 0.0.0.0
+      OPENCLAW_PORT: 7878
+      OPENCLAW_PROJECT_ROOTS: /home/agent/.openclaw/workspace
+      OPENCLAW_SHARED_SPECS: /home/agent/.claude/shared-specs
+      OPENCLAW_LOCAL_MEMORY: /home/agent/.claude/local-memory
+      OPENCLAW_DASHBOARD_DIR: /opt/openclaw-control/dashboard/browser
+      REDIS_URL: redis://openclaw-redis:6379
+      CLAUDE_BIN: claude
     extra_hosts:
       - "host.docker.internal:host-gateway"
     security_opt:
       - no-new-privileges:true
-    mem_limit: 2g
-    pids_limit: 512
+    mem_limit: 3g
+    pids_limit: 768
     ports:
+      # Existing openclaw gateway
       - "127.0.0.1:18789:18789"
+      # openclaw-control daemon (REST + SSE + dashboard) — bound to localhost on the host.
+      # Set OPENCLAW_CONTROL_BIND=0.0.0.0 in .env to expose to LAN (use Caddy/TLS for that).
+      - "${OPENCLAW_CONTROL_BIND:-127.0.0.1}:7878:7878"
+    depends_on:
+      openclaw-redis:
+        condition: service_healthy
     volumes:
       - ${WORKSPACE_DIR:-${HOME}/projects}:/home/agent/.openclaw/workspace:rw
       - ${SKILLS_DIR:-./skills}:/home/agent/.openclaw/skills:rw
       - openclaw-state:/home/agent/.openclaw
       # Share Ptah CLI config (auth, providers, settings) with the host so a single
-      # `ptah auth login` on either side works for both. See docs/SETUP.md > Ptah.
+      # `ptah auth login` on either side works for both.
       - ${PTAH_CONFIG_DIR:-${HOME}/.ptah}:/home/agent/.ptah:rw
       # Share `gh` CLI auth with the host so a single `gh auth login` on the
       # host gives the agent access to private repos / PR creation / etc.
       - ${GH_CONFIG_DIR:-${HOME}/.config/gh}:/home/agent/.config/gh:rw
+      # ---- openclaw-control mounts ----
+      # Shared-specs git clone: specs/<project>/TASK_*/ + memory/{agents,users,threads,projects}/.
+      # The daemon clones OPENCLAW_SPECS_REPO_URL into this dir on first boot, then keeps it
+      # synced. Persisted on the host so the clone survives container restarts.
+      - ${OPENCLAW_SHARED_SPECS_DIR:-${HOME}/.claude/shared-specs}:/home/agent/.claude/shared-specs:rw
+      # Local memory: NEVER synced. Holds private agent personas (system prompts) and
+      # any per-machine secrets. Each machine has its own — Anubis's persona never
+      # leaves the leader machine, Amun's never leaves Amun's host.
+      - ${OPENCLAW_LOCAL_MEMORY_DIR:-${HOME}/.claude/local-memory}:/home/agent/.claude/local-memory:rw
+      # Live Claude Code session JSONL files from the host. Read-only — bots tail these
+      # to surface "what is the user doing right now" in the live-sessions feed.
+      - ${HOME}/.claude/projects:/home/agent/.claude/projects:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18789/ | grep -qE '^(200|301|302|401|403|404)$' || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 5
       start_period: 120s
+
+  # Redis backs the cross-agent handoff bus (agent:<id>:inbox channels).
+  # Tiny, in-memory only, internal network only — never published to host.
+  openclaw-redis:
+    image: redis:7-alpine
+    container_name: openclaw-redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
 volumes:
   openclaw-state:

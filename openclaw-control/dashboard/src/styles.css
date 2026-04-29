@@ -1,0 +1,39 @@
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --panel-2: #1f242c;
+  --border: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --accent: #d2a86a;
+  --accent-2: #5865f2;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --err: #f85149;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; height: 100%; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+button { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); padding: .4rem .8rem; border-radius: 6px; cursor: pointer; font-size: 13px; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent-2); border-color: var(--accent-2); }
+button.danger { background: transparent; border-color: var(--err); color: var(--err); }
+input, textarea, select { background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: .4rem .6rem; border-radius: 6px; font: inherit; width: 100%; }
+textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; min-height: 220px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+.row { display: flex; gap: 1rem; }
+.col { display: flex; flex-direction: column; gap: .5rem; }
+.muted { color: var(--muted); font-size: 12px; }
+.tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; border: 1px solid var(--border); }
+.tag.phase-CONTEXT { color: #8b949e; }
+.tag.phase-DESCRIPTION { color: #58a6ff; border-color: #1f6feb44; }
+.tag.phase-PLAN { color: #79c0ff; border-color: #1f6feb44; }
+.tag.phase-PENDING { color: var(--warn); border-color: #d2992244; }
+.tag.phase-IN_PROGRESS { color: var(--accent); border-color: #d2a86a44; }
+.tag.phase-IMPLEMENTED { color: #d2a8ff; border-color: #8957e544; }
+.tag.phase-COMPLETE, .tag.phase-QA_DONE, .tag.phase-DONE { color: var(--ok); border-color: #3fb95044; }
+.tag.phase-UNKNOWN { color: var(--err); border-color: var(--err); }
+.checkpoint-banner { background: #d2992222; border: 1px solid var(--warn); padding: .75rem; border-radius: 6px; margin-bottom: 1rem; }
+pre { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 1rem; overflow: auto; font-size: 12px; }
+.kbd { background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-family: ui-monospace, monospace; font-size: 11px; }

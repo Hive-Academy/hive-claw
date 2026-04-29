@@ -1,0 +1,23 @@
+{
+  "name": "openclaw-control-bot-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "gray-matter": "^4.0.3",
+    "ioredis": "^5.4.1",
+    "undici": "^6.20.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2"
+  }
+}
