@@ -25,9 +25,15 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/env node {{REPO_DIR}}/scripts/ptah-bridge.mjs
+ExecStart={{NODE_BIN}} {{REPO_DIR}}/scripts/ptah-bridge.mjs
 Environment="OPENCLAW_INTERNAL_TOKEN={{TOKEN}}"
-Environment="PTAH_BRIDGE_HOST=127.0.0.1"
+Environment="PATH={{NODE_DIR}}:/usr/local/bin:/usr/bin:/bin"
+Environment="PTAH_BIN={{PTAH_BIN}}"
+# 0.0.0.0 so the openclaw container can reach this via host.docker.internal:8744.
+# Auth is gated by Authorization: Bearer ${OPENCLAW_INTERNAL_TOKEN}; the token is
+# 64 hex chars and lives only in your .env. If you run on a multi-tenant host,
+# add a firewall rule restricting :8744 to the docker bridge (e.g. 172.17.0.0/16).
+Environment="PTAH_BRIDGE_HOST=0.0.0.0"
 Environment="PTAH_BRIDGE_PORT=8744"
 Restart=on-failure
 RestartSec=3s

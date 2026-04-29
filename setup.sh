@@ -12,7 +12,7 @@ info() { printf '  \033[36mi\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 fail() { printf '  \033[31m✗\033[0m %s\n' "$*"; exit 1; }
 
-bold "[1/7] Host preflight"
+bold "[1/13] Host preflight"
 command -v docker >/dev/null || fail "docker not found — install Docker Engine first"
 ok "docker $(docker --version | awk '{print $3}' | tr -d ,)"
 docker compose version >/dev/null 2>&1 || fail "docker compose plugin not available"
@@ -29,7 +29,7 @@ else
     exit 1
 fi
 
-bold "[2/7] Ollama systemd override (so the container can reach it)"
+bold "[2/13] Ollama systemd override (so the container can reach it)"
 if curl -fsS --max-time 3 http://127.0.0.1:11434/api/version >/dev/null; then
     ok "ollama responding on :11434"
 else
@@ -55,7 +55,7 @@ EOF
     fi
 fi
 
-bold "[3/7] .env"
+bold "[3/13] .env"
 if [ ! -f .env ]; then
     cp .env.example .env
     chmod 600 .env
@@ -95,7 +95,7 @@ fi
 WORKSPACE_DIR=$(grep -E '^WORKSPACE_DIR=' .env | tail -1 | cut -d= -f2- | sed "s|\${HOME}|$HOME|;s|^~|$HOME|")
 WORKSPACE_DIR=${WORKSPACE_DIR:-$HOME/projects}
 
-bold "[4/7] Workspace folder"
+bold "[4/13] Workspace folder"
 mkdir -p "$WORKSPACE_DIR"
 ok "workspace ready: $WORKSPACE_DIR"
 
@@ -109,7 +109,7 @@ else
     ok "workspace already populated — leaving existing files alone"
 fi
 
-bold "[5/7] Skills directory"
+bold "[5/13] Skills directory"
 mkdir -p skills commands
 ok "skills/ + commands/ present"
 
@@ -194,7 +194,7 @@ else
     fi
 fi
 
-bold "[6/12] openclaw-control: leader/follower mode"
+bold "[6/13] openclaw-control: leader/follower mode"
 # Exactly one machine in the fleet should be OPENCLAW_LEADER=1.
 # We don't change an already-set value; we only prompt when it's missing.
 if ! grep -qE '^OPENCLAW_LEADER=' .env; then
@@ -212,7 +212,7 @@ else
     ok "OPENCLAW_LEADER already set: $(grep -E '^OPENCLAW_LEADER=' .env | cut -d= -f2-)"
 fi
 
-bold "[7/12] openclaw-control: agent ownership"
+bold "[7/13] openclaw-control: agent ownership"
 # CSV of agent ids this machine owns (matches local-memory/agents/<id>/ + DISCORD_TOKEN_<ID>).
 LOCAL_AGENT_IDS_VALUE=$(grep -E '^OPENCLAW_LOCAL_AGENT_IDS=' .env | tail -1 | cut -d= -f2- || true)
 if [ -z "${LOCAL_AGENT_IDS_VALUE:-}" ]; then
@@ -235,7 +235,7 @@ else
     ok "OPENCLAW_LOCAL_AGENT_IDS=${LOCAL_AGENT_IDS_VALUE}"
 fi
 
-bold "[8/12] openclaw-control: shared specs repo"
+bold "[8/13] openclaw-control: shared specs repo"
 SPECS_URL=$(grep -E '^OPENCLAW_SPECS_REPO_URL=' .env | tail -1 | cut -d= -f2- || true)
 if [ -z "${SPECS_URL:-}" ]; then
     if [ -t 0 ]; then
@@ -278,7 +278,7 @@ else
     ok "OPENCLAW_SPECS_REPO_URL already set"
 fi
 
-bold "[9/12] openclaw-control: secrets"
+bold "[9/13] openclaw-control: secrets"
 # JWT secret (dashboard sessions) and internal token (bot-bridge ↔ daemon).
 # Both are 32-byte hex; auto-generated if empty.
 for var in OPENCLAW_JWT_SECRET OPENCLAW_INTERNAL_TOKEN; do
@@ -295,7 +295,7 @@ for var in OPENCLAW_JWT_SECRET OPENCLAW_INTERNAL_TOKEN; do
     fi
 done
 
-bold "[10/12] openclaw-control: agent persona scaffolding"
+bold "[10/13] openclaw-control: agent persona scaffolding"
 # For each agent id this machine owns, ensure local-memory/agents/<id>/persona.md
 # exists. Without it, the bot-bridge silently skips the agent.
 LOCAL_MEMORY_DIR=$(grep -E '^OPENCLAW_LOCAL_MEMORY_DIR=' .env | tail -1 | cut -d= -f2- | sed "s|\${HOME}|$HOME|;s|^~|$HOME|")
@@ -324,13 +324,140 @@ for id in "${AGENT_IDS_ARRAY[@]}"; do
     fi
 done
 
-bold "[11/12] Build image"
+bold "[11/13] Build image"
 docker compose build
 ok "image built: openclaw-local:latest"
 
-bold "[12/12] Start container"
+bold "[12/13] Start container"
 docker compose up -d
 ok "container started"
+
+bold "[13/13] ptah-bridge user service (host-side ptah for orchestration)"
+# Why this exists: the daemon delegates orchestration runs to a host-side ptah
+# so ptah uses the operator's desktop config (claudeCli / Copilot / Anthropic key)
+# without duplicating binaries or credentials into the container. See
+# docs/OPENCLAW_CONTROL.md → "Orchestration runs via the host-side ptah-bridge".
+#
+# Idempotent: re-runs of setup.sh re-render the unit (picks up token rotations
+# and node path changes), then restart the service if it's already running.
+# Skipped on machines that don't own any agents (OPENCLAW_LOCAL_AGENT_IDS empty)
+# and on machines that explicitly opt out via OPENCLAW_PTAH_BRIDGE_DISABLE=1.
+
+LOCAL_AGENTS_FOR_BRIDGE=$(grep -E '^OPENCLAW_LOCAL_AGENT_IDS=' .env | tail -1 | cut -d= -f2- | tr -d ' ')
+if [ -z "${LOCAL_AGENTS_FOR_BRIDGE}" ]; then
+    info "OPENCLAW_LOCAL_AGENT_IDS empty — this machine doesn't run agents locally; skipping bridge"
+elif [ "${OPENCLAW_PTAH_BRIDGE_DISABLE:-0}" = "1" ]; then
+    info "OPENCLAW_PTAH_BRIDGE_DISABLE=1 — skipping bridge install"
+elif ! command -v systemctl >/dev/null 2>&1; then
+    warn "systemctl not available — bridge cannot be installed as a user service here"
+    info "to run the bridge manually: node $(pwd)/scripts/ptah-bridge.mjs"
+else
+    PTAH_BIN_PATH=""
+    NODE_BIN_PATH=""
+    if command -v ptah >/dev/null 2>&1; then
+        PTAH_BIN_PATH="$(command -v ptah)"
+        NODE_BIN_PATH="$(command -v node || true)"
+    fi
+    # Source nvm (common case on dev hosts) if ptah / node aren't on bare PATH yet.
+    if { [ -z "$PTAH_BIN_PATH" ] || [ -z "$NODE_BIN_PATH" ]; } && [ -f "$HOME/.nvm/nvm.sh" ]; then
+        # shellcheck disable=SC1091
+        . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1
+        [ -z "$PTAH_BIN_PATH" ] && PTAH_BIN_PATH="$(command -v ptah || true)"
+        [ -z "$NODE_BIN_PATH" ] && NODE_BIN_PATH="$(command -v node || true)"
+    fi
+    # Auto-install ptah if we have npm but not ptah.
+    if [ -z "$PTAH_BIN_PATH" ] && command -v npm >/dev/null 2>&1; then
+        info "ptah-cli not found — installing @hive-academy/ptah-cli globally"
+        if npm install -g @hive-academy/ptah-cli 2>&1 | tail -3; then
+            PTAH_BIN_PATH="$(command -v ptah || true)"
+            [ -z "$NODE_BIN_PATH" ] && NODE_BIN_PATH="$(command -v node || true)"
+        fi
+    fi
+
+    if [ -z "$PTAH_BIN_PATH" ] || [ -z "$NODE_BIN_PATH" ]; then
+        warn "node or ptah not found on host — skipping bridge install"
+        info "install Node.js 22+ (https://nodejs.org or via nvm), then re-run ./setup.sh"
+        info "or, manually: npm install -g @hive-academy/ptah-cli && ./setup.sh"
+    else
+        ok "node: $NODE_BIN_PATH"
+        ok "ptah: $PTAH_BIN_PATH ($($PTAH_BIN_PATH --version 2>&1 | head -1))"
+
+        TOKEN_FOR_BRIDGE="$(grep -E '^OPENCLAW_INTERNAL_TOKEN=' .env | tail -1 | cut -d= -f2-)"
+        if [ -z "$TOKEN_FOR_BRIDGE" ]; then
+            warn "OPENCLAW_INTERNAL_TOKEN missing from .env — bridge cannot authenticate the daemon"
+            info "this should have been generated in phase 9; re-run ./setup.sh from a clean state"
+        else
+            UNIT_DIR="$HOME/.config/systemd/user"
+            UNIT_FILE="$UNIT_DIR/ptah-bridge.service"
+            mkdir -p "$UNIT_DIR"
+
+            REPO_DIR_FOR_BRIDGE="$(pwd)"
+            NODE_DIR_FOR_BRIDGE="$(dirname "$NODE_BIN_PATH")"
+
+            # Render the unit. We escape the substitution values so | and / inside
+            # paths don't trip up sed; use a uncommon delimiter (|).
+            sed \
+                -e "s|{{REPO_DIR}}|${REPO_DIR_FOR_BRIDGE}|g" \
+                -e "s|{{TOKEN}}|${TOKEN_FOR_BRIDGE}|g" \
+                -e "s|{{NODE_BIN}}|${NODE_BIN_PATH}|g" \
+                -e "s|{{NODE_DIR}}|${NODE_DIR_FOR_BRIDGE}|g" \
+                -e "s|{{PTAH_BIN}}|${PTAH_BIN_PATH}|g" \
+                scripts/ptah-bridge.service.tmpl > "$UNIT_FILE"
+            chmod 600 "$UNIT_FILE"   # contains the internal token
+            ok "rendered $UNIT_FILE"
+
+            systemctl --user daemon-reload
+
+            if systemctl --user is-active --quiet ptah-bridge.service; then
+                systemctl --user restart ptah-bridge.service
+                ok "ptah-bridge.service restarted (token + paths refreshed)"
+            else
+                systemctl --user enable --now ptah-bridge.service
+                ok "ptah-bridge.service enabled and started"
+            fi
+
+            # Health check.
+            sleep 2
+            if curl -fsS --max-time 3 http://127.0.0.1:8744/health >/dev/null 2>&1; then
+                ok "bridge responding at http://127.0.0.1:8744/health"
+            else
+                warn "bridge not responding — check: journalctl --user -u ptah-bridge.service -n 30"
+            fi
+
+            # Probe ptah's host-side auth state and surface the most common gaps.
+            AUTH_BLOB="$($PTAH_BIN_PATH auth status 2>&1 || true)"
+            HAS_CLAUDE_BIN="$(command -v claude >/dev/null 2>&1 && echo yes || echo no)"
+            HAS_CLAUDE_CREDS="$([ -f "$HOME/.claude/credentials.json" ] && echo yes || echo no)"
+            AUTH_METHOD="$(echo "$AUTH_BLOB" | grep -oE '"authMethod":"[^"]+"' | head -1 | cut -d'"' -f4)"
+            COPILOT_AUTH="$(echo "$AUTH_BLOB" | grep -oE '"copilotAuthenticated":(true|false)' | head -1 | cut -d: -f2)"
+
+            case "$AUTH_METHOD" in
+                claudeCli)
+                    if [ "$HAS_CLAUDE_BIN" = "no" ]; then
+                        warn "ptah authMethod=claudeCli but \`claude\` is not on host PATH"
+                        info "install Claude Code CLI on this host, then run: claude /login"
+                    elif [ "$HAS_CLAUDE_CREDS" = "no" ]; then
+                        warn "Claude CLI installed but no credentials.json — run: claude /login"
+                    else
+                        ok "ptah auth: claudeCli (creds present)"
+                    fi
+                    ;;
+                apiKey)
+                    ok "ptah auth: apiKey (verify your provider key is set: \`ptah provider status\`)"
+                    ;;
+                "")
+                    warn "could not parse \`ptah auth status\` — bridge will start but orchestration may fail"
+                    ;;
+                *)
+                    ok "ptah auth: $AUTH_METHOD"
+                    if [ "${COPILOT_AUTH:-false}" = "false" ] && [ "$AUTH_METHOD" != "claudeCli" ]; then
+                        info "if using Copilot/Codex OAuth: \`gh auth login\` and complete the flow in your desktop ptah"
+                    fi
+                    ;;
+            esac
+        fi
+    fi
+fi
 
 IS_LEADER=$(grep -E '^OPENCLAW_LEADER=' .env | cut -d= -f2- || echo 0)
 ROLE_LABEL="follower"
@@ -351,6 +478,7 @@ cat <<EOF
   Shell in:            ./scripts/dc.sh compose exec openclaw bash
   Daemon logs:         ./scripts/dc.sh compose exec openclaw tail -f /tmp/openclaw-control-daemon.log
   Bot-bridge logs:     ./scripts/dc.sh compose exec openclaw tail -f /tmp/openclaw-control-bot.log
+  Bridge logs:         journalctl --user -u ptah-bridge.service -f
   Stop:                ./scripts/dc.sh compose down
   Restart on env edit: ./scripts/dc.sh compose up -d
   Restart on code edit:./scripts/dc.sh compose up -d --build
@@ -360,6 +488,11 @@ cat <<EOF
 
 For the agents this machine owns, edit each persona before talking to them:
 $(for id in "${AGENT_IDS_ARRAY[@]}"; do id=$(echo "$id" | tr -d ' '); [ -n "$id" ] && echo "  \$EDITOR $LOCAL_MEMORY_DIR/agents/$id/persona.md"; done)
+
+If ptah-bridge said your host's ptah auth is not configured, run ONE of:
+  claude /login                                    # Claude Code subscription
+  ptah config set authMethod apiKey && ptah provider set-key anthropic <key>
+  gh auth login   # then complete Copilot OAuth in your desktop ptah
 
 If you're the leader and want the dashboard reachable from anywhere:
   tailscale up --ssh

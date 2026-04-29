@@ -14,14 +14,24 @@
 #   4. Copy .env.example → .env if not present, set OPENCLAW_LEADER and
 #      OPENCLAW_LOCAL_AGENT_IDS from the flags, set OPENCLAW_SPECS_REPO_URL
 #      if --repo provided
-#   5. Run ./setup.sh (which generates the secrets, scaffolds the persona, and
-#      starts the container)
+#   5. Run ./setup.sh (13 phases) which:
+#        - generates JWT/internal-token secrets
+#        - scaffolds local agent persona files
+#        - builds the image and starts the container
+#        - installs ptah-cli on the host (auto, via npm) if missing
+#        - renders + enables ~/.config/systemd/user/ptah-bridge.service so the
+#          daemon's orchestration loop runs ptah on the host (with the host's
+#          desktop-app auth state) instead of inside the container
+#        - probes the host's ptah auth and warns if no provider is wired up
 #
 # What it deliberately does NOT do:
 #   - Tailscale Funnel setup (interactive, machine-binding — manual step)
 #   - Discord OAuth app creation (manual on developer.discord.com)
 #   - Discord bot token retrieval (manual; you paste into .env after)
 #   - Pulling models in Ollama (separate decision)
+#   - ptah's host-side provider auth — that's a one-time `claude /login` (or
+#     `ptah provider set-key`, or `gh auth login` for Copilot). setup.sh tells
+#     you exactly which one is missing for your configured authMethod.
 
 set -euo pipefail
 
