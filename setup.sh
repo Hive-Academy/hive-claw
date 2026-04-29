@@ -427,7 +427,10 @@ else
             # Probe ptah's host-side auth state and surface the most common gaps.
             AUTH_BLOB="$($PTAH_BIN_PATH auth status 2>&1 || true)"
             HAS_CLAUDE_BIN="$(command -v claude >/dev/null 2>&1 && echo yes || echo no)"
-            HAS_CLAUDE_CREDS="$([ -f "$HOME/.claude/credentials.json" ] && echo yes || echo no)"
+            # Claude CLI stores OAuth state at ~/.claude/.credentials.json (note
+            # the leading dot — it is a hidden file, mode 0600). Don't check
+            # ~/.claude/credentials.json (no dot); that path never exists.
+            HAS_CLAUDE_CREDS="$([ -f "$HOME/.claude/.credentials.json" ] && echo yes || echo no)"
             AUTH_METHOD="$(echo "$AUTH_BLOB" | grep -oE '"authMethod":"[^"]+"' | head -1 | cut -d'"' -f4)"
             COPILOT_AUTH="$(echo "$AUTH_BLOB" | grep -oE '"copilotAuthenticated":(true|false)' | head -1 | cut -d: -f2)"
 
