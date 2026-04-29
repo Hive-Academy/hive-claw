@@ -41,13 +41,16 @@ export async function invokeClaudeForTask(opts: InvokeOptions): Promise<InvokeRe
     await fs.mkdir(logDir, { recursive: true });
     const logFile = path.join(logDir, `${Date.now()}-${opts.agentId}.log`);
 
-    const args = ['-p', opts.prompt, '--output-format', 'stream-json', '--verbose'];
-    if (config.claude.defaultModel) args.push('--model', config.claude.defaultModel);
+    // ptah --json --cwd <project> [--auto-approve] session start --profile <p> --task <prompt>
+    // emits JSON-RPC 2.0 NDJSON on stdout and exits when the single turn finishes.
+    const args: string[] = ['--json', '--cwd', opts.project.path];
+    if (config.ptah.autoApprove) args.push('--auto-approve');
+    args.push('session', 'start', '--profile', config.ptah.profile, '--task', opts.prompt);
 
     return await new Promise<InvokeResult>((resolve) => {
       let stdout = '';
       let stderr = '';
-      const child = spawn(config.claude.bin, args, {
+      const child = spawn(config.ptah.bin, args, {
         cwd: opts.project.path,
         env: {
           ...process.env,

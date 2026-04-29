@@ -68,9 +68,13 @@ export const config = {
     url: process.env.REDIS_URL ?? '',
   },
 
-  claude: {
-    bin: process.env.CLAUDE_BIN ?? 'claude',
-    defaultModel: process.env.CLAUDE_MODEL ?? '',
+  // Headless agent invoker — ptah-cli's `session start --task` is the
+  // JSON-RPC interface we drive. Same CLI that powers interactive ptah
+  // sessions, so dispatched work runs through the same harness as live work.
+  ptah: {
+    bin: process.env.PTAH_BIN ?? 'ptah',
+    profile: process.env.PTAH_INVOKER_PROFILE ?? 'claude_code',
+    autoApprove: (process.env.PTAH_INVOKER_AUTO_APPROVE ?? '1') === '1',
   },
 
   dashboardDir:

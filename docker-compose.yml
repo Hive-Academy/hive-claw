@@ -22,7 +22,9 @@ services:
       OPENCLAW_LOCAL_MEMORY: /home/agent/.claude/local-memory
       OPENCLAW_DASHBOARD_DIR: /opt/openclaw-control/dashboard/browser
       REDIS_URL: redis://openclaw-redis:6379
-      CLAUDE_BIN: claude
+      PTAH_BIN: ptah
+      PTAH_INVOKER_PROFILE: claude_code
+      PTAH_INVOKER_AUTO_APPROVE: "1"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     security_opt:

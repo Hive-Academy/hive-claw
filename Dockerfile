@@ -49,8 +49,8 @@ RUN npm install -g openclaw@2026.4.24 \
 RUN npm install -g @hive-academy/ptah-cli \
     && ptah --version || true
 
-# Claude Code CLI — used by the openclaw-control headless invoker for continuation.
-RUN npm install -g @anthropic-ai/claude-code || true
+# Note: the openclaw-control headless invoker uses ptah-cli (installed above)
+# via `ptah --json session start --task ...` — same harness as interactive use.
 
 RUN useradd --create-home --shell /bin/bash --uid 1000 agent \
     && mkdir -p /workspace /home/agent/.openclaw /home/agent/.ptah /home/agent/.claude \
@@ -94,7 +94,9 @@ ENV OPENCLAW_HOST=0.0.0.0 \
     OPENCLAW_TICK_MS=30000 \
     OPENCLAW_GIT_PULL_MS=15000 \
     OPENCLAW_DISPATCH_MS=8000 \
-    CLAUDE_BIN=claude
+    PTAH_BIN=ptah \
+    PTAH_INVOKER_PROFILE=claude_code \
+    PTAH_INVOKER_AUTO_APPROVE=1
 
 EXPOSE 18789 7878
 
