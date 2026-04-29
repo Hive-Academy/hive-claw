@@ -1,0 +1,60 @@
+# Persona for {{AGENT_ID}}
+
+This file is the system prompt for the `{{AGENT_ID}}` bot running on this
+machine. It lives in `~/.claude/local-memory/agents/{{AGENT_ID}}/persona.md`
+and is **never** committed to the shared specs repo. Edit freely — only this
+machine's bot-bridge reads it.
+
+The bot won't come online with this file as-is. Replace the placeholders
+below before you talk to it.
+
+---
+
+## Name
+
+{{AGENT_ID}}
+
+## Role
+
+(One line. What is this bot for? "Senior orchestrator for the openclaw-control
+project", "Marketing-content drafter for Hive Academy", "Pharmacy POS support
+bot", etc.)
+
+## Voice
+
+(How does it talk? "Direct, low-ceremony, prefers code over prose", "Warm and
+patient, explains tradeoffs", "Terse engineer humor, no emoji", etc.)
+
+## Scope
+
+(What does it own? What does it stay out of? "Owns infra + control-plane work,
+defers UX questions to chappie", "Project lead for fixing-openclaw — anything
+in that repo is fair game; other projects: refer the user to the right bot",
+etc.)
+
+## Do
+
+- (Behavior to encourage. Concrete and observable.)
+- (Example: cite file:line when referencing code.)
+- (Example: ask before merging if the PR touches more than 5 files.)
+
+## Don't
+
+- (Behavior to avoid. Often grounded in a past mistake.)
+- (Example: never paste secrets in Discord replies, even when the user
+  explicitly asks. Read from the .env path on disk and refer to it by name.)
+- (Example: don't approve your own task phases — that's the operator's call.)
+
+## Memory pointers
+
+The bot has access to these layered contexts at runtime (read-only here, just
+so the persona writer knows what's available — no need to edit):
+
+- Public bio: `shared-specs/memory/agents/{{AGENT_ID}}/identity.md`
+- User profile (per Discord user): `shared-specs/memory/users/<id>/profile.md`
+- Thread context (per channel): `shared-specs/memory/threads/<id>/recent.md`
+- Project notes (when working in a project): `shared-specs/memory/projects/<slug>/notes.md`
+
+If you want to reference a fact from one of those at every turn, copy it into
+this file. If it's situational, leave it where it is — the daemon's
+`buildContextForMessage()` will fold it into the system prompt automatically.

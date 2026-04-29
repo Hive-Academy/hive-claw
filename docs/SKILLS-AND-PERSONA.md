@@ -1,10 +1,97 @@
 # Skills and persona
 
-How to shape the agent's behavior with markdown files — globally, per-project, and via reusable skills.
+How to shape the agent's behavior with markdown files — globally, per-project, via reusable skills, and (in the control-plane tier) per registered agent.
 
 ---
 
-## The three layers
+## Two persona systems, one repo
+
+The repo contains two related-but-distinct persona systems, because the gateway tier and the control-plane tier solve different problems:
+
+| System | Tier | What it shapes | Where it lives |
+|---|---|---|---|
+| **Workspace persona** | Gateway | The single openclaw agent's behavior across the workspace, layered per-project | `~/projects/IDENTITY.md`, `SOUL.md`, `AGENTS.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md` + `~/projects/<project>/.openclaw/` overrides |
+| **Registered-agent persona** | Control plane | Each named bot (anubis, amun, …) that the bot-bridge runs and that the continuation loop dispatches to | `shared-specs/memory/agents/<id>/identity.md` (public bio, in the git repo) + `local-memory/agents/<id>/persona.md` (private system prompt, NEVER synced) |
+
+If you're running the gateway only, you only care about workspace personas — read on from "The three layers" below. If you're running the control plane, you'll usually still set up a workspace persona for the *gateway-tier* agent (for openclaw's own dashboard / TUI / canvas), and then a separate registered-agent persona per bot the bot-bridge runs. The two don't fight; they're consumed by different processes.
+
+The privacy semantics are deliberately different:
+
+- **Workspace persona** files live at `~/projects/` (or per-project under `.openclaw/`) — committed wherever you commit `~/projects/`. If your project repo is public, your project's `.openclaw/persona.md` is public.
+- **Registered-agent persona** at `local-memory/agents/<id>/persona.md` is **never** committed by the daemon, **never** transmitted via the API (the `PRIVATE_AGENT_FILES` whitelist in `daemon/src/memory.ts` enforces this), and **never** moved between machines except by you, by hand. The matching `identity.md` (public bio) is in the git repo and is fine to share.
+
+Why the split: the persona of a bot the operator runs on their laptop reflects the operator's voice, secrets, idiosyncrasies, internal references. It's not a system asset to be replicated. The public bio is enough for other agents to address the bot ("ask anubis about the openclaw refactor") without ever needing to read its private prompt.
+
+See [docs/OPENCLAW_CONTROL.md#the-persona-privacy-rule-slice-10](OPENCLAW_CONTROL.md#the-persona-privacy-rule-slice-10) for the implementation detail.
+
+---
+
+## Authoring a registered-agent persona
+
+The shape of `local-memory/agents/<id>/persona.md`:
+
+```markdown
+# Persona for anubis
+
+## Name
+anubis
+
+## Role
+Senior orchestrator for the fixing-openclaw stack. Owns infra,
+control-plane work, multi-machine coordination.
+
+## Voice
+Direct, low-ceremony. Prefers code over prose. Will push back on
+over-engineering. Cites file:line.
+
+## Scope
+Owns: openclaw-control daemon, bot-bridge, dashboard, the specs repo schema.
+Defers: UX/visual design (chappie), data work (some other agent).
+
+## Do
+- Always cite file_path:line_number when referencing code
+- For control-plane bugs, check the daemon log first: `/tmp/openclaw-control-daemon.log`
+- When dispatched a task, read context.md first; don't jump phases
+
+## Don't
+- Don't approve your own task phases — that's the operator's call
+- Don't paste secrets in Discord replies; refer to the .env path by name
+- Don't refactor surrounding code on a bug-fix dispatch
+```
+
+The bot-bridge's `chat.ts:buildSystemPrompt()` reads:
+
+1. The agent's public `identity.md` (for the bot's name, frontmatter `name:` field, etc.)
+2. This `persona.md` (the actual system prompt — full content used as-is)
+3. The user's profile (`shared-specs/memory/users/<discord_id>/profile.md`)
+4. Recent thread context (`shared-specs/memory/threads/<channel_id>/recent.md`)
+5. A live snapshot of projects + registered agents (so the model can answer "what tasks are open" without a tool call)
+6. The TOOLBELT directive instructions
+
+Re-read happens on every message. No restart needed.
+
+The matching `shared-specs/memory/agents/<id>/identity.md` is the public bio — used by other agents and humans, visible to every machine in the fleet. Frontmatter:
+
+```markdown
+---
+name: Anubis
+persona: senior-orchestrator
+---
+
+# Anubis
+
+Senior orchestrator. Runs on the leader machine. Hands off UX work
+to chappie, takes hand-offs back for infra and control-plane work.
+
+Reach me by mentioning @anubis in Discord, or assign a task to
+agent_id="anubis" via the dashboard.
+```
+
+The frontmatter `name:` is what shows up in the dashboard's agent list and in `/api/agents`. The body is what other agents read when they're considering a handoff.
+
+---
+
+## The three layers (gateway tier)
 
 When the agent processes a message, it assembles context from three layers, in order:
 

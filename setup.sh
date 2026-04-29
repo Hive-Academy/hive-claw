@@ -194,36 +194,231 @@ else
     fi
 fi
 
-bold "[6/7] Build image"
+bold "[6/12] openclaw-control: leader/follower mode"
+# Exactly one machine in the fleet should be OPENCLAW_LEADER=1.
+# We don't change an already-set value; we only prompt when it's missing.
+if ! grep -qE '^OPENCLAW_LEADER=' .env; then
+    if [ -t 0 ]; then
+        read -r -p "  Is THIS machine the leader (runs continuation loop + public dashboard)? [y/N] " ans
+        case "${ans:-N}" in
+            [Yy]*) echo "OPENCLAW_LEADER=1" >> .env; ok "OPENCLAW_LEADER=1" ;;
+            *)     echo "OPENCLAW_LEADER=0" >> .env; ok "OPENCLAW_LEADER=0 (follower)" ;;
+        esac
+    else
+        echo "OPENCLAW_LEADER=0" >> .env
+        info "non-interactive — defaulted to follower (OPENCLAW_LEADER=0)"
+    fi
+else
+    ok "OPENCLAW_LEADER already set: $(grep -E '^OPENCLAW_LEADER=' .env | cut -d= -f2-)"
+fi
+
+bold "[7/12] openclaw-control: agent ownership"
+# CSV of agent ids this machine owns (matches local-memory/agents/<id>/ + DISCORD_TOKEN_<ID>).
+LOCAL_AGENT_IDS_VALUE=$(grep -E '^OPENCLAW_LOCAL_AGENT_IDS=' .env | tail -1 | cut -d= -f2- || true)
+if [ -z "${LOCAL_AGENT_IDS_VALUE:-}" ]; then
+    if [ -t 0 ]; then
+        DEFAULT_AGENT_ID="$(hostname | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
+        read -r -p "  Agent ids this machine owns (CSV, lowercase, e.g. anubis,amun) [${DEFAULT_AGENT_ID}]: " ans
+        AGENT_IDS="${ans:-$DEFAULT_AGENT_ID}"
+    else
+        AGENT_IDS="$(hostname | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
+        info "non-interactive — defaulting OPENCLAW_LOCAL_AGENT_IDS=${AGENT_IDS}"
+    fi
+    if grep -qE '^OPENCLAW_LOCAL_AGENT_IDS=' .env; then
+        sed -i "s|^OPENCLAW_LOCAL_AGENT_IDS=.*|OPENCLAW_LOCAL_AGENT_IDS=${AGENT_IDS}|" .env
+    else
+        echo "OPENCLAW_LOCAL_AGENT_IDS=${AGENT_IDS}" >> .env
+    fi
+    ok "OPENCLAW_LOCAL_AGENT_IDS=${AGENT_IDS}"
+    LOCAL_AGENT_IDS_VALUE="${AGENT_IDS}"
+else
+    ok "OPENCLAW_LOCAL_AGENT_IDS=${LOCAL_AGENT_IDS_VALUE}"
+fi
+
+bold "[8/12] openclaw-control: shared specs repo"
+SPECS_URL=$(grep -E '^OPENCLAW_SPECS_REPO_URL=' .env | tail -1 | cut -d= -f2- || true)
+if [ -z "${SPECS_URL:-}" ]; then
+    if [ -t 0 ]; then
+        read -r -p "  Shared specs repo URL (HTTPS, private; leave empty for local-only): " ans
+        SPECS_URL="${ans:-}"
+    fi
+    if [ -n "$SPECS_URL" ]; then
+        if grep -qE '^OPENCLAW_SPECS_REPO_URL=' .env; then
+            sed -i "s|^OPENCLAW_SPECS_REPO_URL=.*|OPENCLAW_SPECS_REPO_URL=${SPECS_URL}|" .env
+        else
+            echo "OPENCLAW_SPECS_REPO_URL=${SPECS_URL}" >> .env
+        fi
+        ok "OPENCLAW_SPECS_REPO_URL=${SPECS_URL}"
+        # PAT required for HTTPS push
+        if [[ "$SPECS_URL" == https://* ]]; then
+            if ! grep -qE '^OPENCLAW_GIT_TOKEN=.+$' .env; then
+                if [ -t 0 ]; then
+                    read -r -s -p "  GitHub PAT (repo scope) for the specs repo: " pat; echo
+                    if [ -n "$pat" ]; then
+                        if grep -qE '^OPENCLAW_GIT_TOKEN=' .env; then
+                            sed -i "s|^OPENCLAW_GIT_TOKEN=.*|OPENCLAW_GIT_TOKEN=${pat}|" .env
+                        else
+                            echo "OPENCLAW_GIT_TOKEN=${pat}" >> .env
+                        fi
+                        ok "OPENCLAW_GIT_TOKEN set"
+                    else
+                        warn "OPENCLAW_GIT_TOKEN left empty — daemon will fail to push"
+                    fi
+                else
+                    warn "OPENCLAW_GIT_TOKEN missing and shell is non-interactive — set it manually"
+                fi
+            else
+                ok "OPENCLAW_GIT_TOKEN already set"
+            fi
+        fi
+    else
+        info "no specs repo configured — running in local-only mode"
+    fi
+else
+    ok "OPENCLAW_SPECS_REPO_URL already set"
+fi
+
+bold "[9/12] openclaw-control: secrets"
+# JWT secret (dashboard sessions) and internal token (bot-bridge ↔ daemon).
+# Both are 32-byte hex; auto-generated if empty.
+for var in OPENCLAW_JWT_SECRET OPENCLAW_INTERNAL_TOKEN; do
+    if ! grep -qE "^${var}=.+$" .env; then
+        SECRET="$(openssl rand -hex 32)"
+        if grep -qE "^${var}=" .env; then
+            sed -i "s|^${var}=.*|${var}=${SECRET}|" .env
+        else
+            echo "${var}=${SECRET}" >> .env
+        fi
+        ok "generated ${var}"
+    else
+        ok "${var} already set"
+    fi
+done
+
+bold "[10/12] openclaw-control: agent persona scaffolding"
+# For each agent id this machine owns, ensure local-memory/agents/<id>/persona.md
+# exists. Without it, the bot-bridge silently skips the agent.
+LOCAL_MEMORY_DIR=$(grep -E '^OPENCLAW_LOCAL_MEMORY_DIR=' .env | tail -1 | cut -d= -f2- | sed "s|\${HOME}|$HOME|;s|^~|$HOME|")
+LOCAL_MEMORY_DIR=${LOCAL_MEMORY_DIR:-$HOME/.claude/local-memory}
+mkdir -p "$LOCAL_MEMORY_DIR/agents"
+chmod 700 "$LOCAL_MEMORY_DIR" 2>/dev/null || true
+
+PERSONA_TEMPLATE="$(pwd)/templates/agent-persona.md.tmpl"
+IFS=',' read -ra AGENT_IDS_ARRAY <<< "${LOCAL_AGENT_IDS_VALUE}"
+for id in "${AGENT_IDS_ARRAY[@]}"; do
+    id=$(echo "$id" | tr -d ' ')
+    [ -z "$id" ] && continue
+    AGENT_DIR="$LOCAL_MEMORY_DIR/agents/$id"
+    mkdir -p "$AGENT_DIR"
+    if [ ! -f "$AGENT_DIR/persona.md" ]; then
+        if [ -f "$PERSONA_TEMPLATE" ]; then
+            sed "s|{{AGENT_ID}}|$id|g" "$PERSONA_TEMPLATE" > "$AGENT_DIR/persona.md"
+            chmod 600 "$AGENT_DIR/persona.md"
+            ok "scaffolded persona for '$id' at $AGENT_DIR/persona.md"
+            info "edit it before the bot will be useful — defaults are placeholders"
+        else
+            warn "persona template missing at $PERSONA_TEMPLATE"
+        fi
+    else
+        ok "persona for '$id' exists — leaving alone"
+    fi
+done
+
+bold "[11/13] Build image"
 docker compose build
 ok "image built: openclaw-local:latest"
 
-bold "[7/7] Start container"
+bold "[12/13] Start container"
 docker compose up -d
 ok "container started"
+
+bold "[13/13] ptah-cli auth bridge (host → container settings bundle)"
+# The container's ~/.ptah/ is now a named volume, NOT a bind mount of the host's
+# ~/.ptah/. We bring it up to a working state by exporting the host's ptah
+# settings bundle and importing it into the container.
+#
+# This step is idempotent: it only runs if the container's settings.json is
+# missing or has no authMethod set. After the first successful import, we leave
+# it alone — subsequent re-runs of setup.sh skip this phase. To force a
+# re-import (e.g. after rotating a provider key in the desktop app), delete
+# the named volume: `./scripts/dc.sh compose down && docker volume rm
+# fixing-openclaw_ptah-config`.
+
+# Wait for the container to be healthy enough to exec into.
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    if docker compose exec -T openclaw test -d /home/agent/.ptah 2>/dev/null; then
+        break
+    fi
+    sleep 2
+done
+
+CONTAINER_HAS_AUTH=$(docker compose exec -T openclaw bash -c '
+    if [ -f /home/agent/.ptah/settings.json ] && \
+       grep -q "\"authMethod\"" /home/agent/.ptah/settings.json 2>/dev/null; then
+        echo yes
+    else
+        echo no
+    fi
+' 2>/dev/null | tr -d '\r')
+
+if [ "$CONTAINER_HAS_AUTH" = "yes" ]; then
+    ok "container ptah is already configured — leaving alone"
+    info "to re-import from the host: docker volume rm fixing-openclaw_ptah-config && ./setup.sh"
+elif ! command -v ptah >/dev/null 2>&1; then
+    warn "host has no \`ptah\` binary — cannot export settings bundle automatically"
+    info "install ptah on the host (npm i -g @hive-academy/ptah-cli), configure auth in the desktop app, then re-run ./setup.sh"
+else
+    HOST_BUNDLE="$(mktemp -t ptah-bundle-XXXXXX.json)"
+    if ptah settings export --out "$HOST_BUNDLE" >/dev/null 2>&1 && [ -s "$HOST_BUNDLE" ]; then
+        ok "exported host ptah settings bundle ($(wc -c < "$HOST_BUNDLE") bytes)"
+        # Copy into the container and import.
+        docker compose cp "$HOST_BUNDLE" openclaw:/tmp/ptah-bundle.json >/dev/null
+        if docker compose exec -T openclaw ptah settings import --file /tmp/ptah-bundle.json >/dev/null 2>&1; then
+            ok "imported into container ptah"
+        else
+            warn "ptah settings import failed — check ./scripts/dc.sh compose exec openclaw ptah settings import --file /tmp/ptah-bundle.json"
+        fi
+        # Don't leave the bundle lying around in /tmp on the container.
+        docker compose exec -T openclaw rm -f /tmp/ptah-bundle.json >/dev/null 2>&1 || true
+    else
+        warn "ptah settings export failed on the host"
+        info "configure ptah in your desktop app first, then re-run ./setup.sh"
+    fi
+    shred -u "$HOST_BUNDLE" 2>/dev/null || rm -f "$HOST_BUNDLE"
+fi
+
+IS_LEADER=$(grep -E '^OPENCLAW_LEADER=' .env | cut -d= -f2- || echo 0)
+ROLE_LABEL="follower"
+[ "${IS_LEADER}" = "1" ] && ROLE_LABEL="leader"
 
 cat <<EOF
 
 ──────────────────────────────────────────────────────────────────────
-🦞  OpenClaw stack is up.
+🦞  OpenClaw stack is up — this machine is a ${ROLE_LABEL}.
 
-  Dashboard:  http://127.0.0.1:18789/?token=$(grep '^OPENCLAW_AUTH_TOKEN=' .env | cut -d= -f2-)
-  Workspace:  $WORKSPACE_DIR  (mounted as /home/agent/.openclaw/workspace inside the container)
-  Skills:     $(pwd)/skills/  (mounted as /home/agent/.openclaw/skills)
+  Gateway dashboard:   http://127.0.0.1:18789/?token=$(grep '^OPENCLAW_AUTH_TOKEN=' .env | cut -d= -f2-)
+  Control dashboard:   http://127.0.0.1:7878
+  Workspace:           $WORKSPACE_DIR  (→ /home/agent/.openclaw/workspace)
+  Shared specs:        $(grep '^OPENCLAW_SHARED_SPECS_DIR=' .env 2>/dev/null | cut -d= -f2- | sed "s|\${HOME}|$HOME|" || echo "$HOME/.claude/shared-specs")
+  Local memory:        $LOCAL_MEMORY_DIR  (NEVER synced)
 
-  Logs:        docker compose logs -f openclaw
-  Shell in:    docker compose exec openclaw bash
-  TUI chat:    docker compose exec openclaw openclaw tui
-  Stop:        docker compose down
+  Logs:                ./scripts/dc.sh compose logs -f openclaw
+  Shell in:            ./scripts/dc.sh compose exec openclaw bash
+  Daemon logs:         ./scripts/dc.sh compose exec openclaw tail -f /tmp/openclaw-control-daemon.log
+  Bot-bridge logs:     ./scripts/dc.sh compose exec openclaw tail -f /tmp/openclaw-control-bot.log
+  Stop:                ./scripts/dc.sh compose down
+  Restart on env edit: ./scripts/dc.sh compose up -d
+  Restart on code edit:./scripts/dc.sh compose up -d --build
 
-  New project init:  bin/openclaw-init-project.sh <name>
-  New project (Ptah wizard):  bin/openclaw-init-project.sh --with-ptah <name>
-  GitHub auth (one-time):     docker compose exec openclaw ptah auth login github
-                              (or run on host: ptah auth login github)
-  Discover projects:          docker compose exec openclaw ptah harness scan
-  Refresh skills:    bin/sync-ptah-skills.sh   (only if Ptah is installed)
+  Update this machine: ./scripts/update-machine.sh
+  Provision a new one: scp scripts/provision-machine.sh <host>: && ssh <host> ./provision-machine.sh
 
-If Discord credentials are set in .env, the bot will appear online in your guild
-within ~1 minute. Mention it in any channel where it has Send Messages.
+For the agents this machine owns, edit each persona before talking to them:
+$(for id in "${AGENT_IDS_ARRAY[@]}"; do id=$(echo "$id" | tr -d ' '); [ -n "$id" ] && echo "  \$EDITOR $LOCAL_MEMORY_DIR/agents/$id/persona.md"; done)
+
+If you're the leader and want the dashboard reachable from anywhere:
+  tailscale up --ssh
+  tailscale funnel --bg --https=443 7878
+  # then update DISCORD_REDIRECT_URI in .env to https://<host>.<tailnet>.ts.net/auth/discord/callback
 ──────────────────────────────────────────────────────────────────────
 EOF

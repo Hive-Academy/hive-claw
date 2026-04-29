@@ -287,6 +287,149 @@ services:
 
 ---
 
+## Control plane (`:7878`)
+
+### Symptom: daemon never starts; `[control]` never logs
+
+```bash
+./scripts/dc.sh compose exec openclaw cat /tmp/openclaw-control-daemon.log | tail -30
+```
+
+Common causes:
+
+- `OPENCLAW_JWT_SECRET` left as the literal default `change-me-…` in `.env` while `DISCORD_CLIENT_ID` is set → daemon refuses to start. Re-run `setup.sh` (it generates a real secret) or set one manually: `OPENCLAW_JWT_SECRET=$(openssl rand -hex 32)`.
+- Port `:7878` already in use on the host. Check `ss -tln | grep 7878`. Either kill the conflicting process or change `OPENCLAW_PORT` (and the matching ports forward in `docker-compose.yml`).
+- `OPENCLAW_CONTROL_DISABLE=1` in `.env`. The launcher exits early in that case.
+
+### Symptom: `[git-sync] cloning … → /home/agent/.claude/shared-specs` fails
+
+```
+fatal: could not read Username for 'https://github.com'
+```
+
+`OPENCLAW_GIT_TOKEN` is unset or wrong. Issue a PAT with `repo` scope on the **specific** specs repo. Update `.env`. `./scripts/dc.sh compose up -d`.
+
+```
+fatal: Authentication failed
+```
+
+PAT was set but is invalid (expired, revoked, wrong scope). Re-issue.
+
+```
+[git-sync] remote branch not found — initializing empty repo
+```
+
+`OPENCLAW_SPECS_BRANCH` doesn't exist on the remote. The daemon falls back to creating an empty repo locally and committing into a new branch with that name. Either accept this (the first push will create the branch upstream) or push an initial commit on the right branch from your laptop first.
+
+### Symptom: `[git-sync] push attempt N failed: ! [rejected]`
+
+Two writers raced; the daemon's auto-rebase couldn't reconcile. Usually self-heals on the next push. Repeated occurrences mean conflicting writes — check whether two leaders are running:
+
+```bash
+git -C ~/.claude/shared-specs log --oneline -10
+# If you see commits from "openclaw-control" alternating between hostnames,
+# you have two machines with OPENCLAW_LEADER=1. Pick one.
+```
+
+### Symptom: dispatch sits in `pending/` forever
+
+The follower that was supposed to claim it isn't picking it up. Check:
+
+1. **Does the follower own the agent?** On the follower:
+   ```bash
+   grep OPENCLAW_LOCAL_AGENT_IDS .env
+   # The CSV must include the agent id from the dispatch JSON.
+   ```
+2. **Is the follower's daemon pulling?** Look for `[git-sync]` activity in `/tmp/openclaw-control-daemon.log`. If the follower can't pull, it can't see the dispatch.
+3. **Is the follower's dispatch worker running?**
+   ```bash
+   ./scripts/dc.sh compose exec openclaw grep '\[dispatch\]' /tmp/openclaw-control-daemon.log
+   # Should show: [dispatch] worker started for local agents: <ids>
+   ```
+   If the line is missing, `OPENCLAW_LOCAL_AGENT_IDS` was empty when the daemon started.
+4. **Is the follower's clock skewed?** Atomic claim works regardless, but if commits land out of order in the dashboard SSE feed, sync time on every machine.
+
+Force a manual claim from any machine that owns the agent:
+
+```bash
+git -C ~/.claude/shared-specs pull
+mv ~/.claude/shared-specs/specs/<project>/TASK_xxx/.dispatch/pending/X.json \
+   ~/.claude/shared-specs/specs/<project>/TASK_xxx/.dispatch/taken/X.json
+git -C ~/.claude/shared-specs add -A && git -C ~/.claude/shared-specs commit -m "manual claim" && git -C ~/.claude/shared-specs push
+```
+
+### Symptom: `[bot-bridge] agent "<id>" has no local persona — skipping`
+
+`~/.claude/local-memory/agents/<id>/persona.md` is missing. Either run `./setup.sh` (it scaffolds it from `templates/agent-persona.md.tmpl`) or copy from another machine that owned this agent before.
+
+The bot-bridge re-checks on every restart, so:
+
+```bash
+$EDITOR ~/.claude/local-memory/agents/<id>/persona.md
+./scripts/dc.sh compose restart openclaw
+```
+
+### Symptom: bot replies in Discord but actions never happen
+
+The model emitted text but no `<<oc:create_task …>>` directive. Likely causes:
+
+- The agent's persona doesn't match the user's request (asked about state, not action).
+- The model generated the directive in the wrong format. The bridge expects `<<oc:OP arg1="value1" arg2="value2">>` exactly. Quotes must be `"`, args are `\w+`-named, no nesting.
+- The TOOLBELT_DOC is missing from the system prompt. Check `bot-bridge/src/chat.ts:buildSystemPrompt()` is being called.
+
+To debug, watch `/tmp/openclaw-control-bot.log` and pipe a known-good directive into a test message; the bridge logs every parsed directive.
+
+### Symptom: dashboard returns `401 unauthenticated` on a phone
+
+You logged in once, the JWT cookie isn't being sent. Two common causes:
+
+- The dashboard is on `https://...` but `DISCORD_REDIRECT_URI` was set to `http://...`. Cookies set on HTTPS aren't sent over HTTP and vice versa. Update both.
+- Cross-site cookie blocking (Safari, strict tracking-prevention modes). The cookie is `SameSite=lax`, so this is rare, but if a redirect chain crosses sites it can drop the cookie. Try a different browser to isolate.
+
+### Symptom: dashboard returns `403 user not allowed`
+
+Your Discord user ID isn't in `DISCORD_ALLOWED_USER_IDS`, AND either `DISCORD_ALLOWED_GUILD_ID` is unset or you're not in that guild. Add your ID:
+
+```bash
+# In Discord with Dev Mode on: right-click yourself → Copy User ID
+sed -i 's|^DISCORD_ALLOWED_USER_IDS=.*|DISCORD_ALLOWED_USER_IDS=123456789012345678|' .env
+./scripts/dc.sh compose up -d
+```
+
+### Symptom: continuation loop dispatched but task didn't advance
+
+```bash
+./scripts/dc.sh compose exec openclaw cat /tmp/openclaw-control-daemon.log | grep '\[continuation\]\|\[invoker\]'
+```
+
+Look for `invoker.finished … exitCode=N`:
+
+- `exitCode=0` but task still at the same phase → the agent didn't write the expected artifact (`task-description.md` etc.). Check the per-run log at `~/.claude/shared-specs/specs/<project>/<task>/.invoker/<timestamp>-<agent>.log`. The prompt is in there; the model output is in there; the failure is somewhere between them.
+- `exitCode!=0` → the ptah subprocess errored. Stderr is in the log file.
+
+### Symptom: the leader's continuation loop "is supposed to be running" but isn't
+
+```bash
+./scripts/dc.sh compose exec openclaw grep '\[continuation\]' /tmp/openclaw-control-daemon.log
+```
+
+If the line is `[continuation] not leader — loop disabled`, `OPENCLAW_LEADER` isn't `1`. Set it; restart.
+
+If the line is `[continuation] leader mode — loop running every Nms` but no `tick` events follow, no projects were discovered. The loop iterates over `discoverProjects()` which scans `specs/`. An empty `specs/` is a fresh-repo state — create a task to populate it.
+
+### Symptom: gateway dashboard at `:18789` works, control dashboard at `:7878` doesn't
+
+Two different processes; check each independently. The control dashboard requires the daemon to have started cleanly AND the dashboard build to be present at `/opt/openclaw-control/dashboard/browser/index.html` inside the container. If you're running a custom build:
+
+```bash
+./scripts/dc.sh compose exec openclaw ls /opt/openclaw-control/dashboard/browser/
+# index.html, main-*.js, polyfills-*.js, styles-*.css
+```
+
+If empty, the build step in the Dockerfile failed silently. `docker compose up -d --build` to retry.
+
+---
+
 ## Last resorts
 
 ### Nuclear reset (loses bot memory)
