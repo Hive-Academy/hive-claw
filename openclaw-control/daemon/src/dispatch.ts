@@ -4,6 +4,7 @@ import path from 'node:path';
 import { config } from './config.js';
 import { commitAndPush, atomicRenameAndPush, pullOnce } from './gitSync.js';
 import { broadcast } from './sse.js';
+import { publishNotify } from './bus.js';
 import { invokeClaudeForTask } from './invoker.js';
 import { listProjects, getProject } from './projects.js';
 import { readTask } from './phase.js';
@@ -115,12 +116,33 @@ export async function processOneDispatch(): Promise<{ processed: boolean; dispat
   const task = await readTask(project, next.data.taskId);
   if (!task) return { processed: false, dispatchId: next.data.id };
 
+  if (task.channelId) {
+    await publishNotify({
+      agentId: next.data.agent,
+      channelId: task.channelId,
+      text: `🛠 picked up **${next.data.taskId}** (phase: **${next.data.phase}**) — running via ptah-cli, will report when done.`,
+    }).catch((err) => console.warn('[dispatch] notify (taken) failed', err));
+  }
+
   const result = await invokeClaudeForTask({
     project,
     task,
     agentId: next.data.agent,
     prompt: next.data.prompt,
   });
+
+  if (task.channelId) {
+    const status = result.ok
+      ? '✅ done'
+      : result.exitCode === null
+        ? '⚠️ no exit code (invocation may not have run)'
+        : `❌ failed (exit=${result.exitCode})`;
+    await publishNotify({
+      agentId: next.data.agent,
+      channelId: task.channelId,
+      text: `${status} **${next.data.taskId}** (phase: **${next.data.phase}**) — ${result.durationMs}ms`,
+    }).catch((err) => console.warn('[dispatch] notify (done) failed', err));
+  }
 
   // After the invocation, commit any artifact changes the agent made and move
   // the dispatch to .done.

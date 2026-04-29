@@ -20,6 +20,12 @@ export interface AgentStatusPayload {
   lastSeen?: string;
 }
 
+export interface NotifyPayload {
+  agentId: string;
+  channelId: string;
+  text: string;
+}
+
 let pub: Redis | null = null;
 let sub: Redis | null = null;
 
@@ -66,6 +72,11 @@ export async function publishHandoff(payload: HandoffPayload): Promise<void> {
   if (pub) {
     await pub.publish(`agent:${payload.toAgent}:inbox`, JSON.stringify(payload));
   }
+}
+
+export async function publishNotify(payload: NotifyPayload): Promise<void> {
+  if (!pub) return;
+  await pub.publish(`agent:${payload.agentId}:notify`, JSON.stringify(payload));
 }
 
 export async function publishAgentStatus(payload: AgentStatusPayload): Promise<void> {

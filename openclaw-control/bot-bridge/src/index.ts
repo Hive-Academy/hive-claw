@@ -74,22 +74,38 @@ async function main() {
 
   if (config.redisUrl) {
     const sub = new Redis(config.redisUrl);
-    await sub.psubscribe('agent:*:inbox');
+    await sub.psubscribe('agent:*:inbox', 'agent:*:notify');
     sub.on('pmessage', async (_pattern, channel, message) => {
       try {
-        const m = channel.match(/^agent:(.+):inbox$/);
-        if (!m) return;
-        const targetId = m[1];
-        const target = running.get(targetId);
-        if (!target) return;
-        const payload = JSON.parse(message);
-        console.log(`[bot-bridge] handoff received for ${targetId}`, payload.taskId);
-        await publishStatus(targetId, { status: 'busy', busyWith: payload.taskId });
+        const inbox = channel.match(/^agent:(.+):inbox$/);
+        if (inbox) {
+          const targetId = inbox[1];
+          const target = running.get(targetId);
+          if (!target) return;
+          const payload = JSON.parse(message);
+          console.log(`[bot-bridge] handoff received for ${targetId}`, payload.taskId);
+          await publishStatus(targetId, { status: 'busy', busyWith: payload.taskId });
+          return;
+        }
+        const notify = channel.match(/^agent:(.+):notify$/);
+        if (notify) {
+          const targetId = notify[1];
+          const target = running.get(targetId);
+          if (!target) return;
+          const payload = JSON.parse(message) as { channelId: string; text: string };
+          if (!payload.channelId || !payload.text) return;
+          const ch = await target.client.channels.fetch(payload.channelId).catch(() => null);
+          if (ch && 'send' in ch) {
+            await (ch as any).send(payload.text).catch((err: any) =>
+              console.warn(`[bot-bridge] notify post failed for ${targetId}: ${err?.message ?? err}`),
+            );
+          }
+        }
       } catch (err) {
         console.error('[bot-bridge] bus error', err);
       }
     });
-    console.log('[bot-bridge] subscribed to agent inbox channels');
+    console.log('[bot-bridge] subscribed to agent inbox + notify channels');
   }
 
   for (const sig of ['SIGINT', 'SIGTERM']) {
