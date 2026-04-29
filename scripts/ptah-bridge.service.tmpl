@@ -1,0 +1,38 @@
+# systemd user service for the openclaw-control ptah-bridge.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   sed "s|{{REPO_DIR}}|$(pwd)|g; s|{{TOKEN}}|$(grep ^OPENCLAW_INTERNAL_TOKEN= .env | cut -d= -f2-)|" \
+#       scripts/ptah-bridge.service.tmpl \
+#     > ~/.config/systemd/user/ptah-bridge.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now ptah-bridge.service
+#
+# Logs:
+#   journalctl --user -u ptah-bridge.service -f
+#
+# Status:
+#   systemctl --user status ptah-bridge.service
+#
+# The script `setup.sh` automates this on the leader machine; followers can
+# run it manually if they also want orchestration to be possible from their
+# local agents (most won't — the leader handles dispatch writes).
+
+[Unit]
+Description=openclaw-control ptah-bridge — host-side ptah-cli runner for the daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env node {{REPO_DIR}}/scripts/ptah-bridge.mjs
+Environment="OPENCLAW_INTERNAL_TOKEN={{TOKEN}}"
+Environment="PTAH_BRIDGE_HOST=127.0.0.1"
+Environment="PTAH_BRIDGE_PORT=8744"
+Restart=on-failure
+RestartSec=3s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

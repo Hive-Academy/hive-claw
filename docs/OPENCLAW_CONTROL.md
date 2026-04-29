@@ -155,14 +155,62 @@ The bot-bridge `commandRouter` handles a fixed set of commands: `!help`, `!proje
 Mentioning the bot without `!` triggers `chat.ts:handleChat()`:
 
 1. Build a system prompt: agent's public bio + private persona + Discord user profile + thread context + a "TOOLBELT" section listing available `<<oc:…>>` directives.
-2. Pipe to `ptah --json session start --task <fullTask>` with a 180-second timeout.
+2. POST to the configured LLM provider's `/chat/completions` endpoint (OpenAI-compatible). Default is Ollama at `host.docker.internal:11434/v1` with `model = $LLM_MODEL`. Other supported providers: `openai`, `openrouter`, `groq`, `custom` — all via `bot-bridge/src/llm.ts:chatComplete()`.
 3. Parse the model's reply. Strip any `<<oc:create_task project="…" description="…" agent="…">>`, `<<oc:approve task_id="…">>`, `<<oc:reject task_id="…">>`, `<<oc:handoff task_id="…" to_agent="…">>`, `<<oc:tick>>` directives from the tail.
 4. Execute each directive against the daemon API (using the internal service token). Results get appended as a `— actions —` footer.
 5. Reply in chunks of ≤1900 chars to satisfy Discord's message limit.
 
 The tool is intentionally narrow. Pure questions stay as text answers; only action-shaped requests emit directives. There's no MCP/RPC roundtrip — directives are an agreed text format the bridge parses directly.
 
+> [!IMPORTANT]
+> Discord chat does **not** go through ptah-cli. Earlier in the project's history it did, but that conflated chat with orchestration: chat needs an LLM and a system prompt, while orchestration needs ptah's full skill/MCP/memory harness. Routing chat through ptah forced the container to depend on ptah's auth state — which is the operator's desktop config, not something the bot needs. The current design hits the LLM provider directly for chat and reserves ptah for the orchestration paths that actually use its skills. See "Orchestration runs via the host-side ptah-bridge" below for how those paths work.
+
 ---
+
+## Orchestration runs via the host-side ptah-bridge
+
+The continuation loop and dispatch worker invoke ptah-cli for real agent work — multi-step phases that read the task folder, write artifacts, run commands. ptah uses your desktop's `~/.ptah/settings.json` as its source of truth, including `authMethod` (often `claudeCli` for the Claude Code subscription, or `apiKey` for direct API access).
+
+The container can't easily run those auth paths — the desktop's binaries (`claude`, `codex`, `gh`) and credentials live on the host. So the daemon delegates orchestration to a small **ptah-bridge** process running on the host:
+
+```
+container                              host
+─────────                              ─────────
+daemon/src/invoker.ts                  scripts/ptah-bridge.mjs (systemd user service)
+   │  POST /invoke                        │
+   │ ─────────────────────────────────►   ├─ translate container path → host path
+   │   Authorization: Bearer $TOKEN       ├─ spawn `ptah --json --cwd <hostPath>
+   │   { cwd, prompt, taskId, ... }       │     session start --profile <p> --task <prompt>`
+   │                                      ├─ stream NDJSON response back
+   │  ◄─────────────────────────────────  ├─ append `{"_bridge":"done", exitCode, ...}`
+   │     application/x-ndjson             │
+```
+
+The bridge exposes:
+
+- `GET /health` — `{ok, ptahVersion, hostUser, pathMap}`. Useful for liveness.
+- `POST /invoke` — auth'd, body `{cwd, prompt, taskId, agentId, profile, autoApprove}`. Streams ptah's JSON-RPC events; final line is the bridge envelope with exit code and stderr.
+
+Bearer token is the same `OPENCLAW_INTERNAL_TOKEN` the bot-bridge already shares with the daemon. Set it in `.env` once and both sides use it.
+
+### Path translation
+
+The daemon thinks in container paths (`/home/agent/.openclaw/workspace/<project>`). The bridge knows its own host paths (`${WORKSPACE_DIR}/<project>`) and rewrites both the `cwd` field and any path references inside the prompt before invoking ptah. Configurable via `BRIDGE_WORKSPACE_CONTAINER` / `BRIDGE_WORKSPACE_HOST` / `BRIDGE_SPECS_CONTAINER` / `BRIDGE_SPECS_HOST` in the systemd unit.
+
+### Installation
+
+`scripts/ptah-bridge.service.tmpl` is a systemd user service template. Substitute `{{REPO_DIR}}` and `{{TOKEN}}`, drop into `~/.config/systemd/user/`, then `systemctl --user enable --now ptah-bridge.service`. The bridge listens on `0.0.0.0:8744` (auth via bearer token) so the container can reach it through `host.docker.internal:8744`.
+
+### Fallback mode
+
+If `OPENCLAW_PTAH_BRIDGE_URL` is unset, the daemon falls back to spawning `ptah` inside the container (the original behavior). Useful for dev mode and tests where you don't want a host service. In production deployments, the bridge URL is set in `.env` so the host path is preferred.
+
+### What this gets you
+
+- ptah uses your desktop's actual auth method, including Claude CLI / Copilot OAuth / Anthropic key, without copying secrets into the container.
+- The container image stays slim — no extra CLI binaries baked in.
+- Adding a new provider = installing it on the host. No container rebuild.
+- Each follower runs its own bridge with its own host auth — operators on different machines can use different providers if they want.
 
 ## Auth — three doors, one daemon
 
@@ -231,6 +279,8 @@ For the full env reference see [CONFIGURATION.md](CONFIGURATION.md). Highest-imp
 | `OPENCLAW_INTERNAL_TOKEN` | (auto-generated on first boot) | Service token for bot-bridge ↔ daemon. Copy from logs into `.env` to pin. |
 | `OPENCLAW_TICK_MS` | `30000` | Continuation loop interval (ms). Leader only. |
 | `OPENCLAW_GIT_PULL_MS` | `15000` | Git pull interval (ms). |
+| `OPENCLAW_PTAH_BRIDGE_URL` | `http://host.docker.internal:8744` | Where the daemon delegates orchestration runs. Empty = fall back to spawning ptah inside the container. |
+| `LLM_PROVIDER` / `LLM_MODEL` / `OLLAMA_BASE_URL` | `ollama` / `kimi-k2.6:cloud` / `host.docker.internal:11434/v1` | Used by `bot-bridge` for free-form Discord chat. Discord chat does NOT go through ptah; it hits the LLM provider directly. |
 | `OPENCLAW_CONTROL_BIND` | `127.0.0.1` | Host bind address for `:7878`. Set to `0.0.0.0` only if you have TLS in front. |
 | `OPENCLAW_CONTROL_DISABLE` | `0` | Set to `1` to run the gateway only, no control plane. |
 | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | (empty) | OAuth app credentials. Empty → local-dev fallback only. |

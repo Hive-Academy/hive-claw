@@ -73,10 +73,18 @@ export const config = {
   // Headless agent invoker — ptah-cli's `session start --task` is the
   // JSON-RPC interface we drive. Same CLI that powers interactive ptah
   // sessions, so dispatched work runs through the same harness as live work.
+  //
+  // Preferred mode: bridgeUrl set → daemon delegates to scripts/ptah-bridge.mjs
+  //   running on the host (systemd user service). The host has Claude CLI +
+  //   codex + gh + your desktop's full auth surface; the container does not.
+  //
+  // Fallback mode: bridgeUrl empty → daemon shells out to a local `ptah` binary
+  //   inside the container. Works in dev/test where the bridge is offline.
   ptah: {
     bin: process.env.PTAH_BIN ?? 'ptah',
     profile: process.env.PTAH_INVOKER_PROFILE ?? 'claude_code',
     autoApprove: (process.env.PTAH_INVOKER_AUTO_APPROVE ?? '1') === '1',
+    bridgeUrl: process.env.OPENCLAW_PTAH_BRIDGE_URL ?? '',
   },
 
   dashboardDir:

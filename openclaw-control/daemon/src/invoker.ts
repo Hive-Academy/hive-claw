@@ -5,6 +5,7 @@ import { config } from './config.js';
 import type { Project } from './projects.js';
 import type { TaskSummary } from './phase.js';
 import { broadcast } from './sse.js';
+import { isBridgeEnabled, invokeViaBridge } from './ptahBridge.js';
 
 export interface InvokeOptions {
   project: Project;
@@ -40,6 +41,31 @@ export async function invokeClaudeForTask(opts: InvokeOptions): Promise<InvokeRe
     const logDir = path.join(opts.task.folder, '.invoker');
     await fs.mkdir(logDir, { recursive: true });
     const logFile = path.join(logDir, `${Date.now()}-${opts.agentId}.log`);
+
+    // Preferred path: delegate to the host-side ptah-bridge so ptah runs where
+    // its providers (Claude CLI, codex, gh, the desktop's authMethod) actually
+    // exist. Falls through to in-container spawn when OPENCLAW_PTAH_BRIDGE_URL
+    // is unset (dev mode and tests).
+    if (isBridgeEnabled()) {
+      const bridgeResult = await invokeViaBridge({
+        cwd: opts.project.path,
+        prompt: opts.prompt,
+        taskId: opts.task.id,
+        agentId: opts.agentId,
+        profile: config.ptah.profile,
+        autoApprove: config.ptah.autoApprove,
+      });
+      const result: InvokeResult = {
+        ok: bridgeResult.ok,
+        exitCode: bridgeResult.exitCode,
+        stdout: bridgeResult.stdout,
+        stderr: bridgeResult.stderr,
+        durationMs: bridgeResult.durationMs,
+      };
+      broadcast('invoker.finished', { taskId: opts.task.id, ok: result.ok, exitCode: result.exitCode, viaBridge: true });
+      void fs.writeFile(logFile, formatLog(opts, result), 'utf8').catch(() => {});
+      return result;
+    }
 
     // ptah --json --cwd <project> [--auto-approve] session start --profile <p> --task <prompt>
     // emits JSON-RPC 2.0 NDJSON on stdout and exits when the single turn finishes.

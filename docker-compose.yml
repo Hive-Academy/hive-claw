@@ -25,6 +25,9 @@ services:
       PTAH_BIN: ptah
       PTAH_INVOKER_PROFILE: claude_code
       PTAH_INVOKER_AUTO_APPROVE: "1"
+      # Daemon delegates orchestration to host-side scripts/ptah-bridge.mjs.
+      # Leave OPENCLAW_PTAH_BRIDGE_URL empty in .env to fall back to in-container ptah spawn.
+      OPENCLAW_PTAH_BRIDGE_URL: ${OPENCLAW_PTAH_BRIDGE_URL:-http://host.docker.internal:8744}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     security_opt:

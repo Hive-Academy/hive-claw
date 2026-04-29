@@ -417,6 +417,67 @@ If the line is `[continuation] not leader — loop disabled`, `OPENCLAW_LEADER` 
 
 If the line is `[continuation] leader mode — loop running every Nms` but no `tick` events follow, no projects were discovered. The loop iterates over `discoverProjects()` which scans `specs/`. An empty `specs/` is a fresh-repo state — create a task to populate it.
 
+### Symptom: bot replies "(no reply — the LLM backend timed out or returned nothing)"
+
+The bot-bridge tried to call your `LLM_PROVIDER` for free-form chat and got nothing back. Discord chat goes direct to the configured provider — it does NOT use ptah. Check:
+
+```bash
+# Did Ollama (or your provider) respond?
+./scripts/dc.sh compose exec openclaw bash -lc '
+  curl -fsS --max-time 30 http://host.docker.internal:11434/v1/chat/completions \
+    -H "content-type: application/json" \
+    -d "{\"model\":\"$LLM_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":false}" \
+  | head -c 300
+'
+```
+
+If that errors, your provider is the problem. If it succeeds, the bot-bridge logs (`/tmp/openclaw-control-bot.log`) will show why the response wasn't usable (auth, model name, etc.).
+
+### Symptom: dispatch ran with `exitCode=0` but task didn't advance — bridge logs show only `session.created`
+
+ptah on the host started a session but never produced assistant text. Means ptah-cli got no usable provider:
+
+```bash
+# What auth method does the host's ptah think it's using?
+ptah auth status 2>&1 | jq -r '.params | "authMethod=\(.authMethod) claudeCliInstalled=\(.claudeCliInstalled) copilotAuthenticated=\(.copilotAuthenticated)"'
+```
+
+Common combos:
+- `authMethod=claudeCli` + `claudeCliInstalled=false` → `claude` binary not on the bridge service's PATH. Edit `~/.config/systemd/user/ptah-bridge.service` to add `Environment="PATH=..."` including the dir where `claude` lives, then `systemctl --user daemon-reload && systemctl --user restart ptah-bridge`.
+- `authMethod=claudeCli` + `claudeCliInstalled=true` + missing `~/.claude/credentials.json` → run `claude /login` once on the host.
+- `authMethod=apiKey` + no provider key → `ptah provider set-key <provider> <key>`.
+
+### Symptom: `/api/continuation/tick` works but bridge logs show no `/invoke`
+
+The daemon may have fallen through to in-container `ptah` spawn instead of using the bridge. Check the daemon's resolved config:
+
+```bash
+./scripts/dc.sh compose exec openclaw env | grep OPENCLAW_PTAH_BRIDGE_URL
+# Should print http://host.docker.internal:8744 (or your override). Empty = fallback mode.
+```
+
+If empty, set it in `.env` and `./scripts/dc.sh compose up -d`.
+
+### Symptom: bridge `401 unauthorized` — daemon and bridge tokens disagree
+
+The bot-bridge / daemon use `OPENCLAW_INTERNAL_TOKEN` from the container env (auto-generated if `.env` doesn't pin it). The bridge reads its token from the systemd unit. They drift if you regenerate one without updating the other.
+
+```bash
+# Pull the live token from the running container
+TOKEN=$(./scripts/dc.sh compose exec -T openclaw bash -c 'echo $OPENCLAW_INTERNAL_TOKEN' | tr -d '\r\n')
+
+# Pin it in .env so it survives recreates
+sed -i "s|^OPENCLAW_INTERNAL_TOKEN=.*|OPENCLAW_INTERNAL_TOKEN=${TOKEN}|" .env
+
+# Update the systemd unit
+sed -i "s|Environment=\"OPENCLAW_INTERNAL_TOKEN=.*\"|Environment=\"OPENCLAW_INTERNAL_TOKEN=${TOKEN}\"|" ~/.config/systemd/user/ptah-bridge.service
+systemctl --user daemon-reload && systemctl --user restart ptah-bridge.service
+```
+
+### Symptom: bridge translates path but ptah complains "no such file or directory"
+
+Path translation is prefix-based. If your project lives outside `WORKSPACE_DIR` (e.g. you cloned to `~/code/foo` instead of `~/projects/foo`), the bridge has nothing to map. Override per-deployment via `BRIDGE_WORKSPACE_HOST` in the systemd unit, or use a per-project `.workspace` file inside `shared-specs/specs/<slug>/.workspace` containing the absolute host path.
+
 ### Symptom: gateway dashboard at `:18789` works, control dashboard at `:7878` doesn't
 
 Two different processes; check each independently. The control dashboard requires the daemon to have started cleanly AND the dashboard build to be present at `/opt/openclaw-control/dashboard/browser/index.html` inside the container. If you're running a custom build:

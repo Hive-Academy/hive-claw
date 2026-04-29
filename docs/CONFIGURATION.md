@@ -72,6 +72,7 @@ If both are empty, the entrypoint disables the gateway's discord adapter automat
 | `OPENCLAW_INTERNAL_TOKEN` | (auto on first boot) | Service token for bot-bridge ↔ daemon and dispatched-agent ↔ daemon calls. Copy from `/tmp/openclaw-control-daemon.log` into `.env` to pin across recreates. |
 | `OPENCLAW_TICK_MS` | `30000` | Continuation loop interval, leader only. Lower = faster phase advancement = more git activity. |
 | `OPENCLAW_DEFAULT_PROJECT` | (empty) | Used by `!task <description>` when no project is supplied. |
+| `OPENCLAW_PTAH_BRIDGE_URL` | `http://host.docker.internal:8744` | URL of the host-side ptah-bridge. Daemon delegates orchestration (continuation loop + dispatch worker) here so ptah uses the host's auth state. Empty = fall back to spawning ptah inside the container. See [OPENCLAW_CONTROL.md](OPENCLAW_CONTROL.md#orchestration-runs-via-the-host-side-ptah-bridge). |
 
 ### Control plane — Leader / follower
 
