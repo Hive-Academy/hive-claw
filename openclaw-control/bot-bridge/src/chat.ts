@@ -1,12 +1,10 @@
-import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Message } from 'discord.js';
 import { config } from './config.js';
 import { daemon } from './daemonClient.js';
+import { chatComplete } from './llm.js';
 import type { AgentDef } from './agentRegistry.js';
-
-const CHAT_TIMEOUT_MS = Number(process.env.CHAT_TIMEOUT_MS ?? 180_000);
 
 const TOOLBELT_DOC = `## Operational tools (emit at the END of your reply, one per line)
 
@@ -183,71 +181,6 @@ function chunkBy(text: string, max = 1900): string[] {
   return out;
 }
 
-async function runPtah(systemPrompt: string, userMessage: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    const fullTask = `${systemPrompt}\n\n---\n## User message\n${userMessage}\n\n## Your reply`;
-    const args = [
-      '--json',
-      '--auto-approve',
-      '--cwd',
-      '/workspace',
-      'session',
-      'start',
-      '--profile',
-      config.ptahProfile,
-      '--task',
-      fullTask,
-    ];
-    const child = spawn(config.ptahBin, args, { cwd: '/workspace' });
-    let stdout = '';
-    const timer = setTimeout(() => {
-      try {
-        child.kill('SIGTERM');
-      } catch {}
-    }, CHAT_TIMEOUT_MS);
-    child.stdout.on('data', (b) => {
-      stdout += b.toString();
-    });
-    child.stderr.on('data', () => {});
-    child.on('error', () => {
-      clearTimeout(timer);
-      resolve(null);
-    });
-    child.on('close', () => {
-      clearTimeout(timer);
-      resolve(extractFinalReply(stdout));
-    });
-  });
-}
-
-function extractFinalReply(jsonl: string): string | null {
-  const lines = jsonl.split('\n').filter((l) => l.trim().startsWith('{'));
-  const candidates: string[] = [];
-  for (const line of lines) {
-    try {
-      const evt = JSON.parse(line);
-      const m: string = evt.method ?? '';
-      const p: any = evt.params ?? {};
-      if (typeof p.text === 'string' && /assistant|message|chunk|response|complete|delta/i.test(m)) {
-        candidates.push(p.text);
-        continue;
-      }
-      if (Array.isArray(p.content)) {
-        for (const c of p.content) {
-          if (c?.type === 'text' && typeof c.text === 'string') candidates.push(c.text);
-        }
-        continue;
-      }
-      const cc = p.message?.content;
-      if (typeof cc === 'string') candidates.push(cc);
-      else if (Array.isArray(cc)) for (const c of cc) if (c?.text) candidates.push(c.text);
-    } catch {}
-  }
-  if (!candidates.length) return null;
-  // Heuristic: pick the longest assistant-y text — that's usually the final reply.
-  return candidates.reduce((a, b) => (b.length > a.length ? b : a));
-}
-
 export async function handleChat(agent: AgentDef, msg: Message): Promise<void> {
   const text = stripMentions(msg.content);
   if (!text) {
@@ -257,10 +190,10 @@ export async function handleChat(agent: AgentDef, msg: Message): Promise<void> {
   await (msg.channel as any).sendTyping?.().catch(() => {});
 
   const systemPrompt = await buildSystemPrompt(agent, msg);
-  const reply = await runPtah(systemPrompt, text);
+  const reply = await chatComplete(systemPrompt, text);
 
   if (!reply) {
-    await msg.reply('(no reply — the agent backend timed out or returned nothing)');
+    await msg.reply('(no reply — the LLM backend timed out or returned nothing; check `tail /tmp/openclaw-control-bot.log`)');
     return;
   }
 
