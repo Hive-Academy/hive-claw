@@ -2,9 +2,11 @@ import { request } from 'undici';
 import { config } from './config.js';
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (config.internalToken) headers['authorization'] = `Bearer ${config.internalToken}`;
   const r = await request(`${config.daemonUrl}${path}`, {
     method: method as any,
-    headers: { 'content-type': 'application/json' },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await r.body.text();
@@ -14,6 +16,7 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 
 export const daemon = {
   listProjects: () => call<any[]>('GET', '/api/projects'),
+  listAgents: () => call<any[]>('GET', '/api/agents'),
   listTasks: (slug: string) => call<any[]>('GET', `/api/projects/${slug}/tasks`),
   getTask: (slug: string, id: string) => call<any>('GET', `/api/projects/${slug}/tasks/${id}`),
   createTask: (body: { project: string; description: string; agentId?: string; discordUserId?: string; channelId?: string }) =>

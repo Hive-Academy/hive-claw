@@ -51,6 +51,8 @@ export const config = {
 
   jwtSecret: process.env.OPENCLAW_JWT_SECRET ?? 'dev-secret-change-me',
   cookieName: 'openclaw_session',
+  /** Service token for internal callers (bot-bridge, dispatched agents). */
+  internalToken: process.env.OPENCLAW_INTERNAL_TOKEN ?? '',
 
   discord: {
     clientId: process.env.DISCORD_CLIENT_ID ?? '',

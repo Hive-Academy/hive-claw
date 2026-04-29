@@ -14,6 +14,15 @@ BOT_LOG=/tmp/openclaw-control-bot.log
 : "${OPENCLAW_LOCAL_MEMORY:=/home/agent/.claude/local-memory}"
 mkdir -p "$OPENCLAW_SHARED_SPECS" "$OPENCLAW_LOCAL_MEMORY" 2>/dev/null || true
 
+# Auto-generate the internal service token if the user hasn't set one.
+# Daemon and bot-bridge both read OPENCLAW_INTERNAL_TOKEN — we export it here
+# so both children of this shell inherit it.
+if [ -z "${OPENCLAW_INTERNAL_TOKEN:-}" ]; then
+    OPENCLAW_INTERNAL_TOKEN="$(head -c 48 /dev/urandom | base64 | tr -d '\n=' | tr '+/' '-_')"
+    echo "[control] generated OPENCLAW_INTERNAL_TOKEN (first run; add to .env to pin)"
+fi
+export OPENCLAW_INTERNAL_TOKEN
+
 echo "[control] starting daemon on ${OPENCLAW_HOST:-0.0.0.0}:${OPENCLAW_PORT:-7878}"
 node "$CONTROL_DIR/daemon/dist/index.js" >"$DAEMON_LOG" 2>&1 &
 DAEMON_PID=$!

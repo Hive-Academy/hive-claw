@@ -5,6 +5,9 @@ const home = os.homedir();
 
 export const config = {
   daemonUrl: process.env.OPENCLAW_DAEMON_URL ?? 'http://localhost:7878',
+  internalToken: process.env.OPENCLAW_INTERNAL_TOKEN ?? '',
+  ptahBin: process.env.PTAH_BIN ?? 'ptah',
+  ptahProfile: process.env.PTAH_INVOKER_PROFILE ?? 'claude_code',
   agentsRoot:
     process.env.OPENCLAW_AGENTS_ROOT ??
     path.join(process.env.OPENCLAW_SHARED_SPECS ?? path.join(home, '.claude', 'shared-specs'), 'memory', 'agents'),

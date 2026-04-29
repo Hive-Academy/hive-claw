@@ -157,6 +157,17 @@ export async function requireAuth(
   req: FastifyRequest,
   reply: FastifyReply,
 ): Promise<SessionUser | null> {
+  // Service-token bypass — used by bot-bridge and dispatched agents calling
+  // the daemon from inside the same container. Match a constant-time-ish
+  // comparison against OPENCLAW_INTERNAL_TOKEN.
+  const auth = req.headers['authorization'];
+  if (typeof auth === 'string' && auth.startsWith('Bearer ')) {
+    const presented = auth.slice('Bearer '.length).trim();
+    if (config.internalToken && presented && presented === config.internalToken) {
+      return { discordId: 'service', username: 'service:internal' };
+    }
+  }
+
   if (!isOAuthConfigured()) {
     return { discordId: 'local', username: 'local-dev' };
   }

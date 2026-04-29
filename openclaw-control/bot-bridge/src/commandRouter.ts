@@ -2,6 +2,7 @@ import type { Message } from 'discord.js';
 import { config } from './config.js';
 import { daemon } from './daemonClient.js';
 import type { AgentDef } from './agentRegistry.js';
+import { handleChat } from './chat.js';
 
 export interface RouteContext {
   agent: AgentDef;
@@ -21,7 +22,14 @@ const HELP = `**Commands** (prefix: \`${config.commandPrefix}\`)
 
 export async function route(ctx: RouteContext): Promise<boolean> {
   const text = ctx.message.content.trim();
-  if (!text.startsWith(config.commandPrefix)) return false;
+
+  // Free-form chat path: any @mention without a !command falls through to
+  // the LLM-driven chat handler, which can also emit operational directives.
+  if (!text.startsWith(config.commandPrefix)) {
+    await handleChat(ctx.agent, ctx.message);
+    return true;
+  }
+
   const [cmd, ...rest] = text.slice(config.commandPrefix.length).split(/\s+/);
   const args = rest;
 
