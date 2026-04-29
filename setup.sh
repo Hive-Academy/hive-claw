@@ -324,68 +324,13 @@ for id in "${AGENT_IDS_ARRAY[@]}"; do
     fi
 done
 
-bold "[11/13] Build image"
+bold "[11/12] Build image"
 docker compose build
 ok "image built: openclaw-local:latest"
 
-bold "[12/13] Start container"
+bold "[12/12] Start container"
 docker compose up -d
 ok "container started"
-
-bold "[13/13] ptah-cli auth bridge (host → container settings bundle)"
-# The container's ~/.ptah/ is now a named volume, NOT a bind mount of the host's
-# ~/.ptah/. We bring it up to a working state by exporting the host's ptah
-# settings bundle and importing it into the container.
-#
-# This step is idempotent: it only runs if the container's settings.json is
-# missing or has no authMethod set. After the first successful import, we leave
-# it alone — subsequent re-runs of setup.sh skip this phase. To force a
-# re-import (e.g. after rotating a provider key in the desktop app), delete
-# the named volume: `./scripts/dc.sh compose down && docker volume rm
-# fixing-openclaw_ptah-config`.
-
-# Wait for the container to be healthy enough to exec into.
-for i in 1 2 3 4 5 6 7 8 9 10; do
-    if docker compose exec -T openclaw test -d /home/agent/.ptah 2>/dev/null; then
-        break
-    fi
-    sleep 2
-done
-
-CONTAINER_HAS_AUTH=$(docker compose exec -T openclaw bash -c '
-    if [ -f /home/agent/.ptah/settings.json ] && \
-       grep -q "\"authMethod\"" /home/agent/.ptah/settings.json 2>/dev/null; then
-        echo yes
-    else
-        echo no
-    fi
-' 2>/dev/null | tr -d '\r')
-
-if [ "$CONTAINER_HAS_AUTH" = "yes" ]; then
-    ok "container ptah is already configured — leaving alone"
-    info "to re-import from the host: docker volume rm fixing-openclaw_ptah-config && ./setup.sh"
-elif ! command -v ptah >/dev/null 2>&1; then
-    warn "host has no \`ptah\` binary — cannot export settings bundle automatically"
-    info "install ptah on the host (npm i -g @hive-academy/ptah-cli), configure auth in the desktop app, then re-run ./setup.sh"
-else
-    HOST_BUNDLE="$(mktemp -t ptah-bundle-XXXXXX.json)"
-    if ptah settings export --out "$HOST_BUNDLE" >/dev/null 2>&1 && [ -s "$HOST_BUNDLE" ]; then
-        ok "exported host ptah settings bundle ($(wc -c < "$HOST_BUNDLE") bytes)"
-        # Copy into the container and import.
-        docker compose cp "$HOST_BUNDLE" openclaw:/tmp/ptah-bundle.json >/dev/null
-        if docker compose exec -T openclaw ptah settings import --file /tmp/ptah-bundle.json >/dev/null 2>&1; then
-            ok "imported into container ptah"
-        else
-            warn "ptah settings import failed — check ./scripts/dc.sh compose exec openclaw ptah settings import --file /tmp/ptah-bundle.json"
-        fi
-        # Don't leave the bundle lying around in /tmp on the container.
-        docker compose exec -T openclaw rm -f /tmp/ptah-bundle.json >/dev/null 2>&1 || true
-    else
-        warn "ptah settings export failed on the host"
-        info "configure ptah in your desktop app first, then re-run ./setup.sh"
-    fi
-    shred -u "$HOST_BUNDLE" 2>/dev/null || rm -f "$HOST_BUNDLE"
-fi
 
 IS_LEADER=$(grep -E '^OPENCLAW_LEADER=' .env | cut -d= -f2- || echo 0)
 ROLE_LABEL="follower"

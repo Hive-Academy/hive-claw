@@ -44,14 +44,13 @@ services:
       - ${WORKSPACE_DIR:-${HOME}/projects}:/home/agent/.openclaw/workspace:rw
       - ${SKILLS_DIR:-./skills}:/home/agent/.openclaw/skills:rw
       - openclaw-state:/home/agent/.openclaw
-      # Per-container Ptah CLI config — separate from the host's ~/.ptah on
-      # purpose. The desktop app authors auth on the host; we export a settings
-      # bundle and import it into the container's named volume. That way the
-      # desktop's "claudeCli" auth method doesn't force the container to need
-      # the Claude CLI binary, and changes on either side don't contaminate the
-      # other. See setup.sh phase 13 and docs/OPENCLAW_CONTROL.md for the
-      # export/import ritual.
-      - ptah-config:/home/agent/.ptah:rw
+      # Share Ptah CLI config (auth, providers, settings, skills) with the host
+      # so a single `ptah auth login` on either side works for both. Discord
+      # chat is no longer routed through ptah — it goes direct to LLM_PROVIDER
+      # — so the desktop's "claudeCli" auth method is fine here even when the
+      # container lacks the Claude CLI binary. The orchestration loop runs ptah
+      # on the host via the ptah-bridge service; see scripts/ptah-bridge.mjs.
+      - ${PTAH_CONFIG_DIR:-${HOME}/.ptah}:/home/agent/.ptah:rw
       # Share `gh` CLI auth with the host so a single `gh auth login` on the
       # host gives the agent access to private repos / PR creation / etc.
       - ${GH_CONFIG_DIR:-${HOME}/.config/gh}:/home/agent/.config/gh:rw
@@ -90,4 +89,3 @@ services:
 
 volumes:
   openclaw-state:
-  ptah-config:
