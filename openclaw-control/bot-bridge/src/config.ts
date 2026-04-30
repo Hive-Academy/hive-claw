@@ -3,15 +3,19 @@ import path from 'node:path';
 
 const home = os.homedir();
 
+const internalToken = process.env.OPENCLAW_INTERNAL_TOKEN ?? '';
+if (!internalToken) {
+  // bot-bridge has no anonymous fallback against the daemon. The daemon's
+  // localhost loopback `local-dev` user only applies to browser sessions
+  // (cookie-JWT path), not to the Bearer-token path bot-bridge uses.
+  throw new Error(
+    'OPENCLAW_INTERNAL_TOKEN is required for bot-bridge — there is no anonymous fallback for the Bearer-token path.',
+  );
+}
+
 export const config = {
   daemonUrl: process.env.OPENCLAW_DAEMON_URL ?? 'http://localhost:7878',
-  internalToken: process.env.OPENCLAW_INTERNAL_TOKEN ?? '',
-  agentsRoot:
-    process.env.OPENCLAW_AGENTS_ROOT ??
-    path.join(process.env.OPENCLAW_SHARED_SPECS ?? path.join(home, '.claude', 'shared-specs'), 'memory', 'agents'),
-  sharedMemoryRoot:
-    process.env.OPENCLAW_SHARED_MEMORY ??
-    path.join(process.env.OPENCLAW_SHARED_SPECS ?? path.join(home, '.claude', 'shared-specs'), 'memory'),
+  internalToken,
   localAgentsRoot:
     process.env.OPENCLAW_LOCAL_AGENTS_ROOT ??
     path.join(process.env.OPENCLAW_LOCAL_MEMORY ?? path.join(home, '.claude', 'local-memory'), 'agents'),

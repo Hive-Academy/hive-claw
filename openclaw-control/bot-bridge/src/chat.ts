@@ -1,7 +1,4 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
 import type { Message } from 'discord.js';
-import { config } from './config.js';
 import { daemon } from './daemonClient.js';
 import { chatComplete } from './llm.js';
 import type { AgentDef } from './agentRegistry.js';
@@ -107,9 +104,17 @@ async function findProjectForTask(taskId: string): Promise<string | null> {
   return null;
 }
 
-async function tryRead(p: string): Promise<string | null> {
+async function tryReadMemory(
+  scope: 'users' | 'threads',
+  ownerId: string,
+  filename: string,
+): Promise<string | null> {
+  // 404 → null (normal "no extra context" flow). 5xx is logged but does not
+  // crash the chat path — the LLM still gets the prompt without the optional
+  // context block.
   try {
-    return (await fs.readFile(p, 'utf8')).trim();
+    const r = await daemon.readMemory(scope, ownerId, filename);
+    return r ? r.content.trim() : null;
   } catch {
     return null;
   }
@@ -123,9 +128,9 @@ async function buildSystemPrompt(agent: AgentDef, msg: Message): Promise<string>
   if (agent.identityMd) parts.push(`## Public bio\n${agent.identityMd}`);
   if (agent.personaMd) parts.push(`## Persona / system prompt\n${agent.personaMd}`);
 
-  const userProfile = await tryRead(path.join(config.sharedMemoryRoot, 'users', userId, 'profile.md'));
+  const userProfile = await tryReadMemory('users', userId, 'profile.md');
   if (userProfile) parts.push(`## User profile (Discord ${userId})\n${userProfile}`);
-  const recent = await tryRead(path.join(config.sharedMemoryRoot, 'threads', channelId, 'recent.md'));
+  const recent = await tryReadMemory('threads', channelId, 'recent.md');
   if (recent) parts.push(`## Thread context (channel ${channelId})\n${recent}`);
 
   // Live state — pull a small snapshot of projects + agents so the LLM has
