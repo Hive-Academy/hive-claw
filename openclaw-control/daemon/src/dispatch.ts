@@ -1,172 +1,207 @@
-import fs from 'node:fs/promises';
-import { createHash, randomUUID } from 'node:crypto';
-import path from 'node:path';
 import { config } from './config.js';
-import { commitAndPush, atomicRenameAndPush, pullOnce } from './gitSync.js';
 import { broadcast } from './sse.js';
 import { publishNotify } from './bus.js';
 import { invokeClaudeForTask } from './invoker.js';
-import { listProjects, getProject } from './projects.js';
+import { getProject } from './projects.js';
 import { readTask } from './phase.js';
+import {
+  DispatchRepo,
+  isTerminalState,
+  type Dispatch,
+} from './db/index.js';
+import * as leaderClient from './leaderClient.js';
 
-export interface Dispatch {
-  id: string;
-  agent: string;
-  project: string;
-  taskId: string;
-  phase: string;
-  prompt: string;
-  createdAt: string;
-  createdBy: string;
+/**
+ * Dispatch worker — thin orchestrator over a queue adapter.
+ *
+ * Two adapters with the same surface: `localQueueAdapter()` is direct
+ * DispatchRepo calls (used by the leader's own worker), and
+ * `remoteQueueAdapter()` is HTTP calls via leaderClient (used by
+ * followers; full implementation lands in Batch 3).
+ *
+ * The poison policy is NOT implemented in this file — it lives in
+ * `DispatchRepo.markDone` (Batch 1, partial UNIQUE index +
+ * K-recent-failed window) so both the leader's own worker and a follower
+ * hitting `POST /api/dispatches/:id/done` go through the same code path.
+ *
+ * Per implementation-plan.md §7 line 779: the 10-second polling interval
+ * is preserved as the SSE-reconnect-failure floor. Push notifications
+ * (Batch 3) supersede polling when the SSE channel is healthy.
+ */
+
+interface QueueAdapter {
+  listPendingForAgents(agentIds: readonly string[]): Promise<Dispatch[]>;
+  claim(id: string, claimedBy: string): Promise<Dispatch | null>;
+  markDone(
+    id: string,
+    info: { exitCode: number | null; durationMs: number; stderrSnippet?: string | null },
+  ): Promise<Dispatch>;
 }
 
-function dispatchDir(projectSlug: string, taskId: string): string {
-  return path.join(config.specsDir, projectSlug, taskId, '.dispatch');
-}
-
-function dispatchRel(projectSlug: string, taskId: string, kind: 'pending' | 'taken' | 'done', id: string): string {
-  return path.posix.join('specs', projectSlug, taskId, '.dispatch', kind, `${id}.json`);
-}
-
-export async function writePendingDispatch(d: Omit<Dispatch, 'id' | 'createdAt' | 'createdBy'>): Promise<string> {
-  const id = `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
-  const full: Dispatch = {
-    ...d,
-    id,
-    createdAt: new Date().toISOString(),
-    createdBy: process.env.HOSTNAME ?? 'leader',
+function localQueueAdapter(): QueueAdapter {
+  return {
+    async listPendingForAgents(agentIds) {
+      return DispatchRepo.listPendingForAgents(agentIds);
+    },
+    async claim(id, claimedBy) {
+      return DispatchRepo.claim(id, claimedBy);
+    },
+    async markDone(id, info) {
+      return DispatchRepo.markDone(id, {
+        exitCode: info.exitCode,
+        durationMs: info.durationMs,
+        stderrSnippet: info.stderrSnippet ?? null,
+      });
+    },
   };
-  await commitAndPush(`dispatch: ${d.agent} ← ${d.taskId} (${d.phase})`, async () => {
-    const dir = path.join(dispatchDir(d.project, d.taskId), 'pending');
-    await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(path.join(dir, `${id}.json`), JSON.stringify(full, null, 2), 'utf8');
-  });
-  broadcast('dispatch.pending', { dispatchId: id, ...full });
-  return id;
 }
 
-async function listPendingForLocalAgents(): Promise<{ rel: string; data: Dispatch }[]> {
-  const result: { rel: string; data: Dispatch }[] = [];
-  let projects: string[];
-  try {
-    projects = (await fs.readdir(config.specsDir, { withFileTypes: true }))
-      .filter((e) => e.isDirectory())
-      .map((e) => e.name);
-  } catch {
-    return result;
-  }
-  for (const proj of projects) {
-    const projDir = path.join(config.specsDir, proj);
-    let tasks: string[] = [];
-    try {
-      tasks = (await fs.readdir(projDir, { withFileTypes: true }))
-        .filter((e) => e.isDirectory() && /^TASK_\d{4}_\d{3}$/.test(e.name))
-        .map((e) => e.name);
-    } catch {
-      continue;
-    }
-    for (const taskId of tasks) {
-      const pending = path.join(dispatchDir(proj, taskId), 'pending');
-      let files: string[] = [];
-      try {
-        files = await fs.readdir(pending);
-      } catch {
-        continue;
-      }
-      for (const f of files) {
-        if (!f.endsWith('.json')) continue;
-        try {
-          const raw = await fs.readFile(path.join(pending, f), 'utf8');
-          const data = JSON.parse(raw) as Dispatch;
-          if (config.localAgentIds.length === 0 || config.localAgentIds.includes(data.agent)) {
-            result.push({
-              rel: dispatchRel(proj, taskId, 'pending', data.id),
-              data,
-            });
-          }
-        } catch {}
-      }
-    }
-  }
-  return result;
+function remoteQueueAdapter(): QueueAdapter {
+  // Stubs throw at call time — Batch 3 wires these to leaderClient HTTP.
+  return {
+    listPendingForAgents: (agentIds) => leaderClient.listPendingForAgents(agentIds),
+    claim: (id, claimedBy) => leaderClient.claim(id, claimedBy),
+    markDone: (id, info) => leaderClient.markDone(id, info),
+  };
 }
 
+const queue: QueueAdapter = config.leader ? localQueueAdapter() : remoteQueueAdapter();
+
+function hostId(): string {
+  return process.env.HOSTNAME ?? 'worker';
+}
+
+function snippet(s: string, max = 4096): string | null {
+  if (!s) return null;
+  return s.length > max ? s.slice(0, max) : s;
+}
+
+function statusLineFor(final: Dispatch, exitCode: number | null, durationMs: number): string {
+  if (final.state === 'done') {
+    return `done **${final.taskId}** (phase: **${final.phase}**) — ${durationMs}ms`;
+  }
+  if (final.state === 'poisoned') {
+    return `poisoned **${final.taskId}** (phase: **${final.phase}**) — ${final.failureCount} consecutive failures, will not retry until acknowledged`;
+  }
+  if (final.state === 'failed') {
+    if (exitCode === null) {
+      return `no exit code (invocation may not have run) **${final.taskId}** (phase: **${final.phase}**) — ${durationMs}ms`;
+    }
+    return `failed **${final.taskId}** (phase: **${final.phase}**) — exit=${exitCode}, ${durationMs}ms`;
+  }
+  return `state=${final.state} **${final.taskId}** (phase: **${final.phase}**)`;
+}
+
+/**
+ * Process exactly one pending dispatch addressed to this machine's local
+ * agents. Returns `{ processed: true }` when work happened, regardless of
+ * whether the work succeeded or failed (a poisoned/failed final state is
+ * still "processed" — we got through the lifecycle).
+ */
 export async function processOneDispatch(): Promise<{ processed: boolean; dispatchId?: string }> {
   if (config.localAgentIds.length === 0) return { processed: false };
 
-  await pullOnce();
-  const pending = await listPendingForLocalAgents();
-  if (pending.length === 0) return { processed: false };
+  const candidates = await queue.listPendingForAgents(config.localAgentIds);
+  if (candidates.length === 0) return { processed: false };
 
-  const next = pending[0];
-  const takenRel = dispatchRel(next.data.project, next.data.taskId, 'taken', next.data.id);
+  // listPendingForAgents returns oldest-first.
+  const next = candidates[0];
 
-  const won = await atomicRenameAndPush(
-    next.rel,
-    takenRel,
-    `dispatch-take: ${next.data.agent} → ${next.data.taskId}`,
-  ).catch(() => false);
+  const claimed = await queue.claim(next.id, hostId());
+  if (!claimed) {
+    // Either the row vanished, was already taken, or is no longer pending.
+    // No-op: a future tick will pick up whatever is next.
+    return { processed: false };
+  }
 
-  if (!won) return { processed: false };
+  broadcast('dispatch.taken', { dispatchId: claimed.id, agent: claimed.agentId });
 
-  broadcast('dispatch.taken', { dispatchId: next.data.id, agent: next.data.agent });
-
-  const project = await getProject(next.data.project);
-  if (!project) return { processed: false, dispatchId: next.data.id };
-  const task = await readTask(project, next.data.taskId);
-  if (!task) return { processed: false, dispatchId: next.data.id };
-
-  if (task.channelId) {
+  // Notify Discord we've picked it up. Non-fatal on failure.
+  const project = await getProject(claimed.projectSlug);
+  const task = project ? await readTask(project, claimed.taskId) : null;
+  if (task?.channelId) {
     await publishNotify({
-      agentId: next.data.agent,
+      agentId: claimed.agentId,
       channelId: task.channelId,
-      text: `🛠 picked up **${next.data.taskId}** (phase: **${next.data.phase}**) — running via ptah-cli, will report when done.`,
+      text: `picked up **${claimed.taskId}** (phase: **${claimed.phase}**) — running via ptah-cli, will report when done.`,
     }).catch((err) => console.warn('[dispatch] notify (taken) failed', err));
   }
 
+  // If we cannot find the project or task, mark the dispatch failed and exit.
+  // The poison policy lives in markDone, so a chronically broken project
+  // ref will eventually transition to poisoned.
+  if (!project || !task) {
+    const finalErr = await queue
+      .markDone(claimed.id, {
+        exitCode: null,
+        durationMs: 0,
+        stderrSnippet: !project
+          ? `unknown project ${claimed.projectSlug}`
+          : `unknown task ${claimed.projectSlug}/${claimed.taskId}`,
+      })
+      .catch((err) => {
+        console.error('[dispatch] markDone (no-project/task) failed', err);
+        return null;
+      });
+    if (finalErr) {
+      broadcast(`dispatch.${finalErr.state}`, {
+        dispatchId: claimed.id,
+        ok: false,
+        exitCode: null,
+      });
+    }
+    return { processed: true, dispatchId: claimed.id };
+  }
+
+  // Run the work.
   const result = await invokeClaudeForTask({
     project,
     task,
-    agentId: next.data.agent,
-    prompt: next.data.prompt,
+    agentId: claimed.agentId,
+    prompt: claimed.prompt,
+    dispatchId: claimed.id,
   });
 
-  if (task.channelId) {
-    const status = result.ok
-      ? '✅ done'
-      : result.exitCode === null
-        ? '⚠️ no exit code (invocation may not have run)'
-        : `❌ failed (exit=${result.exitCode})`;
-    await publishNotify({
-      agentId: next.data.agent,
-      channelId: task.channelId,
-      text: `${status} **${next.data.taskId}** (phase: **${next.data.phase}**) — ${result.durationMs}ms`,
-    }).catch((err) => console.warn('[dispatch] notify (done) failed', err));
+  // Report. Server-side `markDone` decides terminal state (done / failed /
+  // poisoned) using the K-recent-failed window from
+  // implementation-plan.md §7. The worker is a thin client of that decision.
+  let final: Dispatch | null = null;
+  try {
+    final = await queue.markDone(claimed.id, {
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      stderrSnippet: snippet(result.stderr),
+    });
+  } catch (err) {
+    console.error('[dispatch] markDone failed', err);
   }
 
-  // After the invocation, commit any artifact changes the agent made and move
-  // the dispatch to .done.
-  const doneRel = dispatchRel(next.data.project, next.data.taskId, 'done', next.data.id);
-  await commitAndPush(
-    `dispatch-done: ${next.data.agent} ← ${next.data.taskId} (exit=${result.exitCode})`,
-    async () => {
-      const takenAbs = path.join(config.sharedSpecsRoot, takenRel);
-      const doneAbs = path.join(config.sharedSpecsRoot, doneRel);
-      await fs.mkdir(path.dirname(doneAbs), { recursive: true });
-      try {
-        await fs.rename(takenAbs, doneAbs);
-      } catch {}
-    },
-  );
-  broadcast('dispatch.done', { dispatchId: next.data.id, ok: result.ok, exitCode: result.exitCode });
-  return { processed: true, dispatchId: next.data.id };
+  if (final) {
+    if (task.channelId) {
+      await publishNotify({
+        agentId: claimed.agentId,
+        channelId: task.channelId,
+        text: statusLineFor(final, result.exitCode, result.durationMs),
+      }).catch((err) => console.warn('[dispatch] notify (done) failed', err));
+    }
+    broadcast(`dispatch.${final.state}`, {
+      dispatchId: claimed.id,
+      ok: final.state === 'done',
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      terminal: isTerminalState(final.state),
+    });
+  }
+
+  return { processed: true, dispatchId: claimed.id };
 }
 
 let timer: NodeJS.Timeout | null = null;
 let stopping = false;
 
 export function startDispatchWorker(intervalMs = 10_000): void {
-  if (timer || config.localAgentIds.length === 0) return;
+  if (timer) return;
+  if (config.localAgentIds.length === 0) return;
   const tick = async () => {
     if (stopping) return;
     try {
@@ -185,5 +220,8 @@ export function startDispatchWorker(intervalMs = 10_000): void {
 
 export function stopDispatchWorker(): void {
   stopping = true;
-  if (timer) clearTimeout(timer);
+  if (timer) {
+    clearTimeout(timer);
+    timer = null;
+  }
 }

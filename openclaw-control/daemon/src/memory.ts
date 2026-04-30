@@ -1,29 +1,36 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from './config.js';
-import { commitAndPush } from './gitSync.js';
+import {
+  MemoryRepo,
+  PRIVATE_AGENT_FILES,
+  type MemoryScope as RepoMemoryScope,
+} from './db/index.js';
 
 /**
- * Memory has two storage backends:
+ * Memory has two storage backends, gated by the single chokepoint
+ * `resolveBackend` below.
  *
- * - **shared** (under `config.sharedMemoryRoot`) — git-synced, visible to every
- *   machine. Used for agent *public bios*, user profiles, thread context,
- *   project notes. Writes go through git commit+push.
+ * - **shared** — `MemoryRepo` (rows in the `memory_files` table on the
+ *   leader). Visible across machines through the leader's HTTP API. Used
+ *   for agent *public bios*, user profiles, thread context, project notes.
  *
- * - **local** (under `config.localMemoryRoot`) — per-machine, never synced.
- *   Used for agent *personas* (system prompts) and any per-machine secrets.
- *   Writes are plain fs writes, no git involvement.
+ * - **local** — `~/.claude/local-memory/` on this machine, never synced.
+ *   Used exclusively for files in `PRIVATE_AGENT_FILES`
+ *   ({persona.md, secrets.md, persona.json, secrets.json}) under
+ *   `agents/<id>/`. The owner machine is the only place these ever land.
  *
- * Routing rules (decided at write time):
- *   - scope=`agents`, file matches PRIVATE_AGENT_FILES → local backend, ownership-checked
- *   - scope=`agents`, anything else → shared backend, ownership-checked
- *   - all other scopes → shared backend, no ownership check
+ * Routing rules (decided at every read/write/delete):
+ *   - scope=`agents`, file ∈ PRIVATE_AGENT_FILES → local backend, ownership-checked
+ *   - everything else → shared backend (MemoryRepo), agents-scope ownership-checked
+ *
+ * `PRIVATE_AGENT_FILES` is imported from `./db/index.js` — it is defined
+ * once in `db/memory.ts` and re-exported through the barrel. Do NOT
+ * redeclare it here.
  */
 
-export type MemoryScope = 'agents' | 'users' | 'projects' | 'threads';
-const SCOPES: MemoryScope[] = ['agents', 'users', 'projects', 'threads'];
-
-const PRIVATE_AGENT_FILES = new Set(['persona.md', 'secrets.md', 'persona.json', 'secrets.json']);
+export type MemoryScope = RepoMemoryScope;
+const SCOPES: readonly MemoryScope[] = ['agents', 'users', 'threads', 'projects'];
 
 export interface MemoryEntry {
   scope: MemoryScope;
@@ -37,10 +44,11 @@ export class MemoryError extends Error {
   }
 }
 
-export async function ensureSharedTree(): Promise<void> {
-  for (const s of SCOPES) {
-    await fs.mkdir(path.join(config.sharedMemoryRoot, s), { recursive: true });
-  }
+/**
+ * Make sure the local-memory directory tree exists on this machine. The
+ * shared tier lives in SQLite — there is nothing to mkdir for it.
+ */
+export async function ensureLocalTree(): Promise<void> {
   await fs.mkdir(config.localAgentsRoot, { recursive: true });
 }
 
@@ -58,24 +66,38 @@ function isPrivateAgentFile(file: string): boolean {
   return PRIVATE_AGENT_FILES.has(file);
 }
 
-function publicScopeDir(scope: MemoryScope): string {
-  if (!SCOPES.includes(scope)) throw new MemoryError('invalid scope');
-  return path.join(config.sharedMemoryRoot, scope);
-}
-
 function localAgentDir(id: string): string {
   return path.join(config.localAgentsRoot, safeId(id));
 }
 
+interface ResolvedSharedBackend {
+  kind: 'shared';
+  scope: MemoryScope;
+  ownerId: string;
+  filename: string;
+}
+
+interface ResolvedLocalBackend {
+  kind: 'local';
+  dir: string;
+  filename: string;
+}
+
+type ResolvedBackend = ResolvedSharedBackend | ResolvedLocalBackend;
+
 /**
- * Resolve which absolute directory holds a given (scope,id,file) and whether
- * the backend is git-synced.
+ * THE chokepoint. Every read/write/delete must go through this.
+ *
+ * The local-FS branch is byte-for-byte identical behavior to the pre-batch
+ * implementation: PRIVATE_AGENT_FILES under scope=agents go to
+ * `localMemoryRoot/agents/<id>/<filename>` and never hit the DB.
  */
-function resolveBackend(scope: MemoryScope, id: string, file: string): { dir: string; private: boolean } {
-  if (scope === 'agents' && isPrivateAgentFile(file)) {
-    return { dir: localAgentDir(id), private: true };
+function resolveBackend(scope: MemoryScope, id: string, filename: string): ResolvedBackend {
+  if (!SCOPES.includes(scope)) throw new MemoryError('invalid scope');
+  if (scope === 'agents' && isPrivateAgentFile(filename)) {
+    return { kind: 'local', dir: localAgentDir(id), filename };
   }
-  return { dir: path.join(publicScopeDir(scope), safeId(id)), private: false };
+  return { kind: 'shared', scope, ownerId: safeId(id), filename };
 }
 
 /**
@@ -96,65 +118,59 @@ function assertAgentOwnership(id: string): void {
 }
 
 export async function listScope(scope: MemoryScope): Promise<MemoryEntry[]> {
-  if (scope !== 'agents') {
-    return readDirAsEntries(scope, publicScopeDir(scope), false);
-  }
-  // agents: union of shared (public bios) and local (personas this machine owns)
-  const sharedEntries = await readDirAsEntries('agents', publicScopeDir('agents'), false);
-  const localExists = await fs
-    .access(config.localAgentsRoot)
-    .then(() => true)
-    .catch(() => false);
-  if (!localExists) return sharedEntries;
+  if (!SCOPES.includes(scope)) throw new MemoryError('invalid scope');
 
-  const localIds = (await fs.readdir(config.localAgentsRoot, { withFileTypes: true }))
-    .filter((e) => e.isDirectory())
-    .map((e) => e.name);
-
+  // Shared metadata first — one query, no per-row content.
+  const sharedMeta = MemoryRepo.list(scope);
   const merged = new Map<string, MemoryEntry>();
-  for (const e of sharedEntries) merged.set(e.id, e);
-  for (const id of localIds) {
-    const dir = localAgentDir(id);
-    const files = (await fs.readdir(dir, { withFileTypes: true })).filter((f) => f.isFile());
-    const fileMeta = await Promise.all(
-      files.map(async (f) => {
-        const stat = await fs.stat(path.join(dir, f.name));
-        return { name: f.name, size: stat.size, mtime: stat.mtime.toISOString(), private: true };
-      }),
-    );
-    const existing = merged.get(id);
-    if (existing) existing.files.push(...fileMeta);
-    else merged.set(id, { scope: 'agents', id, files: fileMeta });
+  for (const m of sharedMeta) {
+    const entry = merged.get(m.ownerId) ?? {
+      scope,
+      id: m.ownerId,
+      files: [],
+    };
+    entry.files.push({
+      name: m.filename,
+      size: m.sizeBytes,
+      mtime: m.updatedAt,
+      private: false,
+    });
+    merged.set(m.ownerId, entry);
   }
-  return [...merged.values()].sort((a, b) => a.id.localeCompare(b.id));
-}
 
-async function readDirAsEntries(
-  scope: MemoryScope,
-  root: string,
-  isPrivate: boolean,
-): Promise<MemoryEntry[]> {
-  await fs.mkdir(root, { recursive: true });
-  const entries = await fs.readdir(root, { withFileTypes: true });
-  const out: MemoryEntry[] = [];
-  for (const e of entries) {
-    if (!e.isDirectory()) continue;
-    const dir = path.join(root, e.name);
-    const files = (await fs.readdir(dir, { withFileTypes: true })).filter((f) => f.isFile());
-    const fileMeta = await Promise.all(
-      files.map(async (f) => {
-        const stat = await fs.stat(path.join(dir, f.name));
-        return {
-          name: f.name,
-          size: stat.size,
-          mtime: stat.mtime.toISOString(),
-          private: isPrivate || (scope === 'agents' && isPrivateAgentFile(f.name)),
-        };
-      }),
-    );
-    out.push({ scope, id: e.name, files: fileMeta });
+  // For the agents scope, also surface local-only personas/secrets that this
+  // machine owns. Other scopes have no local tier — return shared as-is.
+  if (scope === 'agents') {
+    const localExists = await fs
+      .access(config.localAgentsRoot)
+      .then(() => true)
+      .catch(() => false);
+    if (localExists) {
+      const dirEntries = await fs.readdir(config.localAgentsRoot, { withFileTypes: true });
+      for (const d of dirEntries) {
+        if (!d.isDirectory()) continue;
+        const id = d.name;
+        const dir = localAgentDir(id);
+        const files = (await fs.readdir(dir, { withFileTypes: true })).filter((f) => f.isFile());
+        const fileMeta = await Promise.all(
+          files.map(async (f) => {
+            const stat = await fs.stat(path.join(dir, f.name));
+            return {
+              name: f.name,
+              size: stat.size,
+              mtime: stat.mtime.toISOString(),
+              private: true,
+            };
+          }),
+        );
+        const existing = merged.get(id);
+        if (existing) existing.files.push(...fileMeta);
+        else merged.set(id, { scope: 'agents', id, files: fileMeta });
+      }
+    }
   }
-  return out.sort((a, b) => a.id.localeCompare(b.id));
+
+  return [...merged.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
 export async function readMemoryFile(
@@ -163,13 +179,18 @@ export async function readMemoryFile(
   file: string,
 ): Promise<{ content: string; private: boolean } | null> {
   const file_ = safeFile(file);
-  const { dir, private: isPrivate } = resolveBackend(scope, id, file_);
-  try {
-    const content = await fs.readFile(path.join(dir, file_), 'utf8');
-    return { content, private: isPrivate };
-  } catch {
-    return null;
+  const backend = resolveBackend(scope, id, file_);
+  if (backend.kind === 'local') {
+    try {
+      const content = await fs.readFile(path.join(backend.dir, backend.filename), 'utf8');
+      return { content, private: true };
+    } catch {
+      return null;
+    }
   }
+  const row = MemoryRepo.read(backend.scope, backend.ownerId, backend.filename);
+  if (!row) return null;
+  return { content: row.content, private: false };
 }
 
 export async function writeMemoryFile(
@@ -177,21 +198,19 @@ export async function writeMemoryFile(
   id: string,
   file: string,
   content: string,
+  updatedBy?: string | null,
 ): Promise<{ private: boolean }> {
   const id_ = safeId(id);
   const file_ = safeFile(file);
   if (scope === 'agents') assertAgentOwnership(id_);
-  const { dir, private: isPrivate } = resolveBackend(scope, id_, file_);
+  const backend = resolveBackend(scope, id_, file_);
 
-  if (isPrivate) {
-    await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(path.join(dir, file_), content, 'utf8');
+  if (backend.kind === 'local') {
+    await fs.mkdir(backend.dir, { recursive: true });
+    await fs.writeFile(path.join(backend.dir, backend.filename), content, 'utf8');
     return { private: true };
   }
-  await commitAndPush(`memory: ${scope}/${id_}/${file_}`, async () => {
-    await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(path.join(dir, file_), content, 'utf8');
-  });
+  MemoryRepo.write(backend.scope, backend.ownerId, backend.filename, content, updatedBy ?? null);
   return { private: false };
 }
 
@@ -203,34 +222,45 @@ export async function deleteMemoryFile(
   const id_ = safeId(id);
   const file_ = safeFile(file);
   if (scope === 'agents') assertAgentOwnership(id_);
-  const { dir, private: isPrivate } = resolveBackend(scope, id_, file_);
-  if (isPrivate) {
-    await fs.unlink(path.join(dir, file_)).catch(() => {});
+  const backend = resolveBackend(scope, id_, file_);
+  if (backend.kind === 'local') {
+    try {
+      await fs.unlink(path.join(backend.dir, backend.filename));
+    } catch (err) {
+      // ENOENT on delete is a no-op — anything else is a real error and
+      // should surface to the caller.
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
+    }
     return;
   }
-  await commitAndPush(`memory delete: ${scope}/${id_}/${file_}`, async () => {
-    await fs.unlink(path.join(dir, file_)).catch(() => {});
-  });
+  MemoryRepo.delete(backend.scope, backend.ownerId, backend.filename);
 }
 
+/**
+ * Append a one-line interaction record for a Discord user. Stored as a
+ * shared memory file `users/<id>/interactions.md` (markdown bullet list).
+ *
+ * Done as read-modify-write because MemoryRepo.write is an upsert; we
+ * fetch the existing content first, append the line, write back. The
+ * window is small (single tick of one user's chat thread); a full
+ * concurrent-append story would require an append-only sub-table.
+ */
 export async function appendInteraction(
   discordUserId: string,
   entry: { ts: string; agent: string; channel?: string; summary: string },
 ): Promise<void> {
   const id_ = safeId(discordUserId);
-  await commitAndPush(`memory: users/${id_}/interactions.md += ${entry.agent}`, async () => {
-    const dir = path.join(config.sharedMemoryRoot, 'users', id_);
-    await fs.mkdir(dir, { recursive: true });
-    const file = path.join(dir, 'interactions.md');
-    const line = `- **${entry.ts}** [${entry.agent}]${entry.channel ? ` (#${entry.channel})` : ''}: ${entry.summary}\n`;
-    await fs.appendFile(file, line, 'utf8');
-  });
+  const filename = 'interactions.md';
+  const existing = MemoryRepo.read('users', id_, filename);
+  const line = `- **${entry.ts}** [${entry.agent}]${entry.channel ? ` (#${entry.channel})` : ''}: ${entry.summary}\n`;
+  const next = (existing?.content ?? '') + line;
+  MemoryRepo.write('users', id_, filename, next, entry.agent);
 }
 
 /**
  * Build a full prompt context. For owned agents, includes the local persona.
- * For other agents, only the public identity is read (we never have access to
- * a persona we don't own — it lives on the owner's machine).
+ * For other agents, only the public identity is read (we never have access
+ * to a persona we don't own — it lives on the owner's machine).
  */
 export async function buildContextForMessage(opts: {
   agentId: string;
@@ -239,33 +269,45 @@ export async function buildContextForMessage(opts: {
   projectSlug?: string;
 }): Promise<string> {
   const parts: string[] = [];
-  const tryRead = async (p: string, label: string) => {
-    try {
-      const txt = await fs.readFile(p, 'utf8');
-      parts.push(`## ${label}\n${txt.trim()}`);
-    } catch {}
+
+  const tryReadShared = (
+    scope: MemoryScope,
+    ownerId: string,
+    filename: string,
+    label: string,
+  ): void => {
+    const row = MemoryRepo.read(scope, ownerId, filename);
+    if (row && row.content.trim().length > 0) {
+      parts.push(`## ${label}\n${row.content.trim()}`);
+    }
   };
+
+  const tryReadLocal = async (filePath: string, label: string): Promise<void> => {
+    try {
+      const txt = await fs.readFile(filePath, 'utf8');
+      if (txt.trim().length > 0) parts.push(`## ${label}\n${txt.trim()}`);
+    } catch (err) {
+      // ENOENT for an optional context file is expected; anything else
+      // surfaces because it likely indicates a bind-mount or perm bug.
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
+    }
+  };
+
   const agent = safeId(opts.agentId);
-  await tryRead(path.join(config.agentsRoot, agent, 'identity.md'), `Agent identity: ${agent}`);
+  tryReadShared('agents', agent, 'identity.md', `Agent identity: ${agent}`);
   // Persona is local-only — we have it iff this machine owns the agent.
-  await tryRead(path.join(config.localAgentsRoot, agent, 'persona.md'), `Agent persona (local): ${agent}`);
+  await tryReadLocal(
+    path.join(config.localAgentsRoot, agent, 'persona.md'),
+    `Agent persona (local): ${agent}`,
+  );
   if (opts.discordUserId) {
-    await tryRead(
-      path.join(config.sharedMemoryRoot, 'users', safeId(opts.discordUserId), 'profile.md'),
-      `User profile: ${opts.discordUserId}`,
-    );
+    tryReadShared('users', safeId(opts.discordUserId), 'profile.md', `User profile: ${opts.discordUserId}`);
   }
   if (opts.channelId) {
-    await tryRead(
-      path.join(config.sharedMemoryRoot, 'threads', safeId(opts.channelId), 'recent.md'),
-      `Thread context: ${opts.channelId}`,
-    );
+    tryReadShared('threads', safeId(opts.channelId), 'recent.md', `Thread context: ${opts.channelId}`);
   }
   if (opts.projectSlug) {
-    await tryRead(
-      path.join(config.sharedMemoryRoot, 'projects', safeId(opts.projectSlug), 'notes.md'),
-      `Project notes: ${opts.projectSlug}`,
-    );
+    tryReadShared('projects', safeId(opts.projectSlug), 'notes.md', `Project notes: ${opts.projectSlug}`);
   }
   return parts.join('\n\n');
 }

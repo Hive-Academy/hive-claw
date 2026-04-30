@@ -6,35 +6,23 @@ import { config } from './config.js';
 import { broadcast } from './sse.js';
 import { parseEvent } from './sessions.js';
 
+/**
+ * Per implementation-plan.md §9: the specs-tree and memory-tree FS
+ * watchers are gone. Specs and shared memory now live in SQLite — there
+ * is no FS to chokidar against. SSE notifications for those updates are
+ * emitted directly from the daemon's write paths (TasksRepo writeFile,
+ * MemoryRepo write, dispatch state transitions).
+ *
+ * What stays here is the host's Claude Code session JSONL watcher —
+ * `~/.claude/projects/*.jsonl` files are written by the host's running
+ * Claude CLI sessions and bind-mounted read-only into the container.
+ * They are unrelated to the openclaw specs storage.
+ */
+
 const sessionOffsets = new Map<string, number>();
 
 export async function startWatchers(): Promise<void> {
-  // Specs tree (shared-specs/specs/<project>/TASK_*) — single watcher root,
-  // works whether or not git sync is enabled.
-  const specsWatcher = chokidar.watch(`${config.specsDir}/**`, {
-    ignoreInitial: true,
-    depth: 5,
-  });
-  specsWatcher.on('all', (event, filePath) => {
-    const m = filePath.match(/(TASK_\d{4}_\d{3})/);
-    if (!m) return;
-    broadcast('task.updated', {
-      taskId: m[1],
-      event,
-      file: path.basename(filePath),
-    });
-  });
-
-  // Memory tree (shared-specs/memory/...)
-  const memWatcher = chokidar.watch(`${config.sharedMemoryRoot}/**`, {
-    ignoreInitial: true,
-    depth: 4,
-  });
-  memWatcher.on('all', (event, filePath) => {
-    broadcast('memory.updated', { event, file: path.basename(filePath) });
-  });
-
-  // Live Claude Code session JSONL files (host's, mounted read-only)
+  // Live Claude Code session JSONL files (host's, mounted read-only).
   const sessionsWatcher = chokidar.watch(`${config.claudeProjectsRoot}/**/*.jsonl`, {
     ignoreInitial: false,
     awaitWriteFinish: false,

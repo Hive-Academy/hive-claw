@@ -40,7 +40,9 @@ export function buildApp() {
     ts: new Date().toISOString(),
     leader: config.leader,
     localAgentIds: config.localAgentIds,
-    gitEnabled: config.git.enabled,
+    // Storage tier — `db` on the leader (SQLite under config.dbPath),
+    // `leader-http` on a follower (talks to config.leaderUrl).
+    storage: config.leader ? 'db' : 'leader-http',
   }));
 
   registerAuth(app);
