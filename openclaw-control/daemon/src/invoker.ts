@@ -5,6 +5,7 @@ import type { TaskSummary } from './phase.js';
 import { broadcast } from './sse.js';
 import { isBridgeEnabled, invokeViaBridge } from './ptahBridge.js';
 import { DispatchRepo } from './db/index.js';
+import * as leaderClient from './leaderClient.js';
 
 export interface InvokeOptions {
   project: Project;
@@ -40,15 +41,21 @@ function logToDispatch(
   level: 'info' | 'warn' | 'error' = 'info',
 ): void {
   if (!dispatchId) return;
-  // Only the leader has a DB handle. Followers will gain a remote-append
-  // path in Batch 3; for now, swallow the missing-DB error rather than
-  // crashing the worker on followers in this transitional batch.
-  if (!config.leader) return;
-  try {
-    DispatchRepo.appendLog(dispatchId, message, level);
-  } catch (err) {
-    console.warn('[invoker] dispatch_log append failed', err);
+  if (config.leader) {
+    try {
+      DispatchRepo.appendLog(dispatchId, message, level);
+    } catch (err) {
+      console.warn('[invoker] dispatch_log append failed', err);
+    }
+    return;
   }
+  // Follower path — fire and forget through the leader client. The
+  // appendLog helper is best-effort on followers (see leaderClient.ts);
+  // we still want to call it so any future server-side /log endpoint will
+  // pick up these calls without further changes here.
+  void leaderClient.appendLog(dispatchId, message, level).catch((err) => {
+    console.warn('[invoker] follower dispatch_log relay failed', err);
+  });
 }
 
 export async function invokeClaudeForTask(opts: InvokeOptions): Promise<InvokeResult> {
