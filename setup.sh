@@ -235,47 +235,72 @@ else
     ok "OPENCLAW_LOCAL_AGENT_IDS=${LOCAL_AGENT_IDS_VALUE}"
 fi
 
-bold "[8/13] openclaw-control: shared specs repo"
-SPECS_URL=$(grep -E '^OPENCLAW_SPECS_REPO_URL=' .env | tail -1 | cut -d= -f2- || true)
-if [ -z "${SPECS_URL:-}" ]; then
+bold "[8/13] openclaw-control: SQLite spec store + follower → leader URL"
+# Storage is a single SQLite file on the leader (/data/specs.db inside the
+# container, persisted via the named docker volume `specs-db`). Followers go
+# HTTP-only via OPENCLAW_LEADER_URL.
+
+# OPENCLAW_SPECS_DB_PATH (path inside the container) — only meaningful on the
+# leader, but it's harmless to record on followers too.
+DB_PATH_VAL=$(grep -E '^OPENCLAW_SPECS_DB_PATH=' .env | tail -1 | cut -d= -f2- || true)
+if [ -z "${DB_PATH_VAL:-}" ]; then
+    DEFAULT_DB_PATH="/data/specs.db"
     if [ -t 0 ]; then
-        read -r -p "  Shared specs repo URL (HTTPS, private; leave empty for local-only): " ans
-        SPECS_URL="${ans:-}"
-    fi
-    if [ -n "$SPECS_URL" ]; then
-        if grep -qE '^OPENCLAW_SPECS_REPO_URL=' .env; then
-            sed -i "s|^OPENCLAW_SPECS_REPO_URL=.*|OPENCLAW_SPECS_REPO_URL=${SPECS_URL}|" .env
-        else
-            echo "OPENCLAW_SPECS_REPO_URL=${SPECS_URL}" >> .env
-        fi
-        ok "OPENCLAW_SPECS_REPO_URL=${SPECS_URL}"
-        # PAT required for HTTPS push
-        if [[ "$SPECS_URL" == https://* ]]; then
-            if ! grep -qE '^OPENCLAW_GIT_TOKEN=.+$' .env; then
-                if [ -t 0 ]; then
-                    read -r -s -p "  GitHub PAT (repo scope) for the specs repo: " pat; echo
-                    if [ -n "$pat" ]; then
-                        if grep -qE '^OPENCLAW_GIT_TOKEN=' .env; then
-                            sed -i "s|^OPENCLAW_GIT_TOKEN=.*|OPENCLAW_GIT_TOKEN=${pat}|" .env
-                        else
-                            echo "OPENCLAW_GIT_TOKEN=${pat}" >> .env
-                        fi
-                        ok "OPENCLAW_GIT_TOKEN set"
-                    else
-                        warn "OPENCLAW_GIT_TOKEN left empty — daemon will fail to push"
-                    fi
-                else
-                    warn "OPENCLAW_GIT_TOKEN missing and shell is non-interactive — set it manually"
-                fi
-            else
-                ok "OPENCLAW_GIT_TOKEN already set"
-            fi
-        fi
+        read -r -p "  SQLite spec DB path inside the container [${DEFAULT_DB_PATH}]: " ans
+        DB_PATH_VAL="${ans:-$DEFAULT_DB_PATH}"
     else
-        info "no specs repo configured — running in local-only mode"
+        DB_PATH_VAL="$DEFAULT_DB_PATH"
+        info "non-interactive — defaulting OPENCLAW_SPECS_DB_PATH=${DB_PATH_VAL}"
     fi
+    if grep -qE '^OPENCLAW_SPECS_DB_PATH=' .env; then
+        sed -i "s|^OPENCLAW_SPECS_DB_PATH=.*|OPENCLAW_SPECS_DB_PATH=${DB_PATH_VAL}|" .env
+    else
+        echo "OPENCLAW_SPECS_DB_PATH=${DB_PATH_VAL}" >> .env
+    fi
+    ok "OPENCLAW_SPECS_DB_PATH=${DB_PATH_VAL}"
 else
-    ok "OPENCLAW_SPECS_REPO_URL already set"
+    ok "OPENCLAW_SPECS_DB_PATH already set: ${DB_PATH_VAL}"
+fi
+
+# OPENCLAW_LEADER_URL — only prompted on followers (OPENCLAW_LEADER=0).
+IS_LEADER_NOW=$(grep -E '^OPENCLAW_LEADER=' .env | tail -1 | cut -d= -f2- || echo 0)
+if [ "${IS_LEADER_NOW}" = "1" ]; then
+    info "this machine is the leader — OPENCLAW_LEADER_URL not needed here"
+else
+    LEADER_URL_VAL=$(grep -E '^OPENCLAW_LEADER_URL=' .env | tail -1 | cut -d= -f2- || true)
+    if [ -z "${LEADER_URL_VAL:-}" ]; then
+        if [ -t 0 ]; then
+            while :; do
+                read -r -p "  Leader's daemon URL (e.g. http://leader.lan:7878 or https://leader.tailnet.ts.net): " ans
+                ans="${ans:-}"
+                if [ -z "$ans" ]; then
+                    warn "OPENCLAW_LEADER_URL is required on followers — try again"
+                    continue
+                fi
+                if node -e "new URL(process.argv[1])" "$ans" >/dev/null 2>&1; then
+                    LEADER_URL_VAL="$ans"
+                    break
+                else
+                    warn "'$ans' did not parse as a URL — example: http://leader.lan:7878"
+                fi
+            done
+        else
+            fail "OPENCLAW_LEADER_URL is empty and shell is non-interactive — set it in .env before re-running"
+        fi
+        if grep -qE '^OPENCLAW_LEADER_URL=' .env; then
+            sed -i "s|^OPENCLAW_LEADER_URL=.*|OPENCLAW_LEADER_URL=${LEADER_URL_VAL}|" .env
+        else
+            echo "OPENCLAW_LEADER_URL=${LEADER_URL_VAL}" >> .env
+        fi
+        ok "OPENCLAW_LEADER_URL=${LEADER_URL_VAL}"
+    else
+        # Validate an existing value too — typos in .env are common.
+        if node -e "new URL(process.argv[1])" "$LEADER_URL_VAL" >/dev/null 2>&1; then
+            ok "OPENCLAW_LEADER_URL already set: ${LEADER_URL_VAL}"
+        else
+            fail "OPENCLAW_LEADER_URL='${LEADER_URL_VAL}' in .env does not parse as a URL — fix it before continuing"
+        fi
+    fi
 fi
 
 bold "[9/13] openclaw-control: secrets"
@@ -474,7 +499,7 @@ cat <<EOF
   Gateway dashboard:   http://127.0.0.1:18789/?token=$(grep '^OPENCLAW_AUTH_TOKEN=' .env | cut -d= -f2-)
   Control dashboard:   http://127.0.0.1:7878
   Workspace:           $WORKSPACE_DIR  (→ /home/agent/.openclaw/workspace)
-  Shared specs:        $(grep '^OPENCLAW_SHARED_SPECS_DIR=' .env 2>/dev/null | cut -d= -f2- | sed "s|\${HOME}|$HOME|" || echo "$HOME/.claude/shared-specs")
+  Spec DB (leader):    $(grep '^OPENCLAW_SPECS_DB_PATH=' .env 2>/dev/null | cut -d= -f2- || echo "/data/specs.db")  (named volume: specs-db)
   Local memory:        $LOCAL_MEMORY_DIR  (NEVER synced)
 
   Logs:                ./scripts/dc.sh compose logs -f openclaw

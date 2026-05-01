@@ -33,7 +33,7 @@ FROM debian:trixie-slim@sha256:cedb1ef40439206b673ee8b33a46a03a0c9fa90bf3732f547
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl git openssh-client gh jq gettext-base tini gnupg \
+        ca-certificates curl gh jq gettext-base tini gnupg \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
@@ -55,14 +55,17 @@ RUN npm install -g @hive-academy/ptah-cli \
 RUN useradd --create-home --shell /bin/bash --uid 1000 agent \
     && mkdir -p /workspace /home/agent/.openclaw /home/agent/.ptah /home/agent/.claude \
                 /opt/openclaw-control/daemon /opt/openclaw-control/bot-bridge /opt/openclaw-control/dashboard \
-    && chown -R agent:agent /workspace /home/agent/.openclaw /home/agent/.ptah /home/agent/.claude
+                /data \
+    && chown -R agent:agent /workspace /home/agent/.openclaw /home/agent/.ptah /home/agent/.claude /data
 
 # ---------- install openclaw-control runtime ----------
 # Daemon — production deps + compiled JS
 COPY --chown=agent:agent openclaw-control/daemon/package.json openclaw-control/daemon/package-lock.json* /opt/openclaw-control/daemon/
 RUN cd /opt/openclaw-control/daemon \
     && (npm ci --omit=dev || npm install --omit=dev) \
-    && chown -R agent:agent /opt/openclaw-control/daemon
+    && chown -R agent:agent /opt/openclaw-control/daemon \
+    && node -e "require('better-sqlite3')(':memory:').close()" \
+        || { echo "[build] FATAL: better-sqlite3 native binary failed to load — check prebuilt support for the runtime base image" >&2; exit 1; }
 COPY --from=daemon-builder --chown=agent:agent /build/daemon/dist /opt/openclaw-control/daemon/dist
 
 # Bot-bridge — production deps + compiled JS
@@ -89,10 +92,9 @@ ENV OPENCLAW_HOST=0.0.0.0 \
     OPENCLAW_PORT=7878 \
     OPENCLAW_DASHBOARD_DIR=/opt/openclaw-control/dashboard/browser \
     OPENCLAW_PROJECT_ROOTS=/workspace \
-    OPENCLAW_SHARED_SPECS=/home/agent/.claude/shared-specs \
     OPENCLAW_LOCAL_MEMORY=/home/agent/.claude/local-memory \
     OPENCLAW_TICK_MS=30000 \
-    OPENCLAW_GIT_PULL_MS=15000 \
+    OPENCLAW_SPECS_DB_PATH=/data/specs.db \
     OPENCLAW_DISPATCH_MS=8000 \
     PTAH_BIN=ptah \
     PTAH_INVOKER_PROFILE=claude_code \

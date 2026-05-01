@@ -18,13 +18,19 @@ services:
       OPENCLAW_HOST: 0.0.0.0
       OPENCLAW_PORT: 7878
       OPENCLAW_PROJECT_ROOTS: /home/agent/.openclaw/workspace
-      OPENCLAW_SHARED_SPECS: /home/agent/.claude/shared-specs
       OPENCLAW_LOCAL_MEMORY: /home/agent/.claude/local-memory
       OPENCLAW_DASHBOARD_DIR: /opt/openclaw-control/dashboard/browser
       REDIS_URL: redis://openclaw-redis:6379
       PTAH_BIN: ptah
       PTAH_INVOKER_PROFILE: claude_code
       PTAH_INVOKER_AUTO_APPROVE: "1"
+      # SQLite spec store — leader writes to /data/specs.db (named volume).
+      # Followers ignore this path; they hit the leader over HTTP.
+      OPENCLAW_SPECS_DB_PATH: ${OPENCLAW_SPECS_DB_PATH:-/data/specs.db}
+      # Follower mode: HTTP base URL of the leader's daemon (only meaningful when OPENCLAW_LEADER=0).
+      OPENCLAW_LEADER_URL: ${OPENCLAW_LEADER_URL:-}
+      # Dispatch poison threshold — K consecutive failures per (project, task, phase) → poisoned.
+      OPENCLAW_DISPATCH_FAILURE_THRESHOLD: ${OPENCLAW_DISPATCH_FAILURE_THRESHOLD:-3}
       # Daemon delegates orchestration to host-side scripts/ptah-bridge.mjs.
       # Leave OPENCLAW_PTAH_BRIDGE_URL empty in .env to fall back to in-container ptah spawn.
       OPENCLAW_PTAH_BRIDGE_URL: ${OPENCLAW_PTAH_BRIDGE_URL:-http://host.docker.internal:8744}
@@ -58,10 +64,11 @@ services:
       # host gives the agent access to private repos / PR creation / etc.
       - ${GH_CONFIG_DIR:-${HOME}/.config/gh}:/home/agent/.config/gh:rw
       # ---- openclaw-control mounts ----
-      # Shared-specs git clone: specs/<project>/TASK_*/ + memory/{agents,users,threads,projects}/.
-      # The daemon clones OPENCLAW_SPECS_REPO_URL into this dir on first boot, then keeps it
-      # synced. Persisted on the host so the clone survives container restarts.
-      - ${OPENCLAW_SHARED_SPECS_DIR:-${HOME}/.claude/shared-specs}:/home/agent/.claude/shared-specs:rw
+      # SQLite spec store. The leader's daemon opens /data/specs.db on boot and
+      # runs migrations; followers never write here (they go HTTP-only via
+      # OPENCLAW_LEADER_URL) so the volume is harmless on follower hosts. If you
+      # prefer a leader-only attach, move this line into a docker-compose.override.leader.yml.
+      - specs-db:/data
       # Local memory: NEVER synced. Holds private agent personas (system prompts) and
       # any per-machine secrets. Each machine has its own — Anubis's persona never
       # leaves the leader machine, Amun's never leaves Amun's host.
@@ -92,3 +99,4 @@ services:
 
 volumes:
   openclaw-state:
+  specs-db: {}
