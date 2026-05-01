@@ -301,62 +301,111 @@ Common causes:
 - Port `:7878` already in use on the host. Check `ss -tln | grep 7878`. Either kill the conflicting process or change `OPENCLAW_PORT` (and the matching ports forward in `docker-compose.yml`).
 - `OPENCLAW_CONTROL_DISABLE=1` in `.env`. The launcher exits early in that case.
 
-### Symptom: `[git-sync] cloning … → /home/agent/.claude/shared-specs` fails
+### Symptom: stuck dispatch — `taken` for hours, no `dispatch.done` event
 
-```
-fatal: could not read Username for 'https://github.com'
-```
+A follower (or the leader's own worker) claimed a dispatch and then died, lost its network, or the ptah subprocess hung past the timeout. The row sits in `state='taken'` and the partial UNIQUE index `dispatches_unique_open` blocks the continuation loop from inserting a fresh `pending` for the same `(project, task, phase)` until it terminates.
 
-`OPENCLAW_GIT_TOKEN` is unset or wrong. Issue a PAT with `repo` scope on the **specific** specs repo. Update `.env`. `./scripts/dc.sh compose up -d`.
-
-```
-fatal: Authentication failed
-```
-
-PAT was set but is invalid (expired, revoked, wrong scope). Re-issue.
-
-```
-[git-sync] remote branch not found — initializing empty repo
-```
-
-`OPENCLAW_SPECS_BRANCH` doesn't exist on the remote. The daemon falls back to creating an empty repo locally and committing into a new branch with that name. Either accept this (the first push will create the branch upstream) or push an initial commit on the right branch from your laptop first.
-
-### Symptom: `[git-sync] push attempt N failed: ! [rejected]`
-
-Two writers raced; the daemon's auto-rebase couldn't reconcile. Usually self-heals on the next push. Repeated occurrences mean conflicting writes — check whether two leaders are running:
+**Diagnose** (run on the leader):
 
 ```bash
-git -C ~/.claude/shared-specs log --oneline -10
-# If you see commits from "openclaw-control" alternating between hostnames,
-# you have two machines with OPENCLAW_LEADER=1. Pick one.
+docker compose exec openclaw sqlite3 /data/specs.db \
+  "SELECT id, project_slug, task_id, phase, agent_id, claimed_by, claimed_at, failure_count
+     FROM dispatches
+    WHERE state='taken'
+    ORDER BY claimed_at;"
 ```
 
-### Symptom: dispatch sits in `pending/` forever
-
-The follower that was supposed to claim it isn't picking it up. Check:
-
-1. **Does the follower own the agent?** On the follower:
-   ```bash
-   grep OPENCLAW_LOCAL_AGENT_IDS .env
-   # The CSV must include the agent id from the dispatch JSON.
-   ```
-2. **Is the follower's daemon pulling?** Look for `[git-sync]` activity in `/tmp/openclaw-control-daemon.log`. If the follower can't pull, it can't see the dispatch.
-3. **Is the follower's dispatch worker running?**
-   ```bash
-   ./scripts/dc.sh compose exec openclaw grep '\[dispatch\]' /tmp/openclaw-control-daemon.log
-   # Should show: [dispatch] worker started for local agents: <ids>
-   ```
-   If the line is missing, `OPENCLAW_LOCAL_AGENT_IDS` was empty when the daemon started.
-4. **Is the follower's clock skewed?** Atomic claim works regardless, but if commits land out of order in the dashboard SSE feed, sync time on every machine.
-
-Force a manual claim from any machine that owns the agent:
+Compare `claimed_at` against now. Anything older than `OPENCLAW_TICK_MS × 2` plus reasonable invocation time is suspect. Check the dispatch's audit trail:
 
 ```bash
-git -C ~/.claude/shared-specs pull
-mv ~/.claude/shared-specs/specs/<project>/TASK_xxx/.dispatch/pending/X.json \
-   ~/.claude/shared-specs/specs/<project>/TASK_xxx/.dispatch/taken/X.json
-git -C ~/.claude/shared-specs add -A && git -C ~/.claude/shared-specs commit -m "manual claim" && git -C ~/.claude/shared-specs push
+docker compose exec openclaw sqlite3 /data/specs.db \
+  "SELECT ts, level, message FROM dispatch_log WHERE dispatch_id='<id>' ORDER BY ts;"
 ```
+
+**Fix** — force the row to a terminal state so the continuation loop can issue a fresh attempt:
+
+```bash
+docker compose exec openclaw sqlite3 /data/specs.db \
+  "UPDATE dispatches
+      SET state='failed',
+          completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    WHERE id='<id>';"
+```
+
+Note that this does **not** increment `failure_count` on the K-recent-window check — it just unblocks the unique index. The next continuation tick will issue a new pending row with a fresh id.
+
+### Symptom: poisoned dispatch — runaway-loop guard tripped
+
+`OPENCLAW_DISPATCH_FAILURE_THRESHOLD` (default 3) consecutive failures for the same `(project_slug, task_id, phase)` flip the row to `state='poisoned'`. The continuation loop refuses to issue a new pending while a poisoned row is open, so the task halts.
+
+**Diagnose**:
+
+```bash
+docker compose exec openclaw sqlite3 /data/specs.db \
+  "SELECT id, project_slug, task_id, phase, failure_count, exit_code, stderr_snippet
+     FROM dispatches
+    WHERE state='poisoned';"
+```
+
+The `stderr_snippet` is the last 4 KB of stderr from the final attempt. Read it. Common causes: missing API key (ptah `authMethod` mismatch), persona missing, network hiccup x N.
+
+**Fix** — once you've addressed the root cause, clear the poisoned row so the next continuation tick can issue a fresh attempt:
+
+```bash
+docker compose exec openclaw sqlite3 /data/specs.db \
+  "DELETE FROM dispatches
+    WHERE state='poisoned'
+      AND project_slug='<slug>'
+      AND task_id='<TASK_YYYY_NNN>'
+      AND phase='<PHASE>';"
+```
+
+The cascade also drops the `dispatch_log` rows for that id (FK ON DELETE CASCADE). If you want to keep the log, mark the row `failed` instead:
+
+```bash
+docker compose exec openclaw sqlite3 /data/specs.db \
+  "UPDATE dispatches SET state='failed' WHERE id='<id>';"
+```
+
+### Symptom: follower can't reach the leader — SSE reconnect errors
+
+The follower's dispatch worker logs repeated `[dispatch] SSE error … reconnecting` or `fetch failed` against `OPENCLAW_LEADER_URL`. New `dispatch.pending` events are not flowing.
+
+**Diagnose** — on the follower:
+
+```bash
+docker compose exec openclaw curl -fsS \
+  -H "Authorization: Bearer $OPENCLAW_INTERNAL_TOKEN" \
+  "$OPENCLAW_LEADER_URL/api/health"
+```
+
+Three failure modes:
+
+- **Connection refused / timeout** — leader is down, or the URL/port is wrong, or a firewall sits between you. Verify the leader is up (`curl http://127.0.0.1:7878/api/health` on the leader host) and that `OPENCLAW_LEADER_URL` resolves and routes from the follower's container.
+- **`401`** — `OPENCLAW_INTERNAL_TOKEN` differs between leader and follower. They MUST match exactly. Update the follower's `.env` and `docker compose up -d`.
+- **`502 / 503`** — TLS terminator (Tailscale Funnel / Caddy / Cloudflare) up but the leader's daemon is not. Check the leader's `/tmp/openclaw-control-daemon.log`.
+
+**Workaround while you fix it**: the follower's worker keeps polling `GET /api/dispatches/pending` on its `OPENCLAW_DISPATCH_MS` interval (default 10s) even with SSE down, so claims will resume on the next successful HTTP call. No state is lost on either side.
+
+### Symptom: `database is locked` (`SQLITE_BUSY`) in the leader's daemon log
+
+Under WAL mode + `busy_timeout=5000`, this is rare. It means a write transaction held the writer lock longer than 5 s — almost always a bug, not a runtime condition.
+
+**Diagnose**:
+
+```bash
+docker compose logs openclaw 2>&1 | grep -E 'SQLITE_BUSY|database is locked' | tail -20
+docker compose exec openclaw sqlite3 /data/specs.db \
+  "SELECT ts, level, message FROM dispatch_log WHERE level='warn' ORDER BY ts DESC LIMIT 50;"
+```
+
+**Mitigation now** — restart the leader so any stuck writer goes away:
+
+```bash
+docker compose restart openclaw
+```
+
+**Mitigation long-term** — see `daemon/src/db/client.ts` header comment: every write transaction must use `BEGIN IMMEDIATE` and at most 2-3 statements; no I/O inside a transaction; payloads bounded. If you added a write path recently, audit it against that list. If the lock contention is from a long `task_files.write`, reduce the `.md` body or chunk it.
 
 ### Symptom: `[bot-bridge] agent "<id>" has no local persona — skipping`
 
@@ -404,7 +453,7 @@ sed -i 's|^DISCORD_ALLOWED_USER_IDS=.*|DISCORD_ALLOWED_USER_IDS=1234567890123456
 
 Look for `invoker.finished … exitCode=N`:
 
-- `exitCode=0` but task still at the same phase → the agent didn't write the expected artifact (`task-description.md` etc.). Check the per-run log at `~/.claude/shared-specs/specs/<project>/<task>/.invoker/<timestamp>-<agent>.log`. The prompt is in there; the model output is in there; the failure is somewhere between them.
+- `exitCode=0` but task still at the same phase → the agent didn't write the expected artifact (`task-description.md` etc.). The dispatch's audit trail is in `dispatch_log`: `docker compose exec openclaw sqlite3 /data/specs.db "SELECT ts, level, message FROM dispatch_log WHERE dispatch_id='<id>' ORDER BY ts;"`. The host-side ptah-bridge also keeps stdout per invocation in its journal: `journalctl --user -u ptah-bridge.service -n 200`.
 - `exitCode!=0` → the ptah subprocess errored. Stderr is in the log file.
 
 ### Symptom: the leader's continuation loop "is supposed to be running" but isn't
@@ -476,7 +525,7 @@ systemctl --user daemon-reload && systemctl --user restart ptah-bridge.service
 
 ### Symptom: bridge translates path but ptah complains "no such file or directory"
 
-Path translation is prefix-based. If your project lives outside `WORKSPACE_DIR` (e.g. you cloned to `~/code/foo` instead of `~/projects/foo`), the bridge has nothing to map. Override per-deployment via `BRIDGE_WORKSPACE_HOST` in the systemd unit, or use a per-project `.workspace` file inside `shared-specs/specs/<slug>/.workspace` containing the absolute host path.
+Path translation is prefix-based. If your project lives outside `WORKSPACE_DIR` (e.g. you cloned to `~/code/foo` instead of `~/projects/foo`), the bridge has nothing to map. Override per-deployment via `BRIDGE_WORKSPACE_HOST` in the systemd unit, or set the project's `workspace` field in the leader's `projects` row: `UPDATE projects SET workspace='/abs/host/path' WHERE slug='<slug>';`.
 
 ### Symptom: gateway dashboard at `:18789` works, control dashboard at `:7878` doesn't
 

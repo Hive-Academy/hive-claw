@@ -59,45 +59,45 @@ If both are empty, the entrypoint disables the gateway's discord adapter automat
 | `GH_AUTH_MODE` | `file` | `file` / `keyring` / `token` / `skip` — controls how `gh` stores tokens (only `file` works with the bind mount). |
 | `GITHUB_TOKEN` | (empty) | Optional fallback when `gh auth login` isn't an option. |
 
-### Control plane — Core
+### Control plane tier — Core
 
-| Variable | Default | What it does |
-|---|---|---|
-| `OPENCLAW_CONTROL_DISABLE` | `0` | Set to `1` to skip starting the daemon and bot-bridge entirely. |
-| `OPENCLAW_CONTROL_BIND` | `127.0.0.1` | Host bind for `:7878`. Set to `0.0.0.0` only with TLS in front. |
-| `OPENCLAW_PORT` | `7878` | Daemon port (inside container). Rarely changed. |
-| `OPENCLAW_HOST` | `0.0.0.0` | Daemon bind (inside container). Rarely changed. |
-| `OPENCLAW_PUBLIC_URL` | `http://localhost:7878` | The public-facing URL of the dashboard. Used for self-referencing links. |
-| `OPENCLAW_JWT_SECRET` | (auto by setup.sh) | JWT signing secret for browser sessions. Rotate to invalidate every session. |
-| `OPENCLAW_INTERNAL_TOKEN` | (auto on first boot) | Service token for bot-bridge ↔ daemon and dispatched-agent ↔ daemon calls. Copy from `/tmp/openclaw-control-daemon.log` into `.env` to pin across recreates. |
-| `OPENCLAW_TICK_MS` | `30000` | Continuation loop interval, leader only. Lower = faster phase advancement = more git activity. |
-| `OPENCLAW_DEFAULT_PROJECT` | (empty) | Used by `!task <description>` when no project is supplied. |
-| `OPENCLAW_PTAH_BRIDGE_URL` | `http://host.docker.internal:8744` | URL of the host-side ptah-bridge. Daemon delegates orchestration (continuation loop + dispatch worker) here so ptah uses the host's auth state. Empty = fall back to spawning ptah inside the container. See [OPENCLAW_CONTROL.md](OPENCLAW_CONTROL.md#orchestration-runs-via-the-host-side-ptah-bridge). |
+Defaults below are read in `openclaw-control/daemon/src/config.ts` (the cited line numbers refer to that file).
 
-### Control plane — Leader / follower
+| Variable | Default | Required when | Tier | What it does |
+|---|---|---|---|---|
+| `OPENCLAW_CONTROL_DISABLE` | `0` | always optional | both | Set to `1` to skip starting the daemon and bot-bridge entirely. Read by `entrypoint-control.sh`, not the daemon. |
+| `OPENCLAW_CONTROL_BIND` | `127.0.0.1` | always optional | both | Host bind for `:7878`. Set to `0.0.0.0` only with TLS in front. (Compose-side, not the daemon.) |
+| `OPENCLAW_PORT` | `7878` (`config.ts:21`) | always optional | both | Daemon port inside the container. Rarely changed. |
+| `OPENCLAW_HOST` | `127.0.0.1` (`config.ts:22`) | always optional | both | Daemon bind inside the container. |
+| `OPENCLAW_PUBLIC_URL` | `http://localhost:7878` (`config.ts:23`) | always optional | both | Self-referencing URL used in OAuth redirects. |
+| `OPENCLAW_JWT_SECRET` | `dev-secret-change-me` (`config.ts:67`) | always set in production | both | JWT signing secret for browser sessions. Rotate to invalidate every session. setup.sh auto-generates a real value if empty. |
+| `OPENCLAW_INTERNAL_TOKEN` | empty (`config.ts:70`) | required for follower↔leader and bot-bridge↔daemon calls | both | Bearer token for service-to-service. **Must match exactly between the leader and every follower.** Copy from logs or pin in `.env`. |
+| `OPENCLAW_TICK_MS` | `30000` (compose-side; not in `config.ts`) | always optional | leader-only | Continuation loop interval. The follower does not run the loop. |
+| `OPENCLAW_DEFAULT_PROJECT` | empty (compose-side; not in `config.ts`) | always optional | both | Used by `!task <description>` when no project is supplied. |
+| `OPENCLAW_PTAH_BRIDGE_URL` | empty → fallback (`config.ts:102`) | always optional | both | URL of the host-side ptah-bridge. Empty = spawn ptah inside the container. See [OPENCLAW_CONTROL.md](OPENCLAW_CONTROL.md#orchestration-runs-via-the-host-side-ptah-bridge). |
 
-| Variable | Default | What it does |
-|---|---|---|
-| `OPENCLAW_LEADER` | `0` | Exactly one machine should be `1`. Enables the continuation loop and signals "this is where the dashboard lives publicly." |
-| `OPENCLAW_LOCAL_AGENT_IDS` | (empty) | CSV of agent ids this machine owns. Empty = ownership checks bypassed (single-machine dev mode). On a real fleet, must be **disjoint** between machines. |
+### Control plane tier — Leader / follower mode
 
-### Control plane — Specs repo (git sync)
+| Variable | Default | Required when | Tier | What it does |
+|---|---|---|---|---|
+| `OPENCLAW_LEADER` | `0` (`config.ts:6`) | always | both | Exactly one machine in the fleet should set `1`. Enables the continuation loop, opens the SQLite spec store, and is where the public dashboard lives. |
+| `OPENCLAW_LOCAL_AGENT_IDS` | empty (`config.ts:35`) | required to dispatch local agents | both | CSV of agent ids this machine owns. Empty = ownership checks bypassed (single-machine dev mode). On a real fleet, must be **disjoint** between machines. |
+| `OPENCLAW_LEADER_URL` | empty (`config.ts:7`) | **required when `OPENCLAW_LEADER=0`** (hard-fail at config-load: `config.ts:9-13`) | follower-only | Leader's daemon base URL. Examples: `http://leader.lan:7878`, `https://leader.tailnet.ts.net`. Ignored on the leader. |
 
-| Variable | Default | What it does |
-|---|---|---|
-| `OPENCLAW_SPECS_REPO_URL` | (empty) | HTTPS URL of the **private** GitHub repo. Empty disables sync (local-only mode). |
-| `OPENCLAW_SPECS_BRANCH` | `main` | Branch to clone and push to. |
-| `OPENCLAW_GIT_TOKEN` | (empty) | GitHub PAT with `repo` scope. Required for HTTPS push. Falls back to `GITHUB_TOKEN`. |
-| `OPENCLAW_GIT_USER_NAME` | `openclaw-control` | Identity used by daemon's commits. |
-| `OPENCLAW_GIT_USER_EMAIL` | `openclaw@localhost` | Same. |
-| `OPENCLAW_GIT_PULL_MS` | `15000` | Pull interval (ms). |
-| `OPENCLAW_SHARED_SPECS_DIR` | `${HOME}/.claude/shared-specs` | Host path of the cloned repo. Bind-mounted into the container. |
+### Control plane tier — Storage (leader-only)
 
-### Control plane — Local memory (NEVER synced)
+| Variable | Default | Required when | Tier | What it does |
+|---|---|---|---|---|
+| `OPENCLAW_SPECS_DB_PATH` | `/data/specs.db` (`config.ts:46`) | leader-only | leader-only | Absolute path to the SQLite database file inside the container. The directory must be writable by uid 1000. The compose file mounts the named docker volume `specs-db` at `/data` so the DB persists across container recreates. Followers do not open this file; the value is harmless on followers. |
+| `OPENCLAW_DISPATCH_FAILURE_THRESHOLD` | `3` (`config.ts:15-18` and `db/dispatches.ts:288-293`) | both tiers (consumed only on the leader) | both (effective leader-only) | Integer. K consecutive failures (per `(project_slug, task_id, phase)`) before a dispatch is poisoned. The K-recent-window query lives in `db/dispatches.ts`. Values < 1 fall back to 3. |
 
-| Variable | Default | What it does |
-|---|---|---|
-| `OPENCLAW_LOCAL_MEMORY_DIR` | `${HOME}/.claude/local-memory` | Host path for private agent personas + per-machine secrets. Bind-mounted; never committed anywhere. |
+### Control plane tier — Local memory (NEVER synced, NEVER over HTTP)
+
+| Variable | Default | Required when | Tier | What it does |
+|---|---|---|---|---|
+| `OPENCLAW_LOCAL_MEMORY` | `${HOME}/.claude/local-memory` (`config.ts:58-59`) | always optional | both | Container-side root for `PRIVATE_AGENT_FILES` (persona.md, secrets.md, persona.json, secrets.json). Bind-mounted from `OPENCLAW_LOCAL_MEMORY_DIR` on the host. Never written to the leader's DB; never sent over HTTP. |
+| `OPENCLAW_LOCAL_AGENTS_ROOT` | `${OPENCLAW_LOCAL_MEMORY}/agents` (`config.ts:60-62`) | always optional | both | Override of where per-agent local files live. Defaults under `OPENCLAW_LOCAL_MEMORY`. |
+| `OPENCLAW_LOCAL_MEMORY_DIR` | `${HOME}/.claude/local-memory` | always optional | both | Host path that compose bind-mounts to `OPENCLAW_LOCAL_MEMORY`. Edited in `.env`, not read by the daemon directly. |
 
 ### Control plane — Discord OAuth (dashboard auth, leader-facing)
 
@@ -113,7 +113,7 @@ If both `DISCORD_ALLOWED_USER_IDS` and `DISCORD_ALLOWED_GUILD_ID` are empty, the
 
 ### Control plane — Per-agent bot tokens
 
-One env var per agent dir under `local-memory/agents/<id>/`. Default name is `DISCORD_TOKEN_<UPPER_ID>`. Override the env var name via `shared-specs/memory/agents/<id>/discord.json#tokenEnvVar`.
+One env var per agent dir under `local-memory/agents/<id>/`. Default name is `DISCORD_TOKEN_<UPPER_ID>`. Override the env var name via the leader's shared memory at `agents/<id>/discord.json#tokenEnvVar` (served by `GET /api/memories/agents/<id>/discord.json`).
 
 ```
 DISCORD_TOKEN_ANUBIS=...

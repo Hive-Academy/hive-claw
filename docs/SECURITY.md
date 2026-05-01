@@ -61,21 +61,20 @@ If your threat model is different (shared host, public exposure, untrusted code 
 
 The control plane introduces three new exposure surfaces beyond what the gateway has. Each has its own threat model.
 
-### The shared specs repo (`OPENCLAW_SPECS_REPO_URL`)
+### The leader's spec database
 
-**Must be a private repo.** It holds:
+The single SQLite file at `OPENCLAW_SPECS_DB_PATH` (default `/data/specs.db`, persisted via the named docker volume `specs-db`) holds:
 
-- The full task tree under `specs/<project>/TASK_*` — descriptions, plans, code excerpts, sometimes paths to local files. Whatever your agents discuss while orchestrating, ends up here.
-- Shared memory under `memory/{users,threads,projects}/` — Discord user profiles, channel context summaries, project notes.
-- The dispatch queue under `specs/<project>/<task>/.dispatch/` — JSON dispatch records, one per inter-machine handoff.
+- The full task tree (`projects`, `tasks`, `task_files`) — descriptions, plans, code excerpts, sometimes paths to local files. Whatever your agents discuss while orchestrating, ends up here.
+- Shared memory (`memory_files` rows for `scope IN ('users','threads','projects')` plus `agents/<id>/identity.md`) — Discord user profiles, channel context summaries, project notes, public agent bios.
+- The dispatch queue (`dispatches`) and its audit trail (`dispatch_log`).
 
-What is **not** in the repo:
+What is **not** in the DB:
 
-- Agent personas (those live in `local-memory/`, never synced).
-- Run logs (`.invoker/` is `.gitignore`d).
-- Raw secrets — but be aware that what an agent *says* during a session lands in the task artifacts. If a user pastes a token into a Discord message, the bot's reply context could surface it. Treat the repo as you'd treat a sensitive private codebase: limit collaborator access, audit pushes occasionally.
+- Agent personas, secrets — those live in `~/.claude/local-memory/`, never synced and never over HTTP. See "Persona privacy invariant" below.
+- Raw operator secrets — but be aware that what an agent *says* during a session lands in the task-file rows. If a user pastes a token into a Discord message, the bot's reply context could surface it. Treat the DB the way you'd treat a sensitive private codebase.
 
-The PAT (`OPENCLAW_GIT_TOKEN`) needs `repo` scope. Use a fine-grained PAT scoped to **only this repo** if your GitHub plan supports it. Rotate by generating a new PAT, updating `.env` on every machine, and `./scripts/dc.sh compose up -d` on each.
+Followers do **not** have a copy of this DB. They are HTTP-only clients of the leader.
 
 ### The dashboard (`:7878`)
 
@@ -99,16 +98,43 @@ When you stop using Funnel: `tailscale funnel reset` AND set `OPENCLAW_CONTROL_B
 
 ### Persona privacy invariant
 
-The `local-memory/agents/<id>/persona.md` file is the agent's voice. Things the system guarantees about it:
+The `local-memory/agents/<id>/persona.md` file is the agent's voice. The implementation-plan §8 specifies a three-layer defense; each layer would, by itself, prevent a leak. We run all three because programming errors happen and the cost of a leak is high.
 
-- **Never written to git** — `daemon/src/memory.ts:resolveBackend()` routes any write to a `PRIVATE_AGENT_FILES` filename (`persona.md`, `secrets.md`, `persona.json`, `secrets.json`) under any agent id to `localAgentDir(id)`. This path is `~/.claude/local-memory/agents/<id>/`, bind-mounted from the host. The git repo lives under `~/.claude/shared-specs/`, a different mount. There is no code path that crosses them.
-- **Never returned over HTTP to a non-owner** — write requests under `agents/<id>/*` are 403'd unless `<id> ∈ OPENCLAW_LOCAL_AGENT_IDS`. Read requests for `persona.md` succeed only if the file exists locally; a follower asking the leader for "anubis's persona" gets a 404 because the leader's file system doesn't have it.
-- **Never copied between machines automatically** — the daemon doesn't ship personas. If you migrate an agent, you scp the file yourself.
+**Layer 1 — FS chokepoint** (`daemon/src/memory.ts`):
+`resolveBackend(scope, id, filename)` is the single function every read/write/delete passes through. When `scope === 'agents' && PRIVATE_AGENT_FILES.has(filename)`, it returns `{kind: 'local', dir: localAgentDir(id), filename}` and the caller writes to `~/.claude/local-memory/agents/<id>/<filename>`. The "shared" branch — `MemoryRepo.read/write/delete` against the SQLite `memory_files` table — is never reached for these names. `PRIVATE_AGENT_FILES = {persona.md, secrets.md, persona.json, secrets.json}` is the canonical allowlist, declared once in `daemon/src/db/memory.ts` and re-exported through the barrel. The DB literally never sees a row with one of these filenames in scope=agents.
+
+**Layer 2 — HTTP gate** (`daemon/src/api.ts`):
+The memory routes check the same allowlist *before* any DB query.
+- `PUT /api/memories/agents/:id/<private-file>` returns **403** with `{error: 'private agent files cannot be sent over the network'}`.
+- `DELETE /api/memories/agents/:id/<private-file>` — same 403.
+- `GET /api/memories/agents/:id/<private-file>` returns **404** with `{error: 'not found'}`.
+
+The 404 on GET is deliberate, not 403. A 403 would leak the existence of a persona ("there's a persona behind this URL but you can't have it"); a 404 is indistinguishable from "no such file". This is per implementation-plan.md §8 lines 805-811.
+
+**Layer 3 — defense-in-depth allowlist** (`daemon/src/db/memory.ts`):
+`MemoryRepo.write` and `MemoryRepo.delete` call `assertNotPrivate(scope, filename)` synchronously, which `throw`s if a private filename ever reaches the repo. `MemoryRepo.read` returns `null` rather than reading the DB. This is the belt-and-braces guard: if a future contributor refactors the chokepoint or adds a code path that bypasses `resolveBackend`, the repo refuses anyway. A bug becomes a hard crash, not a silent leak.
+
+Both invariants — that the DB never holds a private row, and that the HTTP API responds 403 (write) and 404 (read) on a private filename — are continuously verified by `openclaw-control/daemon/test/persona-privacy.test.ts`.
 
 Things the system does **not** guarantee:
 
-- That the operator hasn't intentionally pasted persona content into a Discord reply, a task description, or a memory file under `users/`. The privacy is structural, not semantic.
+- That the operator hasn't intentionally pasted persona content into a Discord reply, a task description, or a `memory_files` row for `users/`. The privacy is structural, not semantic.
 - That a malicious skill running inside the container can't `cat` the file. Container = same trust as the host shell. If you don't trust a skill, don't install it.
+
+### DB at rest
+
+The SQLite file lives at `OPENCLAW_SPECS_DB_PATH` (default `/data/specs.db`) inside the leader's container. It is owned by uid 1000 (the `agent` user) with file mode `0600`. The named docker volume `specs-db` is the persistent backing store on the host.
+
+**There is NO encryption at rest.** Any operator with read access to the leader host's docker volume directory can read every `memory_files` row, every dispatch prompt, and every `dispatch_log` line. This is a known accepted risk per implementation-plan.md §15 line 1270.
+
+Mitigation today:
+
+- Keep the host directory `chmod 0700` and limit shell access on the leader host. (`docker volume inspect openclaw_specs-db` will show you the mountpoint on the host.)
+- Treat the leader host the way you'd treat any single-tenant database server: only the operator should be able to log in.
+- Rotate `OPENCLAW_INTERNAL_TOKEN` if you suspect a follower or bot-bridge token leak (every authenticated reader of the API would have to be re-credentialled anyway).
+- Take a `.backup` snapshot before doing anything risky to the DB. See `docs/OPERATIONS.md`.
+
+If you need at-rest encryption: layer the host filesystem with LUKS or use a docker volume driver that does block-level encryption. The daemon does not implement application-level encryption and there are no plans to add it.
 
 ### Migration / decommission
 
@@ -120,7 +146,7 @@ When retiring a machine:
 4. Rotate `DISCORD_TOKEN_<id>` if you suspect the old machine could still be online.
 5. Remove `<id>` from the *new* machine's `OPENCLAW_LOCAL_AGENT_IDS` only after you're sure the persona file is in place.
 
-The shared specs repo doesn't need any cleanup — the agent's `identity.md` (public bio) stays.
+The leader's DB doesn't need any cleanup — the agent's `identity.md` (public bio) stays in `memory_files`. If you want to wipe the public bio too, run `DELETE FROM memory_files WHERE scope='agents' AND owner_id='<id>'` on the leader.
 
 ---
 

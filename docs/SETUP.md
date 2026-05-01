@@ -1,26 +1,26 @@
 # Setup — new-machine bootstrap
 
-Two paths through this doc, sharing the same prereqs:
+One linear flow. Same script on every host. Differs only in a couple of `.env` lines per role.
 
-- **Leader install** (one machine in the fleet) — runs the continuation loop, hosts the public dashboard, owns at least one agent.
-- **Follower install** (every other machine) — runs only the dispatch worker, owns its own agents, dashboard stays loopback.
+- **Leader** — exactly one machine in the fleet. Owns `/data/specs.db`, runs the continuation loop, hosts the user-facing dashboard.
+- **Followers** — every other machine. HTTP-only clients of the leader. Run only the dispatch worker for their own local agents.
 
 Tested on Linux Mint 22.3 / Ubuntu 24.04. Should work on any systemd-based distro with Docker Engine and the Ollama installer.
 
-If you only want the original single-machine OpenClaw + Ollama + Discord setup with no control plane, set `OPENCLAW_CONTROL_DISABLE=1` in `.env` and stop after Step 5 — everything from Step 6 on is control-plane work.
+If you only want the original single-machine OpenClaw + Ollama + Discord setup with no control plane, set `OPENCLAW_CONTROL_DISABLE=1` in `.env` and stop after the prereq + image-build steps — everything below is control-plane work.
 
 ---
 
-## Prereqs (both paths)
+## Prereqs (every host)
 
 | Requirement | Why |
 |---|---|
 | Docker Engine ≥ 24 | runs the container |
 | Docker Compose plugin v2 | `docker compose` |
-| systemd | hosts Ollama |
-| `curl`, `openssl`, `jq`, `git` | used by setup.sh + entrypoint |
+| systemd | hosts Ollama (and the optional ptah-bridge user service) |
+| `curl`, `openssl`, `jq` | used by setup.sh + entrypoint |
 | `sudo` | only for the Ollama systemd drop-in |
-| Internet | model + npm + GitHub |
+| Internet | model + npm + Discord |
 | ~3 GB disk, ~2 GB RAM free | container + plugin runtime |
 
 If `docker` isn't installed:
@@ -32,7 +32,7 @@ sudo usermod -aG docker $USER && newgrp docker
 
 ---
 
-## Step 1 — Ollama
+## Step 1 — Ollama (every host that runs an agent)
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
@@ -72,100 +72,96 @@ Repeat for each agent (anubis on the leader, amun on Amun's machine, etc.).
 
 ---
 
-## Step 4 — Shared specs repo (leader only — done once for the whole fleet)
+## Step 4 — The four-step provision (every host)
 
-1. On GitHub: create a **private** repo named e.g. `<you>/openclaw-specs`. Empty is fine; the daemon initializes it on first boot.
-2. Create a fine-grained PAT with `repo` scope on this one repo: https://github.com/settings/tokens?type=beta. Save it for `.env`.
-3. Every follower will use the **same** repo URL and **its own** PAT (or the same PAT — it just needs push access).
+The same four steps run on every host. The only thing that changes between leader and followers is a few `.env` lines.
 
-You can do this later — `OPENCLAW_SPECS_REPO_URL` empty is fine for single-machine local-only mode. Adding the URL later just turns sync on.
-
----
-
-## Step 5 — Provision (leader)
+### 4a. Clone the repo and copy the env template
 
 ```bash
 git clone https://github.com/Hive-Academy/hive-claw ~/Desktop/fixing-openclaw
 cd ~/Desktop/fixing-openclaw
-
-./scripts/provision-machine.sh \
-    --agent anubis \
-    --role leader \
-    --repo https://github.com/<you>/openclaw-specs
+cp .env.example .env
+chmod 600 .env
 ```
 
-The script verifies prereqs, sets the leader/agent flags in `.env`, and hands off to `setup.sh` which (idempotently):
+### 4b. Edit `.env` — leader vs follower
 
-1. Verifies Docker / Compose / Ollama
-2. Writes the Ollama systemd drop-in if needed
-3. `cp .env.example .env` if absent + chmod 600
-4. Generates `OPENCLAW_AUTH_TOKEN`
-5. Creates `${WORKSPACE_DIR}` and seeds it with persona templates
-6. Asks if this machine is leader / follower (already answered by provision script)
-7. Asks for `OPENCLAW_LOCAL_AGENT_IDS` (already filled)
-8. Asks for `OPENCLAW_SPECS_REPO_URL` and the PAT (already filled if `--repo` passed; PAT is still prompted interactively)
-9. Generates `OPENCLAW_JWT_SECRET` and `OPENCLAW_INTERNAL_TOKEN`
-10. Scaffolds `~/.claude/local-memory/agents/<id>/persona.md` from `templates/agent-persona.md.tmpl`
-11. Builds the image
-12. `docker compose up -d`
+Open `.env` in your editor. The deltas you must set:
 
----
-
-## Step 5' — Provision (follower)
+**On the leader (exactly one machine):**
 
 ```bash
-git clone https://github.com/Hive-Academy/hive-claw ~/Desktop/fixing-openclaw
+OPENCLAW_LEADER=1
+OPENCLAW_LOCAL_AGENT_IDS=anubis              # or whichever agent(s) this host owns
+OPENCLAW_SPECS_DB_PATH=/data/specs.db        # default; rarely changed
+DISCORD_TOKEN_ANUBIS=...                     # one per local agent
+```
+
+`setup.sh` will auto-generate `OPENCLAW_JWT_SECRET` and `OPENCLAW_INTERNAL_TOKEN` if you leave them empty. Note the generated `OPENCLAW_INTERNAL_TOKEN` value — you'll need to copy it to every follower's `.env`.
+
+**On every follower:**
+
+```bash
+OPENCLAW_LEADER=0
+OPENCLAW_LEADER_URL=https://leader.tailnet.ts.net    # or http://leader.lan:7878
+OPENCLAW_LOCAL_AGENT_IDS=amun                        # disjoint from the leader's
+OPENCLAW_INTERNAL_TOKEN=<paste the leader's value>   # MUST match
+DISCORD_TOKEN_AMUN=...                               # one per local agent
+```
+
+If `OPENCLAW_LEADER=0` and `OPENCLAW_LEADER_URL` is empty, the daemon refuses to start (config-load hard-fail at `daemon/src/config.ts`).
+
+Followers do not need `DISCORD_CLIENT_ID/SECRET` — only the leader's dashboard is the user-facing one. Their loopback dashboard works in `local-dev` fallback for debugging.
+
+### 4c. Run `setup.sh` (or `docker compose up -d` directly)
+
+```bash
+./setup.sh
+```
+
+The script (idempotently):
+
+1. Verifies Docker / Compose / Ollama.
+2. Writes the Ollama systemd drop-in if needed.
+3. Generates `OPENCLAW_AUTH_TOKEN`, `OPENCLAW_JWT_SECRET`, `OPENCLAW_INTERNAL_TOKEN` if any are empty.
+4. Asks for `OPENCLAW_LEADER` if missing; asks for `OPENCLAW_LEADER_URL` if you said follower.
+5. Asks for `OPENCLAW_LOCAL_AGENT_IDS`.
+6. Scaffolds `~/.claude/local-memory/agents/<id>/persona.md` from `templates/agent-persona.md.tmpl` for each id.
+7. Builds the image and runs `docker compose up -d`.
+8. Installs the optional host-side `ptah-bridge` systemd user service.
+
+If you'd rather skip the prompts and go straight to compose:
+
+```bash
+docker compose up -d
+```
+
+…after editing `.env` by hand. The first boot of the leader's container creates `/data/specs.db` automatically (the `entrypoint-control.sh` runs the schema migrations idempotently on every boot).
+
+### 4d. Migrating from the git-era only — run `cutover.sh` once on the leader
+
+Skip this step if this is a fresh install with no prior git-cloned spec tree under `~/.claude/`. Otherwise:
+
+```bash
 cd ~/Desktop/fixing-openclaw
-
-./scripts/provision-machine.sh \
-    --agent amun \
-    --role follower \
-    --repo https://github.com/<you>/openclaw-specs
+./scripts/cutover.sh
 ```
 
-Same script, different flags. Set `--agent` to the id this follower owns. Same specs repo URL.
+The script prompts for explicit `YES` confirmation, then:
 
-A few extra rules for followers:
+1. Stops the container stack.
+2. Removes the legacy git clone under `~/.claude/` (if present).
+3. Drops the legacy named docker volume `openclaw_specs-db` (idempotent).
+4. Clears any leftover `.invoker/` debug-log directories under `WORKSPACE_DIR`.
+5. Rebuilds + starts the new image.
+6. Probes `http://127.0.0.1:7878/api/health` to confirm the leader came up cleanly.
 
-- `OPENCLAW_LOCAL_AGENT_IDS` should be **disjoint** from the leader's. (`anubis` runs only on the leader; `amun` only on Amun.)
-- The follower's dashboard binds to `127.0.0.1:7878` and stays there. No Tailscale Funnel.
-- The follower's `DISCORD_CLIENT_ID/SECRET` can be left empty — only the leader's dashboard is the user-facing one. The follower's local dashboard works in `local-dev` fallback mode for debugging.
+This is destructive: in-flight tasks are lost. The user accepted this trade as part of TASK_2026_001.
 
 ---
 
-## Step 6 — Edit the `.env` secrets the script can't generate
-
-Open `.env`. Required values to fill in (skip a section if it's already filled by an earlier step):
-
-```bash
-# Inference (or your provider's equivalent)
-LLM_PROVIDER=ollama
-LLM_MODEL=kimi-k2.6:cloud
-
-# Specs repo PAT (leader + every follower)
-OPENCLAW_GIT_TOKEN=ghp_...
-
-# Discord OAuth (leader only — leave empty on followers if you don't need their dashboards public)
-DISCORD_CLIENT_ID=...
-DISCORD_CLIENT_SECRET=...
-DISCORD_REDIRECT_URI=http://localhost:7878/auth/discord/callback   # change after Tailscale step
-DISCORD_ALLOWED_USER_IDS=<your_discord_user_id>
-
-# This machine's bot token (one per agent it owns)
-DISCORD_TOKEN_ANUBIS=...    # or DISCORD_TOKEN_AMUN, etc.
-```
-
-Apply changes:
-
-```bash
-./scripts/dc.sh compose up -d
-```
-
-(`compose up -d` re-reads `.env` without rebuilding. Use `up -d --build` if you also changed code.)
-
----
-
-## Step 7 — Edit the agent persona
+## Step 5 — Edit the agent persona
 
 The bot won't be useful — and on a strict reading of the bot-bridge, won't even register — until the agent has a persona. The scaffold is full of placeholders.
 
@@ -173,13 +169,13 @@ The bot won't be useful — and on a strict reading of the bot-bridge, won't eve
 $EDITOR ~/.claude/local-memory/agents/anubis/persona.md   # or whichever id is yours
 ```
 
-Fill in name, role, voice, scope, do, don't. This file is **never** committed to the specs repo; it lives only on this machine. See [SKILLS-AND-PERSONA.md](SKILLS-AND-PERSONA.md) for guidance.
+Fill in name, role, voice, scope, do, don't. **This file is never sent over HTTP and is never written to the leader's DB.** It lives only on this machine. See [SKILLS-AND-PERSONA.md](SKILLS-AND-PERSONA.md) for guidance.
 
 The bot-bridge re-reads the persona on every message, so no restart is needed.
 
 ---
 
-## Step 8 — Verify
+## Step 6 — Verify
 
 ### Daemon
 
@@ -207,25 +203,31 @@ Then in your Discord guild:
 
 The bot should reply within ~10s (cloud model latency).
 
-### Specs repo sync
+### Leader spec DB
 
 ```bash
-ls ~/.claude/shared-specs/
-# .git/  .gitignore  specs/  memory/
-
-git -C ~/.claude/shared-specs log --oneline -5
-# Should show recent commits if anything's been written.
+docker compose exec openclaw sqlite3 /data/specs.db ".tables"
+# Should print: dispatch_log  dispatches  memory_files  projects  schema_version  task_files  tasks
 ```
 
-If the daemon failed to clone, you'll see it in:
+If you'd like to peek at open dispatches, see `docs/OPERATIONS.md`.
+
+### Follower → leader handshake
+
+On a follower:
 
 ```bash
-./scripts/dc.sh compose exec openclaw tail /tmp/openclaw-control-daemon.log | grep '\[git-sync\]'
+docker compose exec openclaw curl -fsS \
+    -H "Authorization: Bearer $OPENCLAW_INTERNAL_TOKEN" \
+    "$OPENCLAW_LEADER_URL/api/health"
+# Should return {"ok":true,...}
 ```
+
+If you get `401`, the follower's `OPENCLAW_INTERNAL_TOKEN` doesn't match the leader's. If you get a connection error, the leader isn't reachable from this host (Tailscale not up, port not exposed, firewall, etc.).
 
 ---
 
-## Step 9 — Expose the leader's dashboard publicly (optional, leader only)
+## Step 7 — Expose the leader's dashboard publicly (optional, leader only)
 
 The simplest path is Tailscale Funnel:
 
@@ -242,11 +244,11 @@ After Funnel is up:
 3. `./scripts/dc.sh compose up -d` to apply.
 4. Visit the public URL from your phone. Login with Discord. Your user ID had better be in `DISCORD_ALLOWED_USER_IDS` or you'll get a 403.
 
-If you don't want Tailscale, anything that does TLS termination + reverse proxy to `127.0.0.1:7878` works (Caddy, Traefik, Cloudflare Tunnel). Update the redirect URI to match.
+If you don't want Tailscale, anything that does TLS termination + reverse proxy to `127.0.0.1:7878` works (Caddy, Traefik, Cloudflare Tunnel). Update the redirect URI to match. Followers' `OPENCLAW_LEADER_URL` should point at this public URL.
 
 ---
 
-## Step 10 — Updating later
+## Step 8 — Updating later
 
 After pulling new commits or editing `skills/`:
 
@@ -254,7 +256,7 @@ After pulling new commits or editing `skills/`:
 ./scripts/update-machine.sh
 ```
 
-That runs `git pull --ff-only && ./scripts/dc.sh compose up -d --build` and waits for `/api/health` to respond.
+That runs `git pull --ff-only && ./scripts/dc.sh compose up -d --build` and waits for `/api/health` to respond. The leader's schema migrations are idempotent — they re-run on every boot and are no-ops if the schema is already at `CURRENT_VERSION`.
 
 After editing only `.env`:
 
@@ -266,11 +268,11 @@ After editing only persona / shared-memory: nothing to restart. The daemon re-re
 
 ---
 
-## Step 11 — Migrating between machines
+## Step 9 — Migrating between machines
 
 A Discord bot token can only be used by one running instance at a time. Two options:
 
-**Move (replace machine A with machine B).** Stop A's container; copy `~/.claude/local-memory/agents/<id>/persona.md` to B (scp, password manager); on B run `provision-machine.sh` with the same `--agent` id. The specs repo is unchanged — B will pull and pick up where A left off.
+**Move (replace machine A with machine B).** Stop A's container; copy `~/.claude/local-memory/agents/<id>/persona.md` to B (scp, password manager); on B follow the four-step provision with the same agent id in `OPENCLAW_LOCAL_AGENT_IDS`. The leader's DB is unchanged — B will start picking up dispatches addressed to that agent on its first SSE connect.
 
 **Run on both A and B with different agents.** Create a second Discord bot in the Developer Portal. Each machine sets its own `OPENCLAW_LOCAL_AGENT_IDS` and its own `DISCORD_TOKEN_<id>`. They appear as two separate users in your guild and own different work.
 
@@ -283,15 +285,16 @@ A Discord bot token can only be used by one running instance at a time. Two opti
 | `setup.sh: ollama not responding on :11434` | Ollama service not started | `sudo systemctl start ollama` |
 | Container is `(unhealthy)` for >2 min | First-run plugin install slow | Wait — total ~2-3 min on a fresh image |
 | `[entrypoint] WARNING: cannot reach OLLAMA_BASE_URL` | systemd override didn't apply | `sudo systemctl daemon-reload && sudo systemctl restart ollama` |
-| Daemon starts, no `[git-sync]` clone log | `OPENCLAW_SPECS_REPO_URL` empty | Set it (or accept local-only mode) |
-| `[git-sync] pull failed: not allowed to push` | `OPENCLAW_GIT_TOKEN` missing/invalid scope | Issue a PAT with `repo` scope; update `.env`; restart |
+| Daemon throws at boot: `Followers MUST set OPENCLAW_LEADER_URL` | `OPENCLAW_LEADER=0` and `OPENCLAW_LEADER_URL` empty | Set the leader's URL in `.env` |
+| Follower hits `401` calling the leader | `OPENCLAW_INTERNAL_TOKEN` mismatch | Copy the leader's value into the follower's `.env`; restart |
+| `[control] FATAL: db migration failed` | Bind-mount perms on `/data` (must be owned by uid 1000) | `docker volume rm openclaw_specs-db` then bring up; let entrypoint recreate |
 | `[bot-bridge] agent "<id>" has no local persona — skipping` | Persona file missing | Re-run `setup.sh` (it scaffolds it) or copy from another machine |
 | `403` on dashboard from a phone | User ID not in `DISCORD_ALLOWED_USER_IDS` or guild not in `DISCORD_ALLOWED_GUILD_ID` | Add it; restart |
 | `503 discord oauth not configured` | `DISCORD_CLIENT_ID` empty | Either set it or stop trying to expose publicly |
-| Two leaders racing in git | Both machines have `OPENCLAW_LEADER=1` | Pick one; flip the other to `0` |
+| Two leaders racing | Both machines have `OPENCLAW_LEADER=1` | Pick one; flip the other to `0` |
 | Discord token leaked | Pasted in chat / committed `.env` | Regenerate the token in Developer Portal; update `.env`; restart |
 
-Full table: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+Full table: [TROUBLESHOOTING.md](TROUBLESHOOTING.md). Daily ops recipes: [OPERATIONS.md](OPERATIONS.md).
 
 ---
 
@@ -300,3 +303,4 @@ Full table: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 - **Ptah CLI auth** — handled by `setup.sh` / `entrypoint.sh` via the bind-mounted `~/.ptah`. If `ptah` works on your host, the agent can use it. See the original gateway-era walkthrough at the bottom of [CONFIGURATION.md](CONFIGURATION.md) for details.
 - **Skills** — the gateway tier supports `~/Desktop/fixing-openclaw/skills/` (bind-mounted). The control plane uses ptah-cli's own skill system. They coexist.
 - **Webhooks / inbound integrations** — the daemon doesn't accept inbound webhooks. Add a route in `daemon/src/api.ts` if you want one.
+- **Backfill / live migration from a git-era specs repo** — out of scope; the cutover is destructive by design. See `scripts/cutover.sh` and the implementation-plan §16 non-goals.

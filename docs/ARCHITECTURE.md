@@ -7,56 +7,108 @@ The stack is two tiers stacked on the same container, optionally federated acros
 
 If you're a single-user-on-a-single-laptop case, you can disable tier 2 with `OPENCLAW_CONTROL_DISABLE=1` and the rest of this doc collapses to the "gateway internals" section.
 
-For the operational view of tier 2 — leader/follower split, specs repo, persona privacy, dispatch flow — see [OPENCLAW_CONTROL.md](OPENCLAW_CONTROL.md). This file covers the architectural shape: what runs where, what talks to what, and why.
+For the operational view of tier 2 — leader/follower split, SQLite spec store, persona privacy, dispatch flow — see [OPENCLAW_CONTROL.md](OPENCLAW_CONTROL.md). For daily operations recipes (SQL one-liners, backups, schema dump, disaster recovery) see [OPERATIONS.md](OPERATIONS.md). This file covers the architectural shape: what runs where, what talks to what, and why.
 
 ---
 
 ## Multi-machine topology (tier 2)
 
 ```
-                    ┌────────────────────────────────────────────────┐
-                    │  github.com/<you>/openclaw-specs   (private)   │
-                    │   specs/<project>/TASK_*/.dispatch/{p,t,d}     │
-                    │   memory/{agents,users,threads,projects}/      │
-                    └────────────────┬──────────────┬────────────────┘
-                                     │              │
-                                pull/push       pull/push  (every 15s)
-                                     │              │
-       ┌─────────────────────────────┼──────────────┼────────────────────────────────┐
-       │                             │              │                                │
-┌──────▼─────── HOST: Anubis (leader) ────────┐   ┌──▼─────── HOST: Amun (follower) ──────────┐
-│                                             │   │                                            │
-│  ~/.claude/                                 │   │  ~/.claude/                                │
-│  ├── shared-specs/    ← clone, bind-mount   │   │  ├── shared-specs/   ← clone, bind-mount   │
-│  ├── local-memory/    ← persona, never sync │   │  ├── local-memory/   ← persona, never sync │
-│  └── projects/        ← claude session JSONL│   │  └── projects/       ← claude session JSONL│
-│                                             │   │                                            │
-│  Container `openclaw` (one image, one IP)   │   │  Container `openclaw`                      │
-│  ┌─────────────────────────────────────┐    │   │  ┌─────────────────────────────────────┐   │
-│  │ entrypoint.sh                       │    │   │  │ entrypoint.sh                       │   │
-│  │  ├─ openclaw gateway :18789  ★      │    │   │  │  ├─ openclaw gateway :18789  ★      │   │
-│  │  └─ entrypoint-control.sh           │    │   │  │  └─ entrypoint-control.sh           │   │
-│  │      ├─ daemon :7878                │    │   │  │      ├─ daemon :7878                │   │
-│  │      │   • LEADER mode              │    │   │  │      │   • follower mode            │   │
-│  │      │   • continuation loop ON     │    │   │  │      │   • continuation loop OFF    │   │
-│  │      │   • dispatch worker ON       │    │   │  │      │   • dispatch worker ON       │   │
-│  │      │   • dashboard, REST, SSE     │    │   │  │      │   • dashboard (LAN only)     │   │
-│  │      └─ bot-bridge: anubis client   │    │   │  │      └─ bot-bridge: amun client     │   │
-│  └─────────────────────────────────────┘    │   │  └─────────────────────────────────────┘   │
-│                                             │   │                                            │
-│  Tailscale Funnel  →  https://anubis...     │   │  (loopback only)                           │
-└─────────────────────────────────────────────┘   └────────────────────────────────────────────┘
+┌─────────────────────────────  LEADER (single host)  ─────────────────────────────┐
+│                                                                                  │
+│  ┌─────────────────  openclaw  container  ──────────────────────────┐            │
+│  │                                                                  │            │
+│  │  daemon (Fastify on :7878)                                       │            │
+│  │  ┌──────────────────────────────────────────────────────────┐    │            │
+│  │  │  HTTP API  ─── auth: cookie-JWT (browser) | bearer (svc) │    │            │
+│  │  │    /api/projects, /api/tasks, /api/tasks/:p/:t/files/... │    │            │
+│  │  │    /api/dispatches/pending, /:id/claim, /:id/done        │    │            │
+│  │  │    /api/memories/:scope/:id/:file                        │    │            │
+│  │  │    /api/stream  (SSE)                                    │    │            │
+│  │  └──────────────────────────────────────────────────────────┘    │            │
+│  │  ┌──────────────────────────────────────────────────────────┐    │            │
+│  │  │  Storage seam:  daemon/src/db/*  (better-sqlite3)        │    │            │
+│  │  │    client.ts   schema.ts   tasks.ts   dispatches.ts      │    │            │
+│  │  │    memory.ts   migrations.ts                             │    │            │
+│  │  └──────────────────────────────────────────────────────────┘    │            │
+│  │           │                                                      │            │
+│  │           ▼                                                      │            │
+│  │  ┌──────────────────┐    ┌─────────────────┐                     │            │
+│  │  │  Continuation    │    │  Dispatch       │  ← runs only here   │            │
+│  │  │  loop (LEADER)   │    │  worker (loc.   │     when leader's   │            │
+│  │  │  every TICK_MS   │    │  agentIds set)  │     bot-bridge      │            │
+│  │  │                  │    │  push-driven    │     also owns local │            │
+│  │  └─────────┬────────┘    └────────┬────────┘     agents          │            │
+│  │            │ INSERT ON CONFLICT   │ UPDATE state                 │            │
+│  │            ▼                      ▼                              │            │
+│  │  ┌────────────────────────────────────────────┐                  │            │
+│  │  │  /data/specs.db   (SQLite, WAL mode)       │  ← only writer   │            │
+│  │  └────────────────────────────────────────────┘                  │            │
+│  │                                                                  │            │
+│  │  bot-bridge (Discord) ── HTTP-only client of localhost:7878      │            │
+│  │  Persona files:   /home/agent/.claude/local-memory/agents/<id>/  │            │
+│  │                   ↑ filesystem only, NEVER in DB                 │            │
+│  │                                                                  │            │
+│  │  Redis (pub/sub bus) — already there, used for in-container     │            │
+│  │  fan-out (handoff inbox, agent status). NOT used cross-machine. │            │
+│  └──────────────────────────────────────────────────────────────────┘            │
+│                                                                                  │
+│  Volumes:    /data  (SQLite file)         leader-only                            │
+│              /home/agent/.claude/local-memory/   (PRIVATE_AGENT_FILES)           │
+└──────────────────────────────────────────────────────────────────────────────────┘
 
-★ = the gateway from tier 1, unchanged.
+                 │ HTTPS (Tailscale Funnel) or LAN
+                 │ Authorization: Bearer ${OPENCLAW_INTERNAL_TOKEN}
+                 │ + SSE subscription on /api/stream?topics=dispatch
+                 ▼
+┌─────────────────────────────  FOLLOWER (N hosts)  ──────────────────────────────┐
+│                                                                                 │
+│  ┌─────────────────  openclaw  container  ──────────────────────────┐           │
+│  │  daemon (Fastify on :7878) — runs in HTTP-CLIENT mode            │           │
+│  │     • does not open any local DB                                 │           │
+│  │     • dispatch worker subscribes to leader's SSE                 │           │
+│  │       /api/stream?topics=dispatch and POSTs /:id/claim           │           │
+│  │     • shared memory reads/writes → leader HTTP                   │           │
+│  │     • PRIVATE_AGENT_FILES stay in local-memory/                  │           │
+│  │     • own /api/health, own SSE for the local dashboard           │           │
+│  │                                                                  │           │
+│  │  bot-bridge (Discord) — same as leader, HTTP-only against        │           │
+│  │     OPENCLAW_LEADER_URL                                          │           │
+│  └──────────────────────────────────────────────────────────────────┘           │
+│                                                                                 │
+│  Volumes:    /home/agent/.claude/local-memory/   (PRIVATE_AGENT_FILES)          │
+│              NO /data, NO local DB, NO clone, NO sync timer                     │
+└─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-The leader and the follower(s) only ever talk through the git repo. There's no direct daemon-to-daemon RPC; the repo's `.dispatch/{pending,taken,done}` directories are the queue, and `git push` with rebase-on-conflict is the lock. This makes the whole control plane partition-tolerant for free — disconnect a follower for an hour, reconnect, it catches up by pulling.
+Followers and the leader talk only through the leader's HTTP API. There is no direct daemon-to-daemon protocol other than HTTP. Push notification of new dispatches is delivered via SSE on `/api/stream?topics=dispatch`; the follower also calls `GET /api/dispatches/pending` once at startup and after any reconnect, so a brief partition just delays a claim — it does not lose one.
 
-The dashboard runs everywhere, but only the leader's is reachable from outside its own loopback. Followers' dashboards are useful for local debugging and for editing local-memory (their own agent's persona) without SSH'ing in.
+The dashboard runs everywhere, but only the leader's is the user-facing one (it is the only one with a populated DB). Followers' loopback dashboards are useful for local-memory editing (the follower's own agent persona) and for tailing the follower's own SSE feed.
+
+### Linearization point
+
+The atomic claim that prevents two followers from running the same dispatch lives in `daemon/src/db/dispatches.ts:DispatchRepo.claim`. It is a single prepared statement:
+
+```sql
+UPDATE dispatches
+   SET state='taken', claimed_by=?, claimed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+ WHERE id=? AND state='pending'
+RETURNING *;
+```
+
+`better-sqlite3.prepare(sql).get(params)` returns the row on success or `undefined` on miss.
+
+Why this is the linearization point:
+
+- SQLite serializes writers via a single-writer WAL lock. At any instant, only one `UPDATE` is mutating the `dispatches` table.
+- The `WHERE state='pending'` guard means that **exactly one** of N concurrent claimers gets a non-`undefined` `RETURNING` result. Every loser observes `state != 'pending'` (because the winner already flipped it) and the UPDATE matches zero rows, returning `undefined`.
+- There is no SELECT-then-UPDATE chain: this is one statement, one round-trip, one transaction at the SQLite engine layer. The window during which a race could exist is the duration of a single prepared statement execution, which is bounded by the WAL lock.
+
+This is verified by `openclaw-control/daemon/test/dispatch-claim.test.ts`, which spins up 8 worker_threads × 10 attempts = 80 concurrent `claim()` calls against the same row in a real on-disk SQLite file. The test asserts exactly one winner.
 
 ### Single-machine collapse
 
-If only one machine is in the picture: `OPENCLAW_LEADER=1`, `OPENCLAW_LOCAL_AGENT_IDS=anubis`, `OPENCLAW_SPECS_REPO_URL` either points at a private repo (you still get a full audit log + remote backup) or is left empty (local-only). All the same code paths run; the dispatch worker just never finds remote dispatches because there's no other machine writing them.
+If only one machine is in the picture: `OPENCLAW_LEADER=1`, `OPENCLAW_LOCAL_AGENT_IDS=anubis`, no follower exists. The continuation loop and the dispatch worker run in the same process against the same local DB. The `OPENCLAW_LEADER_URL` env var is unused. All the same code paths run.
 
 ---
 
@@ -68,16 +120,22 @@ tini (PID 1)
     ├── (renders ~/.openclaw/openclaw.json, runs Ptah/gh bootstrap)
     ├── exec: entrypoint-control.sh   ← only if OPENCLAW_CONTROL_DISABLE!=1
     │       │
+    │       ├── (universal) smoke check: better-sqlite3 native binary loads
+    │       │
+    │       ├── (leader only) node dist/db/migrations.js /data/specs.db
+    │       │     • creates the file on first boot, idempotent on reboot
+    │       │     • exit non-zero aborts the daemon launch
+    │       │
     │       ├── node /opt/openclaw-control/daemon/dist/index.js   (background)
     │       │     • Fastify on :7878
-    │       │     • clone shared-specs on first boot, pull every 15s
-    │       │     • leader: continuation loop every 30s
-    │       │     • all: dispatch worker every 10s (no-op if localAgentIds empty)
-    │       │     • spawns ptah CLI subprocesses for each invocation
+    │       │     • leader: opens /data/specs.db (WAL), runs continuation
+    │       │       loop every TICK_MS, runs dispatch worker for local agents
+    │       │     • follower: NO local DB; dispatch worker subscribes to
+    │       │       leader's SSE and claims via HTTP
+    │       │     • spawns ptah CLI subprocesses (or delegates to host bridge)
     │       │
     │       └── node /opt/openclaw-control/bot-bridge/dist/index.js (background, only if any DISCORD_TOKEN_* set)
     │             • discord.js client per agent
-    │             • spawns ptah CLI subprocesses for free-form chat
     │             • calls daemon API with OPENCLAW_INTERNAL_TOKEN
     │
     └── exec: openclaw --log-level debug gateway --port 18789 --bind lan --verbose
@@ -96,13 +154,15 @@ HOST                                              CONTAINER
 ./skills/                                    →    /home/agent/.openclaw/skills/       rw   (global skills, gateway-era)
 ~/.ptah/                                     →    /home/agent/.ptah/                  rw   (shared ptah CLI config — auth, providers)
 ~/.config/gh/                                →    /home/agent/.config/gh/             rw   (shared gh CLI auth)
-~/.claude/shared-specs/                      →    /home/agent/.claude/shared-specs/   rw   (control plane: git clone, both directions)
-~/.claude/local-memory/                      →    /home/agent/.claude/local-memory/   rw   (control plane: persona, NEVER synced)
+~/.claude/local-memory/                      →    /home/agent/.claude/local-memory/   rw   (control plane: persona/secrets, NEVER synced)
 ~/.claude/projects/                          →    /home/agent/.claude/projects/       ro   (claude code session JSONLs, for live-feed UI)
 named volume: openclaw-state                 →    /home/agent/.openclaw/              rw   (gateway runtime: plugin deps, sessions, state)
+named volume: specs-db (LEADER ONLY)         →    /data/                              rw   (control plane: SQLite spec store)
 ```
 
 The named volume `openclaw-state` parents `workspace/` and `skills/`, but those two are sub-mounted from the host — host wins for files inside them, the named volume keeps everything else (plugin-runtime-deps, agent state, canvas, credentials.json).
+
+The `specs-db` named volume is mounted at `/data/` only on the leader. Followers do not need it (they never open the DB), and `entrypoint-control.sh` skips the migration step on followers.
 
 ---
 
@@ -115,7 +175,7 @@ HOST                     CONTAINER                         INTERNET
                           (controlled by OPENCLAW_         ─────► ollama.com (when *:cloud models)
                            CONTROL_BIND, default 127.0.0.1) ────► host.docker.internal:11434 → host Ollama
                                                           
-:7878 (loopback by         openclaw-control daemon :7878   ─────► github.com (git push/pull)
+:7878 (loopback by         openclaw-control daemon :7878   ─────► leader's :7878 (followers only, HTTP+SSE)
 default; 0.0.0.0 if you    + dashboard SPA                 ─────► discord.com (OAuth + bot gateway WS)
 opt in)                                                    ─────► ollama.com / model providers (via ptah subprocess)
                                                           
@@ -129,28 +189,27 @@ opt in)                                                    ─────► ol
 ## How a Discord mention becomes a dispatched task
 
 1. **You**: `@anubis !task fixing-openclaw add a /api/whoami endpoint` in your Discord guild.
-2. **Bot-bridge** (Anubis machine) — discord.js fires `messageCreate`. `commandRouter` parses `!task`, calls `daemon.createTask({project, description, agentId: 'anubis', discordUserId, channelId})` over loopback HTTP with `Authorization: Bearer ${OPENCLAW_INTERNAL_TOKEN}`.
-3. **Daemon** — `createTask()` writes `specs/fixing-openclaw/TASK_2026_NNN/context.md` (with YAML frontmatter holding `assigned_agent`, `discord_user_id`, `channel_id`, `approvals: {}`), then `commitAndPush()` — one commit, one push to GitHub.
+2. **Bot-bridge** (Anubis machine) — discord.js fires `messageCreate`. `commandRouter` parses `!task`, calls `daemon.createTask({project, description, agentId: 'anubis', discordUserId, channelId})` over loopback HTTP with `Authorization: Bearer ${OPENCLAW_INTERNAL_TOKEN}`. On a follower, the bot-bridge calls the *leader's* daemon at `OPENCLAW_LEADER_URL`.
+3. **Daemon (leader)** — `createTask()` performs `ProjectsRepo.upsert + TasksRepo.insert + TasksRepo.writeFile('context.md', …)` in a single `BEGIN IMMEDIATE … COMMIT` transaction so the dashboard never sees a half-created task. Broadcasts `task.created` over `/api/stream`.
 4. **Dashboard** — every browser with the SSE stream open receives `task.created` and re-renders.
-5. **Continuation loop tick (leader)** — within 30s, `tickOnce()` discovers the new task, sees `phase=CONTEXT`, no checkpoint pending. Looks up `agentId='anubis'` — local. Skips git, fast-paths into `invokeClaudeForTask({…})`.
-6. **Invoker** — `spawn('ptah', ['--json', '--cwd', '/home/agent/.openclaw/workspace/fixing-openclaw', '--auto-approve', 'session', 'start', '--profile', 'claude_code', '--task', '<the project-manager prompt>'])`. NDJSON of JSON-RPC events streams to the daemon's SSE. The ptah subprocess writes `task-description.md` and exits 0.
-7. **Next tick** — phase advances to `DESCRIPTION`. That's a checkpoint. Daemon broadcasts `checkpoint.pending`. Dashboard shows an "Approve / Reject" button for that phase.
-8. **You click Approve** (or reply `!approve TASK_2026_NNN`). YAML frontmatter gets `approvals: { CONTEXT: true }`. Push.
-9. **Loop continues** through `PLAN → PENDING → … → DONE`, each step a commit.
+5. **Continuation loop tick (leader)** — within `OPENCLAW_TICK_MS`, `tickOnce()` reads from `TasksRepo`, sees `current_phase=CONTEXT`, no checkpoint pending. Calls `DispatchRepo.insertPending({agentId: 'anubis', projectSlug, taskId, phase: 'CONTEXT', prompt, …})`. The partial UNIQUE index `dispatches_unique_open` (on `(project_slug, task_id, phase) WHERE state IN ('pending','taken')`) guarantees no duplicate row.
+6. **Local fast path (agent owned by leader)** — same process invokes `invokeClaudeForTask({…})`. The dispatch row goes `pending → taken → done` via direct `DispatchRepo` calls.
+7. **Remote agent (follower owns the agent)** — leader broadcasts `dispatch.pending` on `/api/stream`. The follower's dispatch worker, subscribed via `GET /api/stream?topics=dispatch`, wakes up. It calls `GET /api/dispatches/pending?agentId=…`, picks the oldest, and `POST /api/dispatches/:id/claim` (the linearization point above). On a 200, it runs ptah, then `POST /api/dispatches/:id/done` with the result.
+8. **Loop continues** through `PLAN → PENDING → … → DONE`. Each phase advance is a `TasksRepo.writeFile + UPDATE tasks.current_phase` transaction. The leader broadcasts `task.updated`, `checkpoint.pending`, `checkpoint.approved`, `dispatch.pending`, `dispatch.taken`, `dispatch.done` as appropriate.
 
-If at step 5 the agent had been `chappie` instead, step 5 would have written `pending/<id>.json` to the dispatch dir + pushed. Chappie's machine would pull within 15s, atomically rename to `taken/`, run the prompt locally, push the result, then rename to `done/`. The leader picks up the file changes on its next pull and continues.
+The full SSE event taxonomy lives in `docs/OPERATIONS.md`.
 
 ---
 
-## Why git as the queue
+## Why SQLite-on-leader (vs the original git-as-queue)
 
-Three things git gives us that we'd otherwise have to build:
+Three things this design gets us:
 
-- **Atomic claim**: `git mv pending/X.json taken/X.json && git push --rebase` either succeeds (we own the dispatch) or fails because someone else got there first. No central lock service required.
-- **Audit log**: every state change is a commit. `git log specs/<project>/<task>/` is the task's full history including who dispatched what to whom.
-- **Backup + portability**: a brand-new machine can be brought up by `git clone`, no state migration. Lose a follower, replace it, it pulls and is current.
+- **Atomic claim**: a single `UPDATE … WHERE state='pending' RETURNING *` under WAL is the linearization point. No external lock service, no rebase loop.
+- **Sub-second latency**: SSE push notification + HTTP claim is ~10–100 ms in a healthy LAN, vs the ~15 s polling floor of a git-based setup.
+- **Single source of truth**: every dashboard read is a SELECT against the same DB the writer just committed to. WAL gives readers a consistent snapshot without blocking the writer.
 
-The cost is latency (~15s for a follower to see a new dispatch) and the requirement that every machine has push access to the same private repo. Both have been acceptable in practice.
+The cost is that the leader is a SPOF for dispatch progress (it always was — only the leader runs the continuation loop) and that the DB file lives on one host. Backups are manual (`docs/OPERATIONS.md` covers the `.backup` recipe).
 
 ---
 
@@ -180,7 +239,7 @@ Three layers of agent context, evaluated in order:
 2. **Workspace persona** — `~/projects/SOUL.md`, `IDENTITY.md`, `AGENTS.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`. Read on session start.
 3. **Per-project persona override** — `~/projects/<project>/.openclaw/persona.md`, etc. Layered when the agent's cwd is that project.
 
-This is **separate** from the control-plane agent registry's persona system (`shared-specs/memory/agents/<id>/identity.md` + `local-memory/agents/<id>/persona.md`). Same word, different scope: the workspace persona shapes the gateway's single agent; the control-plane persona shapes a specific registered bot. See [SKILLS-AND-PERSONA.md](SKILLS-AND-PERSONA.md) for the reconciliation.
+This is **separate** from the control-plane agent registry's persona system (the leader's `memory_files` table for `identity.md` + `local-memory/agents/<id>/persona.md`). Same word, different scope: the workspace persona shapes the gateway's single agent; the control-plane persona shapes a specific registered bot. See [SKILLS-AND-PERSONA.md](SKILLS-AND-PERSONA.md) for the reconciliation.
 
 ### File layout in the running container
 
@@ -204,9 +263,11 @@ This is **separate** from the control-plane agent registry's persona system (`sh
     ├── workspace/                           # ← BIND MOUNT to host's ${WORKSPACE_DIR}
     └── skills/                              # ← BIND MOUNT to host's ${SKILLS_DIR}
 └── .claude/
-    ├── shared-specs/                        # ← BIND MOUNT, control-plane git clone
-    ├── local-memory/                        # ← BIND MOUNT, NEVER synced
+    ├── local-memory/                        # ← BIND MOUNT, NEVER synced (PRIVATE_AGENT_FILES)
     └── projects/                            # ← BIND MOUNT (read-only), claude session JSONLs
+
+/data/                                       # ← LEADER-ONLY named volume specs-db
+└── specs.db                                 # SQLite, WAL mode, owner uid 1000, mode 0600
 ```
 
 ---
@@ -223,7 +284,7 @@ This is **separate** from the control-plane agent registry's persona system (`sh
 | `bonjour` plugin disabled | mDNS multicast doesn't work on Docker bridge networks. |
 | Skills as bind mount, not baked into image | Edit skills without rebuilding. |
 | Control plane shares the gateway image | One image, one entrypoint, one volume set — adding a follower machine is `provision-machine.sh`, not a new compose file. |
-| Git as the dispatch queue (vs Redis) | Atomic claim + audit log + backup + multi-machine all for free. Latency cost (~15s) is acceptable for orchestration timescales. |
+| SQLite-on-leader as the dispatch queue (vs Redis or git) | Atomic claim via `UPDATE … WHERE state='pending' RETURNING *`. Sub-second latency. Single source of truth for the dashboard's reads. WAL keeps readers off the writer's lock. |
 | Persona stored locally, never synced | The persona is the agent's voice — the operator decides what's in it; sharing it across machines is the operator's call, not the system's. |
 | One bot token per agent (vs one shared bot) | Easier to revoke, no Discord rate-limit collisions, presence is per-agent. |
 

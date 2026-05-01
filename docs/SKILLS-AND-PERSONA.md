@@ -11,18 +11,18 @@ The repo contains two related-but-distinct persona systems, because the gateway 
 | System | Tier | What it shapes | Where it lives |
 |---|---|---|---|
 | **Workspace persona** | Gateway | The single openclaw agent's behavior across the workspace, layered per-project | `~/projects/IDENTITY.md`, `SOUL.md`, `AGENTS.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md` + `~/projects/<project>/.openclaw/` overrides |
-| **Registered-agent persona** | Control plane | Each named bot (anubis, amun, …) that the bot-bridge runs and that the continuation loop dispatches to | `shared-specs/memory/agents/<id>/identity.md` (public bio, in the git repo) + `local-memory/agents/<id>/persona.md` (private system prompt, NEVER synced) |
+| **Registered-agent persona** | Control plane | Each named bot (anubis, amun, …) that the bot-bridge runs and that the continuation loop dispatches to | Leader's `memory_files` table at `(scope='agents', owner_id=<id>, filename='identity.md')` for the public bio, served by `GET /api/memories/agents/<id>/identity.md` + `local-memory/agents/<id>/persona.md` (private system prompt, NEVER synced, NEVER over HTTP) |
 
 If you're running the gateway only, you only care about workspace personas — read on from "The three layers" below. If you're running the control plane, you'll usually still set up a workspace persona for the *gateway-tier* agent (for openclaw's own dashboard / TUI / canvas), and then a separate registered-agent persona per bot the bot-bridge runs. The two don't fight; they're consumed by different processes.
 
 The privacy semantics are deliberately different:
 
 - **Workspace persona** files live at `~/projects/` (or per-project under `.openclaw/`) — committed wherever you commit `~/projects/`. If your project repo is public, your project's `.openclaw/persona.md` is public.
-- **Registered-agent persona** at `local-memory/agents/<id>/persona.md` is **never** committed by the daemon, **never** transmitted via the API (the `PRIVATE_AGENT_FILES` whitelist in `daemon/src/memory.ts` enforces this), and **never** moved between machines except by you, by hand. The matching `identity.md` (public bio) is in the git repo and is fine to share.
+- **Registered-agent persona** at `local-memory/agents/<id>/persona.md` is **never** written to the leader's DB, **never** transmitted via the API (the `PRIVATE_AGENT_FILES` allowlist in `daemon/src/memory.ts` enforces this — see [SECURITY.md](SECURITY.md) for the three-layer defense), and **never** moved between machines except by you, by hand. The matching `identity.md` (public bio) lives in the leader's `memory_files` table and is fine to share — every machine can read it via `GET /api/memories/agents/<id>/identity.md`.
 
 Why the split: the persona of a bot the operator runs on their laptop reflects the operator's voice, secrets, idiosyncrasies, internal references. It's not a system asset to be replicated. The public bio is enough for other agents to address the bot ("ask anubis about the openclaw refactor") without ever needing to read its private prompt.
 
-See [docs/OPENCLAW_CONTROL.md#the-persona-privacy-rule-slice-10](OPENCLAW_CONTROL.md#the-persona-privacy-rule-slice-10) for the implementation detail.
+See [docs/OPENCLAW_CONTROL.md#the-persona-privacy-rule](OPENCLAW_CONTROL.md#the-persona-privacy-rule) for the implementation detail.
 
 ---
 
@@ -63,14 +63,14 @@ The bot-bridge's `chat.ts:buildSystemPrompt()` reads:
 
 1. The agent's public `identity.md` (for the bot's name, frontmatter `name:` field, etc.)
 2. This `persona.md` (the actual system prompt — full content used as-is)
-3. The user's profile (`shared-specs/memory/users/<discord_id>/profile.md`)
-4. Recent thread context (`shared-specs/memory/threads/<channel_id>/recent.md`)
+3. The user's profile (the leader's `memory_files` row at `scope='users', owner_id=<discord_id>, filename='profile.md'`)
+4. Recent thread context (the leader's `memory_files` row at `scope='threads', owner_id=<channel_id>, filename='recent.md'`)
 5. A live snapshot of projects + registered agents (so the model can answer "what tasks are open" without a tool call)
 6. The TOOLBELT directive instructions
 
 Re-read happens on every message. No restart needed.
 
-The matching `shared-specs/memory/agents/<id>/identity.md` is the public bio — used by other agents and humans, visible to every machine in the fleet. Frontmatter:
+The matching `identity.md` row in the leader's `memory_files` table (`scope='agents', owner_id=<id>, filename='identity.md'`) is the public bio — used by other agents and humans, visible to every machine in the fleet via `GET /api/memories/agents/<id>/identity.md`. Frontmatter:
 
 ```markdown
 ---

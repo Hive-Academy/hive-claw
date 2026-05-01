@@ -10,14 +10,13 @@ Three TypeScript processes shipped inside the same container as the openclaw gat
 
 | Process | Port | Role |
 |---|---|---|
-| **daemon** | `:7878` | Fastify server. Owns the orchestration tasks, the git-backed shared specs repo, the dispatch queue, the dashboard, the REST + SSE API, and Discord OAuth. |
+| **daemon** | `:7878` | Fastify server. On the leader: owns the SQLite spec store at `/data/specs.db` (tasks, dispatches, shared memory, dispatch logs), the dashboard, the REST + SSE API, and Discord OAuth. On a follower: HTTP-only client of the leader, no local DB. |
 | **dashboard** | (served by the daemon) | Angular 19 SPA. Projects → tasks → kanban → approve / reject / handoff. Live agent status. Memory editor. |
-| **bot-bridge** | none | Spawns one Discord client per agent registered locally. Routes `!commands` and free-form `@mention` chat into the daemon. |
+| **bot-bridge** | none | Spawns one Discord client per agent registered locally. Routes `!commands` and free-form `@mention` chat into the daemon (its own daemon if leader, or the leader's daemon if follower). |
 
 Plus, on the network:
 
-- A **private GitHub repo** holding the global task tree and shared memory (`OPENCLAW_SPECS_REPO_URL`).
-- An optional **Redis** for cross-agent online/busy presence and the inbox bus.
+- An optional **Redis** for in-container handoff inbox and agent-status fan-out (per-container; not used cross-machine).
 - An optional **Tailscale Funnel** so the leader's dashboard is reachable from anywhere over TLS.
 
 The whole thing runs inside the container `openclaw` started by `docker-compose.yml`. Same image as the gateway, same `entrypoint.sh`, same bind mounts. If the gateway runs, this runs.
@@ -29,89 +28,107 @@ The whole thing runs inside the container `openclaw` started by `docker-compose.
 Each physical machine in the fleet runs the same image. They differ only in `.env`:
 
 ```
-┌─ Anubis (leader) ─────────────────┐  ┌─ Amun (follower) ─────────────┐
-│  OPENCLAW_LEADER=1                │  │  OPENCLAW_LEADER=0            │
-│  OPENCLAW_LOCAL_AGENT_IDS=anubis  │  │  OPENCLAW_LOCAL_AGENT_IDS=amun│
-│  DISCORD_TOKEN_ANUBIS=...         │  │  DISCORD_TOKEN_AMUN=...       │
-│                                   │  │                               │
-│  daemon → continuation loop ON    │  │  daemon → continuation loop   │
-│         → dispatch worker ON      │  │            disabled (follower)│
-│         → dashboard ON            │  │         → dispatch worker ON  │
-│         → bot-bridge: anubis      │  │         → dashboard ON (LAN)  │
-│                                   │  │         → bot-bridge: amun    │
-└─────────────────┬─────────────────┘  └────────────────┬──────────────┘
-                  │                                     │
-                  └──────────── git fetch/push ─────────┘
-                              github.com/<you>/openclaw-specs   (private)
+┌─ Anubis (leader) ─────────────────┐  ┌─ Amun (follower) ─────────────────────┐
+│  OPENCLAW_LEADER=1                │  │  OPENCLAW_LEADER=0                    │
+│  OPENCLAW_LOCAL_AGENT_IDS=anubis  │  │  OPENCLAW_LOCAL_AGENT_IDS=amun        │
+│  /data/specs.db (SQLite, WAL)     │  │  OPENCLAW_LEADER_URL=https://anubis…  │
+│  DISCORD_TOKEN_ANUBIS=...         │  │  DISCORD_TOKEN_AMUN=...               │
+│                                   │  │                                       │
+│  daemon → continuation loop ON    │  │  daemon → continuation loop OFF       │
+│         → dispatch worker ON      │  │         → dispatch worker ON          │
+│         → owns the spec DB        │  │         → HTTP client of the leader   │
+│         → dashboard (public)      │  │         → dashboard (loopback only)   │
+│         → bot-bridge: anubis      │  │         → bot-bridge: amun            │
+└─────────────────┬─────────────────┘  └─────────────────┬─────────────────────┘
+                  │                                       │
+                  │  Bearer ${OPENCLAW_INTERNAL_TOKEN}    │
+                  │  HTTPS or LAN  →  /api/dispatches/*   │
+                  │                   /api/memories/*     │
+                  │                   /api/stream         │
+                  └───────────────────────────────────────┘
 ```
 
-Exactly one machine sets `OPENCLAW_LEADER=1`. That machine is the only one running the **continuation loop** (the thing that walks each task through `CONTEXT → DESCRIPTION → PLAN → … → DONE` and writes new dispatches). Followers run only the **dispatch worker**: they pull from git, claim dispatches addressed to their local agents via an atomic git rename + push, run the work locally, and push the result.
+Exactly one machine sets `OPENCLAW_LEADER=1`. That machine is the only one running the **continuation loop** (the thing that walks each task through `CONTEXT → DESCRIPTION → PLAN → … → DONE` and inserts new dispatches into the DB). The leader also opens the SQLite database at `/data/specs.db`. Followers do **not** open any local DB — they run only the **dispatch worker**, which subscribes to the leader's SSE channel `/api/stream?topics=dispatch`, claims dispatches via `POST /api/dispatches/:id/claim`, runs the work locally, and reports completion via `POST /api/dispatches/:id/done`.
 
-Both leaders and followers serve the dashboard locally on `127.0.0.1:7878`. Only the leader needs to be reachable publicly.
+Both leaders and followers serve a dashboard locally on `127.0.0.1:7878`. Only the leader's is the user-facing one (only the leader has the populated DB to read from). Follower dashboards are useful for local-memory editing.
 
-`OPENCLAW_LOCAL_AGENT_IDS` is the disjoint partition: `anubis` runs only on the leader, `amun` only on Amun, etc. If two machines list the same agent, one of them will lose every dispatch race; behavior is technically safe (atomic git rename) but the loser wastes pulls.
+`OPENCLAW_LOCAL_AGENT_IDS` is the disjoint partition: `anubis` runs only on the leader, `amun` only on Amun, etc. If two machines list the same agent, one of them will lose every dispatch race; behavior is technically safe (the SQL claim is atomic) but the loser wastes HTTP calls.
 
 ---
 
-## The shared specs repo — the single source of truth
+## Storage — `/data/specs.db` on the leader
 
-`OPENCLAW_SPECS_REPO_URL` points at a **private** GitHub repo. The daemon clones it on first boot to `~/.claude/shared-specs/` (bind-mounted from `OPENCLAW_SHARED_SPECS_DIR` on the host) and keeps it synced: `pullOnce()` runs every `OPENCLAW_GIT_PULL_MS` (default 15s); writes go through a serialized `commitAndPush()` that retries up to 3 times with rebase-on-conflict.
+The leader's daemon owns a single SQLite file holding every project, task, task-file blob, dispatch row, dispatch log line, and shared-memory entry. It lives at the path in `OPENCLAW_SPECS_DB_PATH` (default `/data/specs.db`, persisted via the named docker volume `specs-db`).
 
-### Layout
+Connection settings (`daemon/src/db/client.ts`):
 
-```
-shared-specs/
-├── specs/
-│   └── <project>/
-│       ├── TASK_2026_001/
-│       │   ├── context.md            # YAML frontmatter: assigned_agent, approvals, ...
-│       │   ├── task-description.md   # written at CONTEXT phase
-│       │   ├── implementation-plan.md
-│       │   ├── tasks.md
-│       │   ├── future-enhancements.md
-│       │   ├── .invoker/             # gitignored — per-run logs
-│       │   └── .dispatch/
-│       │       ├── pending/<id>.json # committed by the leader
-│       │       ├── taken/<id>.json   # atomic rename by the winning follower
-│       │       └── done/<id>.json    # second rename after invocation finishes
-│       └── TASK_2026_002/...
-└── memory/
-    ├── agents/<id>/identity.md       # PUBLIC bio. Visible to every machine.
-    ├── users/<discord_id>/profile.md
-    ├── threads/<channel_id>/recent.md
-    └── projects/<slug>/notes.md
+- **Mode**: WAL (`PRAGMA journal_mode=WAL`) — multiple readers concurrent with a single writer.
+- **Synchronous**: NORMAL — ~1 ms commit latency.
+- **busy_timeout**: 5000 ms — tolerate a WAL checkpoint stall.
+- **foreign_keys**: ON — enforces `ON DELETE CASCADE` between projects/tasks/dispatches.
+
+Every write transaction is `BEGIN IMMEDIATE … COMMIT` and is bounded to a few statements (see `db/client.ts` header comment for the rules). The biggest single write — a `task_files.write` for a `.md` body — is bounded to <1 MB at the API layer.
+
+### Inspect the DB from a running leader
+
+`sqlite3` is available inside the container. Three sample queries copy-pasteable as-is:
+
+```bash
+# Open dispatches (pending or taken) — "what's stuck?"
+docker compose exec openclaw sqlite3 /data/specs.db \
+  "SELECT id, agent_id, project_slug, task_id, phase, created_at
+     FROM dispatches
+    WHERE state IN ('pending','taken')
+    ORDER BY created_at;"
 ```
 
-Every write to this tree results in a commit + push. Every read pulls first. Every machine sees the same data within ~15s of any change.
+```bash
+# Poisoned dispatches — runaway loop guard tripped
+docker compose exec openclaw sqlite3 /data/specs.db \
+  "SELECT id, project_slug, task_id, phase, failure_count
+     FROM dispatches
+    WHERE state='poisoned';"
+```
 
-### What's NOT in the repo
+```bash
+# Tail of one dispatch's audit trail
+docker compose exec openclaw sqlite3 /data/specs.db \
+  "SELECT ts, level, message
+     FROM dispatch_log
+    WHERE dispatch_id='<id>'
+    ORDER BY ts;"
+```
 
-`.gitignore` excludes `.invoker/` (run logs) and a few dotfiles. Nothing else there is private — if you wouldn't put it in the repo, don't put it under `shared-specs/memory/`.
+The schema is in `openclaw-control/daemon/src/db/schema.ts`. Inspect at runtime: `docker compose exec openclaw sqlite3 /data/specs.db .schema`.
 
-For genuinely private state, the daemon has a separate **local memory** path.
+See `docs/OPERATIONS.md` for the full daily-ops playbook (backups, schema dump, disaster recovery).
+
+### Local memory — never in the DB, never over HTTP
+
+Genuinely private state (agent personas, secrets) lives at `~/.claude/local-memory/agents/<id>/<file>` on each machine, bind-mounted into the container. These files NEVER enter `/data/specs.db` and NEVER traverse the daemon's HTTP API. See "The persona privacy rule" below.
 
 ---
 
-## The persona privacy rule (slice 10)
+## The persona privacy rule
 
 The agent registry has two storage backends with intentionally different sync semantics:
 
-| Backend | Path inside container | Synced to git? | What it holds |
+| Backend | Path | Stored where? | What it holds |
 |---|---|---|---|
-| **shared** | `~/.claude/shared-specs/memory/agents/<id>/identity.md` | Yes (commit+push) | Public bio. Name, vibe, signature emoji. Anything you'd put on the agent's "about" page. |
-| **local** | `~/.claude/local-memory/agents/<id>/persona.md` | **Never** | Private system prompt. Tone, idiosyncrasies, anything operationally sensitive. |
+| **shared** | `/api/memories/agents/<id>/identity.md` | Leader's `memory_files` table (SQLite) | Public bio. Name, vibe, signature emoji. Anything you'd put on the agent's "about" page. |
+| **local** | `~/.claude/local-memory/agents/<id>/persona.md` | Local FS only, on the machine that owns the agent | Private system prompt. Tone, idiosyncrasies, anything operationally sensitive. |
 
-The split is enforced in `daemon/src/memory.ts` by `PRIVATE_AGENT_FILES = {persona.md, secrets.md, persona.json, secrets.json}`. Writes to those filenames are routed to the local-only backend regardless of caller. There is no API path — internal or external — that can leak a persona over the network.
+The split is enforced by `PRIVATE_AGENT_FILES = {persona.md, secrets.md, persona.json, secrets.json}`. The full three-layer enforcement (FS chokepoint in `memory.ts`, HTTP gate in `api.ts`, defense-in-depth allowlist in `db/memory.ts`) is documented in [SECURITY.md](SECURITY.md). The short version: there is no API path — internal or external — that can leak a private file over the network, and the leader's DB never sees one.
 
 ### Implications
 
 - Anubis's persona lives **only** on the Anubis machine. Amun has no way to read it. Same in reverse.
 - The bot-bridge's `loadAgents()` only registers an agent if `local-memory/agents/<id>/persona.md` exists. **An agent without a local persona is invisible to the bot-bridge.** This is why `setup.sh` scaffolds a stub from `templates/agent-persona.md.tmpl` — without it the bot won't come online.
-- If you move an agent to a new machine, you copy the local persona file out-of-band (scp, password manager, whatever). Don't push it to the repo.
+- If you move an agent to a new machine, you copy the local persona file out-of-band (scp, password manager, whatever). The leader's DB has no copy.
 
 ### Ownership check on writes
 
-`memory.ts:assertAgentOwnership()`: writes to `agents/<id>/*` (any file, public or private) are rejected with HTTP 403 unless `<id>` is in this machine's `OPENCLAW_LOCAL_AGENT_IDS`. Reads have no such check — every machine can read every public bio. (Personas can't even be read remotely; they're not in the repo.)
+`memory.ts:assertAgentOwnership()`: writes to `agents/<id>/*` (any file, public or private) are rejected with HTTP 403 unless `<id>` is in this machine's `OPENCLAW_LOCAL_AGENT_IDS`. Reads of the *public* identity file have no such check — every machine can read every public bio over the leader's HTTP API. Reads of *private* files return 404 over HTTP regardless of identity (deliberately not 403, to avoid leaking the existence of a persona).
 
 If `OPENCLAW_LOCAL_AGENT_IDS` is empty, the ownership check is bypassed (single-machine / dev mode).
 
@@ -119,20 +136,19 @@ If `OPENCLAW_LOCAL_AGENT_IDS` is empty, the ownership check is bypassed (single-
 
 ## The continuation loop and the dispatch queue
 
-The leader's daemon runs `tickOnce()` every `OPENCLAW_TICK_MS` (default 30s). For each open task in the specs tree:
+The leader's daemon runs `tickOnce()` every `OPENCLAW_TICK_MS` (default 30s). For each open task in the `tasks` table:
 
-1. Skip if at a checkpoint and not yet approved (`task-description.md`, `implementation-plan.md`, `tasks.md@IMPLEMENTED`).
+1. Skip if at a checkpoint and not yet approved (the `tasks.checkpoint_pending` flag plus `approvals_json`).
 2. Look up the next phase prompt from `continuation.ts:buildPromptFor()` (one prompt per phase, with the right agent role baked in).
-3. **If the assigned agent is local** (`agentId ∈ localAgentIds`): invoke `ptah --json session start --task <prompt>` directly. Fast path.
-4. **If the assigned agent is remote**: write a `Dispatch` JSON into `specs/<project>/<task>/.dispatch/pending/<id>.json` and `commitAndPush()`. The owning machine sees the new file on its next pull (≤15s).
+3. Call `DispatchRepo.insertPending({agentId, projectSlug, taskId, phase, prompt, …})`. The partial UNIQUE index `dispatches_unique_open` on `(project_slug, task_id, phase) WHERE state IN ('pending','taken')` rejects a duplicate row, returning null — which the loop treats as "skipped".
+4. Broadcast `dispatch.pending` over `/api/stream`. SSE-subscribed followers wake up immediately; the leader's own dispatch worker (if it owns the agent) picks the row up on its next tick.
 
-Followers run `processOneDispatch()` every 10s:
+Followers run `processOneDispatch()` every `OPENCLAW_DISPATCH_MS` (default 10s); the SSE feed makes it effectively push-driven, polling is the floor:
 
-1. `pullOnce()`.
-2. List `pending/*.json` filtered by `localAgentIds`.
-3. Pick first; attempt `atomicRenameAndPush(pending → taken)`. If the source vanished mid-rename (someone else won), skip.
-4. Invoke `ptah --json session start --task <prompt>` in the project's working dir. Same headless invocation as the leader's fast path.
-5. After exit, rename `taken → done` and push.
+1. `GET /api/dispatches/pending?agentId=<own-ids>` — list candidates ordered oldest-first.
+2. Pick the oldest; `POST /api/dispatches/:id/claim`. Server-side this is the atomic linearization point (single `UPDATE … WHERE state='pending' RETURNING *`). On 200 we own the dispatch; on 409 we lost the race and try the next candidate.
+3. Invoke ptah in the project's working dir (locally on the follower; or, in production, delegated to the host-side ptah-bridge — see below).
+4. `POST /api/dispatches/:id/done` with `{exitCode, durationMs, stderrSnippet}`. The leader's `DispatchRepo.markDone` decides terminal state: `done` on `exitCode=0`, `failed` otherwise — promoted to `poisoned` if this attempt is the Kth consecutive failure for the same `(project, task, phase)` (K = `OPENCLAW_DISPATCH_FAILURE_THRESHOLD`, default 3).
 
 **The continuation loop is leader-only.** Followers don't try to advance task phases themselves — they only execute work already-dispatched. This keeps the phase machine single-writer.
 
@@ -142,7 +158,7 @@ Followers run `processOneDispatch()` every 10s:
 
 ### One bot, one token, per agent
 
-Each agent registered under `local-memory/agents/<id>/` (with a non-empty `persona.md`) gets a Discord client in the bot-bridge. The token comes from `DISCORD_TOKEN_<UPPER_ID>` (e.g. `DISCORD_TOKEN_ANUBIS`) by default; overridable via `shared-specs/memory/agents/<id>/discord.json#tokenEnvVar`.
+Each agent registered under `local-memory/agents/<id>/` (with a non-empty `persona.md`) gets a Discord client in the bot-bridge. The token comes from `DISCORD_TOKEN_<UPPER_ID>` (e.g. `DISCORD_TOKEN_ANUBIS`) by default; overridable via the leader's shared memory at `agents/<id>/discord.json#tokenEnvVar` (served by `GET /api/memories/agents/<id>/discord.json`).
 
 The legacy gateway-era variable `DISCORD_BOT_TOKEN` (used by the openclaw gateway's discord adapter) is kept in `.env.example` for backward compatibility but should be left empty when running the bot-bridge — otherwise you have two clients trying to log in as the same bot, which Discord will reject.
 
@@ -253,15 +269,15 @@ If you don't want Tailscale, anything that does TLS termination + reverse proxy 
 ## End-to-end: a task from `!task` to `DONE`
 
 1. **You, in Discord**: `@anubis !task openclaw-control add a /api/whoami endpoint`
-2. **Bot-bridge** parses the command, posts `POST /api/tasks` with internal token. Daemon writes `specs/openclaw-control/TASK_2026_007/context.md` + `commitAndPush`.
-3. **Continuation tick (leader)**: task is at `CONTEXT`, assigned to `anubis`, no approval needed yet — invoke `project-manager` prompt locally. The ptah CLI runs in `/home/agent/.openclaw/workspace/openclaw-control/`, writes `task-description.md`, exits.
-4. **Loop detects `task-description.md` exists** → phase advances to `DESCRIPTION`. This is a checkpoint. Daemon broadcasts `checkpoint.pending`.
-5. **You, in Discord** (or the dashboard): `@anubis !approve TASK_2026_007`. Daemon updates the YAML frontmatter `approvals: { CONTEXT: true }` and `commitAndPush`.
+2. **Bot-bridge** parses the command, posts `POST /api/tasks` with internal token. The leader's daemon performs `ProjectsRepo.upsert + TasksRepo.insert + TasksRepo.writeFile('context.md', …)` in a single `BEGIN IMMEDIATE … COMMIT`.
+3. **Continuation tick (leader)**: task is at `CONTEXT`, assigned to `anubis`, no approval needed yet. `DispatchRepo.insertPending({agent: 'anubis', phase: 'CONTEXT', …})` returns the new id; SSE broadcasts `dispatch.pending`.
+4. **Leader's own dispatch worker** (since `anubis ∈ localAgentIds`) claims via the local `DispatchRepo.claim`, invokes ptah, writes `task-description.md` (a `task_files` row), `markDone(exitCode=0)`. Phase advances to `DESCRIPTION`. Checkpoint fires.
+5. **You, in Discord** (or the dashboard): `@anubis !approve TASK_2026_007`. Daemon updates `tasks.approvals_json` for that phase and `task_files.context.md` (frontmatter) in the same transaction.
 6. **Loop dispatches `software-architect`** → writes `implementation-plan.md`. New checkpoint.
-7. … continues through `PLAN → PENDING → IMPLEMENTED → QA_DONE → DONE`. Each step is a commit. Every commit pushes.
-8. **If you handed off to `chappie`** at any phase: the next dispatch is written into `pending/`. Chappie's machine pulls within 15s, races to claim it, runs the prompt locally, pushes results. The leader sees the changes on its next pull and continues the loop.
+7. … continues through `PLAN → PENDING → IMPLEMENTED → QA_DONE → DONE`. Each step is a transaction; each phase advance broadcasts `task.updated`.
+8. **If you handed off to `chappie`** at any phase: the next `insertPending` targets `agent: 'chappie'`. Chappie's machine, which is a follower with an SSE subscription on `?topics=dispatch`, sees `dispatch.pending`, calls `POST /api/dispatches/:id/claim`, runs the prompt locally, posts `POST /api/dispatches/:id/done`. The leader's row transitions to `done` and the continuation loop picks up the new artifact on its next tick.
 
-You can watch the whole thing in the dashboard's SSE feed (`task.created`, `task.updated`, `dispatch.pending`, `dispatch.taken`, `dispatch.done`, `invoker.started`, `invoker.finished`, `git.pulled`, `git.pushed`, `checkpoint.pending`, `checkpoint.approved`).
+You can watch the whole thing in the dashboard's SSE feed (`task.created`, `task.updated`, `dispatch.pending`, `dispatch.taken`, `dispatch.done`, `dispatch.failed`, `dispatch.poisoned`, `invoker.started`, `invoker.stdout`, `invoker.finished`, `checkpoint.pending`, `checkpoint.approved`, `continuation.tick`, `memory.updated`, `agent.handoff`, `agent.status`, `session.message`). See `docs/OPERATIONS.md` for the full event taxonomy.
 
 ---
 
@@ -271,14 +287,14 @@ For the full env reference see [CONFIGURATION.md](CONFIGURATION.md). Highest-imp
 
 | Var | Default | Effect |
 |---|---|---|
-| `OPENCLAW_LEADER` | `0` | Set to `1` on exactly one machine. Enables the continuation loop and is where the dashboard lives publicly. |
+| `OPENCLAW_LEADER` | `0` | Set to `1` on exactly one machine. Enables the continuation loop, opens `/data/specs.db`, and is where the public dashboard lives. |
 | `OPENCLAW_LOCAL_AGENT_IDS` | (empty) | CSV list of agents this machine owns. Empty = ownership checks bypassed (dev mode). |
-| `OPENCLAW_SPECS_REPO_URL` | (empty) | HTTPS URL of the private GitHub repo. Empty = local-only, no sync. |
-| `OPENCLAW_GIT_TOKEN` | (empty) | GitHub PAT with `repo` scope. Required when `OPENCLAW_SPECS_REPO_URL` is HTTPS. |
+| `OPENCLAW_LEADER_URL` | (empty) | **Required on followers.** Leader's daemon base URL (e.g. `http://leader.lan:7878` or `https://leader.tailnet.ts.net`). Ignored on the leader. |
+| `OPENCLAW_SPECS_DB_PATH` | `/data/specs.db` | Leader-only. SQLite file path inside the container. The `/data` mount comes from the named docker volume `specs-db`. |
+| `OPENCLAW_DISPATCH_FAILURE_THRESHOLD` | `3` | K consecutive failures (per `(project, task, phase)`) before a dispatch is poisoned. |
 | `OPENCLAW_JWT_SECRET` | (auto-generated by setup.sh) | JWT signing secret. Rotate to invalidate sessions. |
-| `OPENCLAW_INTERNAL_TOKEN` | (auto-generated on first boot) | Service token for bot-bridge ↔ daemon. Copy from logs into `.env` to pin. |
+| `OPENCLAW_INTERNAL_TOKEN` | (auto-generated on first boot) | Service token for bot-bridge ↔ daemon, follower ↔ leader, dispatched-agent ↔ daemon. Copy from logs into `.env` to pin. |
 | `OPENCLAW_TICK_MS` | `30000` | Continuation loop interval (ms). Leader only. |
-| `OPENCLAW_GIT_PULL_MS` | `15000` | Git pull interval (ms). |
 | `OPENCLAW_PTAH_BRIDGE_URL` | `http://host.docker.internal:8744` | Where the daemon delegates orchestration runs. Empty = fall back to spawning ptah inside the container. |
 | `LLM_PROVIDER` / `LLM_MODEL` / `OLLAMA_BASE_URL` | `ollama` / `kimi-k2.6:cloud` / `host.docker.internal:11434/v1` | Used by `bot-bridge` for free-form Discord chat. Discord chat does NOT go through ptah; it hits the LLM provider directly. |
 | `OPENCLAW_CONTROL_BIND` | `127.0.0.1` | Host bind address for `:7878`. Set to `0.0.0.0` only if you have TLS in front. |
@@ -294,14 +310,35 @@ For the full env reference see [CONFIGURATION.md](CONFIGURATION.md). Highest-imp
 
 | Symptom | First place to look |
 |---|---|
-| Daemon won't start | `docker compose logs openclaw 2>&1 \| grep '\[control\]\|\[git-sync\]'` — usually clone failure or port conflict |
-| "git not initialized" errors | `OPENCLAW_SPECS_REPO_URL` / `OPENCLAW_GIT_TOKEN` mismatch or repo doesn't exist |
+| Daemon won't start | `docker compose logs openclaw 2>&1 \| grep '\[control\]'` — usually port conflict, missing `OPENCLAW_LEADER_URL` on a follower, or migration failure |
+| "DB migration failed" on the leader | Bind-mount perms on `/data` (must be writable by uid 1000) or stale schema_version row |
 | Bot-bridge skips an agent (`no local persona`) | `~/.claude/local-memory/agents/<id>/persona.md` missing — re-run `setup.sh` or copy from another machine |
-| Dispatch sits in `pending/` forever | No follower lists the agent in `OPENCLAW_LOCAL_AGENT_IDS`, or the follower isn't pulling |
+| Dispatch sits in `pending` forever | No follower lists the agent in `OPENCLAW_LOCAL_AGENT_IDS`, or the follower's SSE/HTTP can't reach the leader |
 | Two leaders racing | Two machines have `OPENCLAW_LEADER=1`. Pick one. |
 | Dashboard 401 from a phone | Discord OAuth redirect URI mismatch, or your user ID isn't in `DISCORD_ALLOWED_USER_IDS` |
+| Poisoned dispatch | `failure_count` hit `OPENCLAW_DISPATCH_FAILURE_THRESHOLD`. See `docs/OPERATIONS.md` for the retry recipe |
 
 Full table in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
+---
+
+## Multi-machine bootstrap — 4 steps, no fork
+
+The same image and the same `setup.sh` runs on every host. The only difference between leader and follower is a few lines of `.env`.
+
+1. **Clone the repo on every host.**
+   ```bash
+   git clone https://github.com/Hive-Academy/hive-claw ~/Desktop/fixing-openclaw
+   cd ~/Desktop/fixing-openclaw/openclaw-control
+   cp .env.example .env
+   ```
+2. **Edit `.env` per role.**
+   - **Leader** — set `OPENCLAW_LEADER=1`. `OPENCLAW_SPECS_DB_PATH` defaults to `/data/specs.db` and is fine. Note the value of `OPENCLAW_INTERNAL_TOKEN` after first boot (or pin it before).
+   - **Follower** — set `OPENCLAW_LEADER=0` and `OPENCLAW_LEADER_URL=https://<leader>` (or `http://leader.lan:7878`). Set `OPENCLAW_INTERNAL_TOKEN` to the **same** value the leader has, otherwise its API will reject your bearer.
+3. **Run `docker compose up -d` on every host.** The leader's `entrypoint-control.sh` will create `/data/specs.db` and run schema migrations idempotently. Followers skip that step entirely.
+4. **(Migrating from the git-era only)** SSH the leader and run `./scripts/cutover.sh` once to drop the old git-cloned spec tree and the legacy named volume. The cutover is destructive and acceptable to lose in-flight work — see `scripts/cutover.sh` for the exact prompts.
+
+After step 3, hit `http://127.0.0.1:7878/api/health` on each host. Then `@<bot> hello` in Discord, or open the leader's dashboard at `http://127.0.0.1:7878`.
 
 ---
 
