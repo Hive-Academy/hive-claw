@@ -1,5 +1,5 @@
 /**
- * T6.5 — failure counter / poison policy (defect C).
+ * T6.5 — failure counter / poison policy (defect C) + CD2 follow-up.
  *
  * Validates implementation-plan.md §7 lines 715-770. With
  * OPENCLAW_DISPATCH_FAILURE_THRESHOLD=3, the K-recent-failed window query
@@ -21,6 +21,13 @@
  *   - The first (threshold - 1) attempts are 'failed'.
  *   - The Kth attempt is 'poisoned'.
  *   - The poisoned dispatch is absent from listPendingForAgents.
+ *
+ * CD2 (schema v2): the partial UNIQUE index `dispatches_unique_open` now
+ * covers ('pending','taken','poisoned'). After a poison, the next
+ * `insertPending` for the same (project, task, phase) MUST return null —
+ * the runaway loop is closed at the schema layer. Operator recovery is via
+ * `DELETE FROM dispatches WHERE state='poisoned' AND ...` (documented in
+ * docs/TROUBLESHOOTING.md / docs/OPERATIONS.md).
  */
 
 import { test } from 'node:test';
@@ -112,11 +119,47 @@ test(`K=${THRESHOLD} consecutive null-exit failures transition to poisoned, not 
       'no pending dispatch should exist for the poisoned (project, task, phase)',
     );
 
-    // Defense-in-depth: the partial UNIQUE index `dispatches_unique_open`
-    // does NOT cover 'poisoned' (it covers state IN ('pending','taken')),
-    // so a fresh insertPending IS still allowed — that is by design (the
-    // operator's `retry` path resurrects via UPDATE … SET state='done'
-    // per §7 lines 772-775). We only assert the worker won't auto-claim it.
+    // CD2: the partial UNIQUE index `dispatches_unique_open` was extended
+    // in schema v2 to cover ('pending','taken','poisoned'). The runaway
+    // loop is closed: a fresh insertPending for the same (project, task,
+    // phase) MUST be deduped by the index and return null.
+    const blocked = t.DispatchRepo.insertPending({
+      agentId: 'horus',
+      projectSlug: project,
+      taskId: task,
+      phase,
+      prompt: 'after-poison continuation tick',
+      createdBy: 'test',
+    });
+    assert.equal(
+      blocked,
+      null,
+      'CD2: insertPending after poison must be null — partial UNIQUE index now covers `poisoned`',
+    );
+
+    // Operator recovery: DELETE the poisoned row, then a fresh
+    // insertPending succeeds. This is the documented recovery flow in
+    // docs/TROUBLESHOOTING.md and docs/OPERATIONS.md.
+    t.db.prepare(
+      `DELETE FROM dispatches
+        WHERE state='poisoned'
+          AND project_slug=@p
+          AND task_id=@t
+          AND phase=@ph`,
+    ).run({ p: project, t: task, ph: phase });
+    const recovered = t.DispatchRepo.insertPending({
+      agentId: 'horus',
+      projectSlug: project,
+      taskId: task,
+      phase,
+      prompt: 'after-operator-recovery',
+      createdBy: 'test',
+    });
+    assert.notEqual(
+      recovered,
+      null,
+      'after operator clears the poisoned row, a fresh insertPending must succeed',
+    );
   } finally {
     t.cleanup();
   }

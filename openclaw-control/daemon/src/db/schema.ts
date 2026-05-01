@@ -14,9 +14,18 @@
  * raises a constraint error.
  *
  * See implementation-plan.md §2 lines 159-306 for the source of truth.
+ *
+ * Versions:
+ *   v1 — initial schema. `dispatches_unique_open` covered ('pending','taken').
+ *   v2 — `dispatches_unique_open` extended to ('pending','taken','poisoned')
+ *        so the continuation loop cannot re-insert a fresh `pending` while a
+ *        `poisoned` row exists for the same (project, task, phase). Operator
+ *        recovery via `DELETE FROM dispatches WHERE state='poisoned' AND ...`
+ *        (see docs/TROUBLESHOOTING.md / docs/OPERATIONS.md). This closes the
+ *        runaway-loop CD2 from code-logic-review.md.
  */
 
-export const CURRENT_VERSION = 1;
+export const CURRENT_VERSION = 2;
 
 export const SCHEMA_V1: readonly string[] = [
   // 1. projects
@@ -118,11 +127,15 @@ export const SCHEMA_V1: readonly string[] = [
      ON dispatches(state, agent_id, created_at)
      WHERE state = 'pending'`,
 
-  // 2. THE BUG-FIX-VIA-SCHEMA INDEX (defect B):
+  // 2. THE BUG-FIX-VIA-SCHEMA INDEX (defect B + CD2):
   //    partial UNIQUE on (project_slug, task_id, phase) limited to OPEN states.
+  //    `poisoned` is included so the continuation tick cannot re-insert a
+  //    fresh `pending` while a poisoned row blocks the lane — closing the
+  //    runaway loop at the schema layer (cf. code-logic-review.md CD2).
+  //    Operator recovery: DELETE FROM dispatches WHERE state='poisoned' AND ...
   `CREATE UNIQUE INDEX dispatches_unique_open
      ON dispatches(project_slug, task_id, phase)
-     WHERE state IN ('pending','taken')`,
+     WHERE state IN ('pending','taken','poisoned')`,
 
   // 3. listing "all dispatches for this task" (dashboard task-detail view)
   `CREATE INDEX dispatches_by_task

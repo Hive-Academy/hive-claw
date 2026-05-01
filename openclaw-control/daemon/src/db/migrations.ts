@@ -14,10 +14,14 @@
  * Strategy:
  *   - Open / create the database file at the given path via openOnce().
  *   - Ensure schema_version exists.
- *   - Read the highest applied version. If it equals CURRENT_VERSION, return.
- *   - Otherwise apply each statement in SCHEMA_V1 in order, then INSERT
- *     the version row. Wrap the whole step in a single transaction so a
- *     mid-migration crash leaves the DB unchanged.
+ *   - Read the highest applied version. For each missing version, apply
+ *     its step in a single transaction and INSERT the version row.
+ *
+ * Versions:
+ *   v1 → fresh-DB schema (SCHEMA_V1).
+ *   v2 → drop+recreate `dispatches_unique_open` so it covers
+ *        ('pending','taken','poisoned') instead of ('pending','taken').
+ *        Closes the runaway-loop CD2 from code-logic-review.md.
  */
 
 import type { Database } from 'better-sqlite3';
@@ -42,30 +46,66 @@ function currentVersion(db: Database): number {
 }
 
 /**
- * Apply all missing migrations up to CURRENT_VERSION. Idempotent.
- *
- * Throws if a CREATE statement fails — the partially-applied transaction
- * is rolled back automatically by better-sqlite3's transaction wrapper.
+ * Apply the v0 → v1 step (fresh DB): every CREATE in SCHEMA_V1, then mark v1.
  */
-export function runMigrations(db: Database): void {
-  const have = currentVersion(db);
-  if (have >= CURRENT_VERSION) return;
-
-  // We have only a single revision so far (V1). Every statement in
-  // SCHEMA_V1 plus the version-row insert run in one transaction.
+function applyV1(db: Database): void {
   const apply = db.transaction((statements: readonly string[]) => {
     for (let i = 0; i < statements.length; i++) {
       try {
         db.exec(statements[i]);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        throw new Error(`migration step ${i + 1}/${statements.length} failed: ${message}`);
+        throw new Error(`migration v1 step ${i + 1}/${statements.length} failed: ${message}`);
       }
     }
-    db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(CURRENT_VERSION);
+    db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(1);
   });
-
   apply(SCHEMA_V1);
+}
+
+/**
+ * Apply the v1 → v2 step: drop + recreate `dispatches_unique_open` so the
+ * partial UNIQUE index also covers `poisoned`. SQLite supports
+ * DROP INDEX + CREATE INDEX inside a transaction; the rebuild is fast
+ * because the index is small (open dispatches only).
+ */
+function applyV2(db: Database): void {
+  const apply = db.transaction(() => {
+    try {
+      db.exec(`DROP INDEX IF EXISTS dispatches_unique_open`);
+      db.exec(
+        `CREATE UNIQUE INDEX dispatches_unique_open
+           ON dispatches(project_slug, task_id, phase)
+           WHERE state IN ('pending','taken','poisoned')`,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`migration v2 (dispatches_unique_open rebuild) failed: ${message}`);
+    }
+    db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(2);
+  });
+  apply();
+}
+
+/**
+ * Apply all missing migrations up to CURRENT_VERSION. Idempotent.
+ *
+ * Each step's CREATE/DROP and the version-row insert run in a single
+ * transaction, so a mid-step crash leaves the DB at the prior version.
+ */
+export function runMigrations(db: Database): void {
+  let have = currentVersion(db);
+  if (have >= CURRENT_VERSION) return;
+
+  if (have < 1) {
+    applyV1(db);
+    have = 1;
+  }
+  if (have < 2) {
+    applyV2(db);
+    have = 2;
+  }
+  // Future: if (have < 3) applyV3(db); ...
 }
 
 /**

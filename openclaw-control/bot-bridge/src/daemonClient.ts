@@ -92,10 +92,14 @@ export const daemon = {
   handoff: (slug: string, id: string, toAgent: string, reason?: string) =>
     call('POST', `/api/projects/${slug}/tasks/${id}/handoff`, { toAgent, reason }),
   tick: () => call<{ dispatched: number; checkpoints: number; pending: number }>('POST', '/api/continuation/tick'),
-  appendInteraction: (discordUserId: string, agent: string, channel: string, summary: string) =>
-    call('PUT', `/api/memories/users/${discordUserId}/interactions.md`, {
-      content: `_appended ${new Date().toISOString()}_`,
-    }).catch(() => {}),
+  // NOTE: `appendInteraction` was removed in TASK_2026_001 Batch 8 — it was
+  // a 4-arg stub that ignored 3 of its arguments, wrote a placeholder body,
+  // and silently swallowed errors (`.catch(() => {})`). It had no callers.
+  // The canonical interaction-append helper lives daemon-side at
+  // `daemon/src/memory.ts:appendInteraction` (read-modify-write of
+  // `users/<id>/interactions.md`). If a future bot-bridge caller needs to
+  // record interactions, route through that helper via a real HTTP endpoint
+  // — do not resurrect a swallow-errors stub.
   readMemory,
   readAgentIdentity,
   readDiscordJson,

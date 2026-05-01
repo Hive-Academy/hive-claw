@@ -9,6 +9,22 @@ export interface SessionUser {
   email?: string;
 }
 
+interface DiscordTokenResponse {
+  access_token?: string;
+  token_type?: string;
+  expires_in?: number;
+  refresh_token?: string;
+  scope?: string;
+}
+
+interface DiscordUserResponse {
+  id?: string;
+  username?: string;
+  global_name?: string | null;
+  avatar?: string | null;
+  email?: string;
+}
+
 const STATE_TTL_MS = 10 * 60 * 1000;
 const states = new Map<string, number>();
 
@@ -107,14 +123,18 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
           redirect_uri: config.discord.redirectUri,
         }).toString(),
       });
-      const tokenJson = (await tokenRes.body.json()) as any;
+      // Discord OAuth response shapes: documented at
+      //   https://discord.com/developers/docs/topics/oauth2
+      // We narrow the relevant fields rather than carrying `any` past the
+      // parsing boundary.
+      const tokenJson = (await tokenRes.body.json()) as DiscordTokenResponse;
       if (!tokenJson.access_token) {
         return reply.code(401).send({ error: 'discord token exchange failed', detail: tokenJson });
       }
       const userRes = await undiciRequest('https://discord.com/api/users/@me', {
         headers: { authorization: `Bearer ${tokenJson.access_token}` },
       });
-      const u = (await userRes.body.json()) as any;
+      const u = (await userRes.body.json()) as DiscordUserResponse;
       if (!u.id) return reply.code(401).send({ error: 'discord user fetch failed' });
 
       if (!(await isAuthorized(u.id, tokenJson.access_token))) {
@@ -123,7 +143,7 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
 
       const session: SessionUser = {
         discordId: u.id,
-        username: u.global_name ?? u.username,
+        username: u.global_name ?? u.username ?? u.id,
         avatar: u.avatar
           ? `https://cdn.discordapp.com/avatars/${u.id}/${u.avatar}.png`
           : undefined,
@@ -143,7 +163,10 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
 }
 
 export async function currentUser(req: FastifyRequest): Promise<SessionUser | null> {
-  const token = (req.cookies as any)?.[config.cookieName];
+  // `@fastify/cookie` types `req.cookies` as
+  //   { [cookieName: string]: string | undefined }
+  // so the lookup is type-safe without an unsafe cast.
+  const token = req.cookies?.[config.cookieName];
   if (!token) return null;
   try {
     const decoded = await req.server.jwt.verify<SessionUser>(token);

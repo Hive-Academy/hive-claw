@@ -1,39 +1,27 @@
-import Fastify from 'fastify';
+import Fastify, { type preHandlerHookHandler } from 'fastify';
 import cors from '@fastify/cors';
 import cookie from '@fastify/cookie';
 import jwt from '@fastify/jwt';
 import staticPlugin from '@fastify/static';
 import fs from 'node:fs';
 import { config } from './config.js';
-import { discoverProjects, getProject } from './projects.js';
-import { listTasks, readTask, readTaskArtifacts, type Phase } from './phase.js';
-import { listAgents } from './agents.js';
 import { listSessions, tailSession, newestSessionForProject } from './sessions.js';
 import { attachSse, broadcast } from './sse.js';
 import { registerAuth, requireAuth } from './auth.js';
-import {
-  listScope,
-  readMemoryFile,
-  writeMemoryFile,
-  deleteMemoryFile,
-  type MemoryScope,
-} from './memory.js';
-import {
-  createTask,
-  recordApproval,
-  tickOnce,
-} from './continuation.js';
+import { MemoryError } from './memory.js';
 import { publishHandoff } from './bus.js';
 import {
-  DispatchRepo,
-  TasksRepo,
   PRIVATE_AGENT_FILES,
   isTerminalState,
   getReadOnlyDb,
-  type Dispatch,
+  UnknownDispatchError,
+  DispatchStateError,
   type DispatchState,
+  type MemoryScope,
 } from './db/index.js';
+import type { Phase } from './phase.js';
 import * as leaderClient from './leaderClient.js';
+import * as storage from './storage.js';
 
 const TASK_FILE_MAX_BYTES = 1 * 1024 * 1024; // 1 MB — matches TasksRepo.writeFile
 
@@ -119,36 +107,27 @@ export function buildApp() {
 
   registerAuth(app);
 
-  const guard = async (req: any, reply: any) => {
+  // Auth pre-handler. The Fastify type augmentation in `types/fastify.d.ts`
+  // typechecks every downstream `req.user.username` read.
+  const guard: preHandlerHookHandler = async (req, reply) => {
     const u = await requireAuth(req, reply);
     if (!u) return reply;
     req.user = u;
   };
 
   // --- projects / tasks --------------------------------------------------
-  app.get('/api/projects', { preHandler: guard }, async () => {
-    const projects = await discoverProjects();
-    return Promise.all(
-      projects.map(async (p) => {
-        const tasks = await listTasks(p);
-        return {
-          slug: p.slug,
-          path: p.path,
-          taskCount: tasks.length,
-          openTaskCount: tasks.filter((t) => t.phase !== 'DONE').length,
-          checkpointCount: tasks.filter((t) => t.checkpointPending).length,
-        };
-      }),
-    );
-  });
+  // Routes go through the storage facade (storage.ts) so the leader and a
+  // follower share the same handler shape — the facade dispatches to repos
+  // on the leader and to leaderClient HTTP relays on a follower (CD1 fix).
+  app.get('/api/projects', { preHandler: guard }, async () => storage.listProjects());
 
   app.get<{ Params: { slug: string } }>(
     '/api/projects/:slug/tasks',
     { preHandler: guard },
     async (req, reply) => {
-      const project = await getProject(req.params.slug);
+      const project = await storage.readProject(req.params.slug);
       if (!project) return reply.code(404).send({ error: 'project not found' });
-      return listTasks(project);
+      return storage.listTasksForProject(req.params.slug);
     },
   );
 
@@ -156,11 +135,11 @@ export function buildApp() {
     '/api/projects/:slug/tasks/:taskId',
     { preHandler: guard },
     async (req, reply) => {
-      const project = await getProject(req.params.slug);
+      const project = await storage.readProject(req.params.slug);
       if (!project) return reply.code(404).send({ error: 'project not found' });
-      const summary = await readTask(project, req.params.taskId);
+      const summary = await storage.readTaskSummary(req.params.slug, req.params.taskId);
       if (!summary) return reply.code(404).send({ error: 'task not found' });
-      const artifacts = await readTaskArtifacts(project, req.params.taskId);
+      const artifacts = await storage.readTaskArtifactsBy(req.params.slug, req.params.taskId);
       return { ...summary, artifacts };
     },
   );
@@ -177,21 +156,22 @@ export function buildApp() {
   }>('/api/tasks', { preHandler: guard }, async (req, reply) => {
     const { project: slug, description, taskType, agentId, discordUserId, channelId } = req.body;
     if (!slug || !description) return reply.code(400).send({ error: 'project and description required' });
-    return createTask({ projectSlug: slug, description, taskType, agentId, discordUserId, channelId });
+    return storage.createTask({ projectSlug: slug, description, taskType, agentId, discordUserId, channelId });
   });
 
   app.post<{
     Params: { slug: string; taskId: string };
     Body: { phase: Phase; decision: 'APPROVED' | 'REJECTED'; feedback?: string };
   }>('/api/projects/:slug/tasks/:taskId/approve', { preHandler: guard }, async (req, reply) => {
-    const project = await getProject(req.params.slug);
+    const project = await storage.readProject(req.params.slug);
     if (!project) return reply.code(404).send({ error: 'project not found' });
-    const ok = await recordApproval(
-      project,
+    const ok = await storage.recordApproval(
+      req.params.slug,
       req.params.taskId,
       req.body.phase,
-      (req as any).user?.username ?? 'unknown',
+      req.user?.username ?? 'unknown',
       req.body.feedback,
+      req.body.decision,
     );
     if (!ok) return reply.code(404).send({ error: 'task not found' });
     return { ok: true };
@@ -201,9 +181,9 @@ export function buildApp() {
     Params: { slug: string; taskId: string };
     Body: { toAgent: string; reason?: string };
   }>('/api/projects/:slug/tasks/:taskId/handoff', { preHandler: guard }, async (req, reply) => {
-    const project = await getProject(req.params.slug);
+    const project = await storage.readProject(req.params.slug);
     if (!project) return reply.code(404).send({ error: 'project not found' });
-    const summary = await readTask(project, req.params.taskId);
+    const summary = await storage.readTaskSummary(req.params.slug, req.params.taskId);
     if (!summary) return reply.code(404).send({ error: 'task not found' });
     await publishHandoff({
       taskId: req.params.taskId,
@@ -217,7 +197,9 @@ export function buildApp() {
     return { ok: true };
   });
 
-  app.post('/api/continuation/tick', { preHandler: guard }, async () => tickOnce());
+  app.post('/api/continuation/tick', { preHandler: guard }, async () =>
+    storage.continuationTickThroughFacade(),
+  );
 
   // --- task files (T3.2) ------------------------------------------------
   // List files for a task. Returns metadata only — no body.
@@ -225,14 +207,9 @@ export function buildApp() {
     '/api/projects/:slug/tasks/:taskId/files',
     { preHandler: guard },
     async (req, reply) => {
-      const task = TasksRepo.get(req.params.slug, req.params.taskId);
-      if (!task) return reply.code(404).send({ error: 'task not found' });
-      const files = TasksRepo.listFiles(req.params.slug, req.params.taskId);
-      return files.map((f) => ({
-        filename: f.filename,
-        sizeBytes: f.sizeBytes,
-        updatedAt: f.updatedAt,
-      }));
+      const files = await storage.listTaskFiles(req.params.slug, req.params.taskId);
+      if (files === null) return reply.code(404).send({ error: 'task not found' });
+      return files;
     },
   );
 
@@ -241,24 +218,20 @@ export function buildApp() {
     '/api/projects/:slug/tasks/:taskId/files/:filename',
     { preHandler: guard },
     async (req, reply) => {
-      const file = TasksRepo.readFile(
+      const file = await storage.readTaskFile(
         req.params.slug,
         req.params.taskId,
         req.params.filename,
       );
       if (!file) return reply.code(404).send({ error: 'file not found' });
-      return {
-        content: file.content,
-        contentType: file.contentType,
-        sizeBytes: file.sizeBytes,
-        updatedAt: file.updatedAt,
-      };
+      return file;
     },
   );
 
-  // Write a task file. Body size capped at 1 MB; the underlying
-  // TasksRepo.writeFile is the BEGIN IMMEDIATE transaction that also
-  // re-derives `tasks.current_phase` (the §6 atomicity invariant).
+  // Write a task file. Body size capped at 1 MB; on the leader the
+  // underlying TasksRepo.writeFile is the BEGIN IMMEDIATE transaction
+  // that also re-derives `tasks.current_phase` (the §6 atomicity invariant).
+  // On a follower this PUT relays to the leader.
   app.put<{
     Params: { slug: string; taskId: string; filename: string };
     Body: { content: string };
@@ -276,17 +249,16 @@ export function buildApp() {
           .code(413)
           .send({ error: 'task file exceeds 1 MB limit', sizeBytes });
       }
-      const task = TasksRepo.get(req.params.slug, req.params.taskId);
-      if (!task) return reply.code(404).send({ error: 'task not found' });
-      const updatedBy = (req as any).user?.username ?? null;
+      const updatedBy = req.user?.username ?? null;
       try {
-        const result = TasksRepo.writeFile(
+        const result = await storage.writeTaskFile(
           req.params.slug,
           req.params.taskId,
           req.params.filename,
           content,
           updatedBy,
         );
+        if (!result) return reply.code(404).send({ error: 'task not found' });
         broadcast('task.updated', {
           project: req.params.slug,
           taskId: req.params.taskId,
@@ -308,13 +280,12 @@ export function buildApp() {
     '/api/projects/:slug/tasks/:taskId/files/:filename',
     { preHandler: guard },
     async (req, reply) => {
-      const task = TasksRepo.get(req.params.slug, req.params.taskId);
-      if (!task) return reply.code(404).send({ error: 'task not found' });
-      const result = TasksRepo.deleteFile(
+      const result = await storage.deleteTaskFile(
         req.params.slug,
         req.params.taskId,
         req.params.filename,
       );
+      if (!result) return reply.code(404).send({ error: 'task not found' });
       broadcast('task.updated', {
         project: req.params.slug,
         taskId: req.params.taskId,
@@ -327,43 +298,32 @@ export function buildApp() {
   );
 
   // --- dispatches (T3.3) ------------------------------------------------
-  // Paginated list with optional filters. Uses `dispatches_by_state` index
-  // when filtered by state.
+  // Paginated list with optional filters. On the leader this hits
+  // `dispatches_by_state` directly; on a follower it relays to the leader.
   app.get<{
     Querystring: { state?: string; projectSlug?: string; taskId?: string; limit?: string };
   }>('/api/dispatches', { preHandler: guard }, async (req, reply) => {
     const validStates: ReadonlySet<DispatchState> = new Set([
       'pending', 'taken', 'done', 'failed', 'poisoned',
     ]);
-    const where: string[] = [];
-    const params: unknown[] = [];
+    let state: DispatchState | undefined;
     if (req.query.state) {
       if (!validStates.has(req.query.state as DispatchState)) {
         return reply.code(400).send({ error: `invalid state "${req.query.state}"` });
       }
-      where.push('state = ?');
-      params.push(req.query.state);
+      state = req.query.state as DispatchState;
     }
-    if (req.query.projectSlug) {
-      where.push('project_slug = ?');
-      params.push(req.query.projectSlug);
+    let limit: number | undefined;
+    if (req.query.limit !== undefined) {
+      const parsed = Number.parseInt(req.query.limit, 10);
+      limit = Number.isFinite(parsed) && parsed >= 1 ? parsed : undefined;
     }
-    if (req.query.taskId) {
-      where.push('task_id = ?');
-      params.push(req.query.taskId);
-    }
-    let limit = Number.parseInt(req.query.limit ?? '50', 10);
-    if (!Number.isFinite(limit) || limit < 1) limit = 50;
-    if (limit > 500) limit = 500;
-    const sql = `
-      SELECT * FROM dispatches
-      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-      ORDER BY created_at DESC
-      LIMIT ?
-    `;
-    params.push(limit);
-    const rows = getReadOnlyDb().prepare(sql).all(...params) as Array<Record<string, unknown>>;
-    return rows.map(rawRowToDispatch);
+    return storage.listDispatches({
+      state,
+      projectSlug: req.query.projectSlug,
+      taskId: req.query.taskId,
+      limit,
+    });
   });
 
   // Followers' claimable list. `agentIds=horus,anubis` filters to those
@@ -377,15 +337,7 @@ export function buildApp() {
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean);
-      const rows = DispatchRepo.listPendingForAgents(ids);
-      return rows.map((d) => ({
-        id: d.id,
-        projectSlug: d.projectSlug,
-        taskId: d.taskId,
-        phase: d.phase,
-        agentId: d.agentId,
-        createdAt: d.createdAt,
-      }));
+      return storage.listPendingDispatches(ids);
     },
   );
 
@@ -394,7 +346,7 @@ export function buildApp() {
     '/api/dispatches/:id',
     { preHandler: guard },
     async (req, reply) => {
-      const row = DispatchRepo.getById(req.params.id);
+      const row = await storage.readDispatchById(req.params.id);
       if (!row) return reply.code(404).send({ error: 'unknown dispatch' });
       return row;
     },
@@ -409,25 +361,26 @@ export function buildApp() {
     async (req, reply) => {
       const claimedBy =
         asString(req.body?.claimedBy) ??
-        ((req as any).user?.username as string | undefined) ??
+        req.user?.username ??
         'unknown';
-      const dispatch = DispatchRepo.claim(req.params.id, claimedBy);
-      if (!dispatch) {
-        const cur = DispatchRepo.getById(req.params.id);
-        if (!cur) return reply.code(404).send({ error: 'unknown dispatch' });
-        if (isTerminalState(cur.state)) {
-          return reply.code(410).send({ error: 'already terminal', state: cur.state });
+      const result = await storage.claimDispatch(req.params.id, claimedBy);
+      switch (result.outcome) {
+        case 'claimed': {
+          const dispatch = result.dispatch!;
+          broadcast('dispatch.taken', {
+            dispatchId: dispatch.id,
+            agent: dispatch.agentId,
+            claimedBy,
+          });
+          return dispatch;
         }
-        // cur.state must be 'taken' here (it can't be 'pending', or claim
-        // would have succeeded).
-        return reply.code(409).send({ error: 'already taken', claimedBy: cur.claimedBy });
+        case 'unknown':
+          return reply.code(404).send({ error: 'unknown dispatch' });
+        case 'terminal':
+          return reply.code(410).send({ error: 'already terminal', state: result.state });
+        case 'taken':
+          return reply.code(409).send({ error: 'already taken', claimedBy: result.claimedBy });
       }
-      broadcast('dispatch.taken', {
-        dispatchId: dispatch.id,
-        agent: dispatch.agentId,
-        claimedBy,
-      });
-      return dispatch;
     },
   );
 
@@ -450,7 +403,7 @@ export function buildApp() {
           : 0;
       const stderrSnippet = asString(req.body?.stderrSnippet) ?? null;
       try {
-        const final = DispatchRepo.markDone(req.params.id, {
+        const final = await storage.markDispatchDone(req.params.id, {
           exitCode,
           durationMs,
           stderrSnippet,
@@ -464,23 +417,27 @@ export function buildApp() {
         });
         return final;
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg.startsWith('markDone: unknown dispatch')) {
+        // Typed errors → typed HTTP status codes. The repo (and the
+        // follower-side relay in storage.ts) throw compile-time-pinned
+        // errors so a future refactor of the message strings can never
+        // silently degrade us to 500.
+        if (err instanceof UnknownDispatchError) {
           return reply.code(404).send({ error: 'unknown dispatch' });
         }
-        if (msg.startsWith('markDone: cannot complete from state=')) {
-          return reply.code(409).send({ error: msg.replace('markDone: ', '') });
+        if (err instanceof DispatchStateError) {
+          return reply
+            .code(409)
+            .send({ error: `cannot complete from state=${err.state}`, state: err.state });
         }
         throw err;
       }
     },
   );
 
-  // Append an audit-log row for a dispatch. Followers post here via
-  // leaderClient.appendLog so mid-invocation log lines land in the leader's
-  // dispatch_log table (cross-machine traceability replacing the old
-  // .invoker/*.log + git audit). The leader's own invoker writes directly
-  // via DispatchRepo.appendLog; this route exists for the follower hop.
+  // Append an audit-log row for a dispatch. The leader's own invoker writes
+  // directly via DispatchRepo.appendLog; this route exists for the follower
+  // hop and for any other client posting cross-machine log lines. On a
+  // follower the storage facade relays to the leader.
   app.post<{
     Params: { id: string };
     Body: { message?: unknown; level?: unknown; host?: unknown };
@@ -501,16 +458,15 @@ export function buildApp() {
         }
         level = rawLevel as 'info' | 'warn' | 'error';
       }
-      const dispatch = DispatchRepo.getById(req.params.id);
-      if (!dispatch) return reply.code(404).send({ error: 'unknown dispatch' });
       const host = typeof req.body?.host === 'string' ? req.body.host : undefined;
-      DispatchRepo.appendLog(req.params.id, message, level, host);
-      return { ok: true };
+      const result = await storage.appendDispatchLog(req.params.id, message, level, host);
+      if (!result) return reply.code(404).send({ error: 'unknown dispatch' });
+      return result;
     },
   );
 
   // --- agents -----------------------------------------------------------
-  app.get('/api/agents', { preHandler: guard }, async () => listAgents());
+  app.get('/api/agents', { preHandler: guard }, async () => storage.listAgentsList());
 
   // --- sessions ---------------------------------------------------------
   app.get('/api/sessions', { preHandler: guard }, async () => listSessions());
@@ -531,7 +487,7 @@ export function buildApp() {
   app.get<{ Params: { scope: MemoryScope } }>(
     '/api/memories/:scope',
     { preHandler: guard },
-    async (req) => listScope(req.params.scope),
+    async (req) => storage.listMemoryScope(req.params.scope),
   );
 
   // GET single file. Persona privacy gate FIRST: scope=agents +
@@ -545,7 +501,7 @@ export function buildApp() {
       if (scope === 'agents' && PRIVATE_AGENT_FILES.has(file)) {
         return reply.code(404).send({ error: 'not found' });
       }
-      const r = await readMemoryFile(scope, id, file);
+      const r = await storage.readMemory(scope, id, file);
       if (r == null) return reply.code(404).send({ error: 'not found' });
       return r;
     },
@@ -565,13 +521,16 @@ export function buildApp() {
         .send({ error: 'private agent files cannot be sent over the network' });
     }
     try {
-      const updatedBy = (req as any).user?.username ?? null;
-      const r = await writeMemoryFile(scope, id, file, req.body.content, updatedBy);
+      const updatedBy = req.user?.username ?? null;
+      const r = await storage.writeMemory(scope, id, file, req.body.content, updatedBy);
       broadcast('memory.updated', { scope, id, file, private: r.private });
       return { ok: true, private: r.private };
-    } catch (err: any) {
-      const code = err?.statusCode ?? 400;
-      return reply.code(code).send({ error: err?.message ?? 'write failed' });
+    } catch (err) {
+      if (err instanceof MemoryError) {
+        return reply.code(err.statusCode).send({ error: err.message });
+      }
+      const message = err instanceof Error ? err.message : 'write failed';
+      return reply.code(400).send({ error: message });
     }
   });
 
@@ -587,12 +546,15 @@ export function buildApp() {
           .send({ error: 'private agent files cannot be sent over the network' });
       }
       try {
-        await deleteMemoryFile(scope, id, file);
+        await storage.deleteMemory(scope, id, file);
         broadcast('memory.updated', { scope, id, file, deleted: true });
         return { ok: true };
-      } catch (err: any) {
-        const code = err?.statusCode ?? 400;
-        return reply.code(code).send({ error: err?.message ?? 'delete failed' });
+      } catch (err) {
+        if (err instanceof MemoryError) {
+          return reply.code(err.statusCode).send({ error: err.message });
+        }
+        const message = err instanceof Error ? err.message : 'delete failed';
+        return reply.code(400).send({ error: message });
       }
     },
   );
@@ -622,36 +584,4 @@ export function buildApp() {
   }
 
   return app;
-}
-
-/**
- * Convert a raw dispatches row (snake_case columns) to the typed Dispatch
- * shape exposed by the API. Mirrors the toDispatch in db/dispatches.ts but
- * lives here because the listing route builds dynamic SQL for filters
- * rather than reusing DispatchRepo's prepared statements.
- */
-function rawRowToDispatch(raw: Record<string, unknown>): Dispatch {
-  return {
-    id: String(raw.id),
-    projectSlug: String(raw.project_slug),
-    taskId: String(raw.task_id),
-    phase: String(raw.phase),
-    agentId: String(raw.agent_id),
-    prompt: String(raw.prompt),
-    state: String(raw.state) as DispatchState,
-    failureCount: Number(raw.failure_count ?? 0),
-    exitCode: raw.exit_code === null || raw.exit_code === undefined ? null : Number(raw.exit_code),
-    durationMs:
-      raw.duration_ms === null || raw.duration_ms === undefined ? null : Number(raw.duration_ms),
-    stderrSnippet:
-      raw.stderr_snippet === null || raw.stderr_snippet === undefined
-        ? null
-        : String(raw.stderr_snippet),
-    createdBy: String(raw.created_by),
-    claimedBy: raw.claimed_by === null || raw.claimed_by === undefined ? null : String(raw.claimed_by),
-    createdAt: String(raw.created_at),
-    claimedAt: raw.claimed_at === null || raw.claimed_at === undefined ? null : String(raw.claimed_at),
-    completedAt:
-      raw.completed_at === null || raw.completed_at === undefined ? null : String(raw.completed_at),
-  };
 }

@@ -18,7 +18,11 @@
  */
 
 import { request } from 'undici';
-import type { Dispatch, MemoryScope } from './db/index.js';
+import type { Dispatch, DispatchState, MemoryScope } from './db/index.js';
+import type { Project } from './projects.js';
+import type { TaskSummary } from './phase.js';
+import type { Agent } from './agents.js';
+import type { MemoryEntry } from './memory.js';
 
 export class LeaderError extends Error {
   readonly statusCode: number;
@@ -82,49 +86,325 @@ async function readJson<T>(statusCode: number, body: { json(): Promise<unknown>;
 }
 
 /* -------------------------------------------------------------------------- */
+/* Project / task reads (follower → leader)                                   */
+/* -------------------------------------------------------------------------- */
+
+interface ProjectListResponse {
+  slug: string;
+  path: string;
+  taskCount: number;
+  openTaskCount: number;
+  checkpointCount: number;
+}
+
+export async function listProjects(): Promise<ProjectListResponse[]> {
+  const c = require_();
+  const res = await request(`${c.baseUrl}/api/projects`, {
+    method: 'GET',
+    headers: authHeader(),
+  });
+  return readJson<ProjectListResponse[]>(res.statusCode, res.body, 'listProjects');
+}
+
+/**
+ * Resolve a project by slug from the leader. Returns null on 404.
+ *
+ * The leader does not currently expose a single-project GET (only
+ * /api/projects for the aggregated list and /api/projects/:slug/tasks for
+ * the task list). We synthesise a Project shape from the aggregated list —
+ * the only fields the follower's route handlers need are `slug` and
+ * `path`. This avoids adding a new leader route just for the relay.
+ */
+export async function readProject(slug: string): Promise<Project | null> {
+  const projects = await listProjects();
+  const match = projects.find((p) => p.slug === slug);
+  if (!match) return null;
+  return { slug: match.slug, path: match.path, hasSpecs: true };
+}
+
+export async function listTasksForProject(slug: string): Promise<TaskSummary[]> {
+  const c = require_();
+  const res = await request(
+    `${c.baseUrl}/api/projects/${encodeURIComponent(slug)}/tasks`,
+    { method: 'GET', headers: authHeader() },
+  );
+  if (res.statusCode === 404) {
+    try {
+      await res.body.text();
+    } catch {
+      // Non-actionable
+    }
+    return [];
+  }
+  return readJson<TaskSummary[]>(res.statusCode, res.body, 'listTasksForProject');
+}
+
+interface TaskWithArtifactsResponse extends TaskSummary {
+  artifacts?: Record<string, string>;
+}
+
+export async function readTaskSummary(
+  slug: string,
+  taskId: string,
+): Promise<TaskSummary | null> {
+  const c = require_();
+  const res = await request(
+    `${c.baseUrl}/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(taskId)}`,
+    { method: 'GET', headers: authHeader() },
+  );
+  if (res.statusCode === 404) {
+    try {
+      await res.body.text();
+    } catch {
+      // Non-actionable
+    }
+    return null;
+  }
+  const body = await readJson<TaskWithArtifactsResponse>(
+    res.statusCode,
+    res.body,
+    'readTaskSummary',
+  );
+  // Strip `artifacts` — readTaskSummary returns the summary shape only;
+  // readTaskArtifacts is a separate call that re-fetches if needed.
+  const { artifacts: _drop, ...summary } = body;
+  void _drop;
+  return summary;
+}
+
+export async function readTaskArtifacts(
+  slug: string,
+  taskId: string,
+): Promise<Record<string, string>> {
+  const c = require_();
+  const res = await request(
+    `${c.baseUrl}/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(taskId)}`,
+    { method: 'GET', headers: authHeader() },
+  );
+  if (res.statusCode === 404) {
+    try {
+      await res.body.text();
+    } catch {
+      // Non-actionable
+    }
+    return {};
+  }
+  const body = await readJson<TaskWithArtifactsResponse>(
+    res.statusCode,
+    res.body,
+    'readTaskArtifacts',
+  );
+  return body.artifacts ?? {};
+}
+
+/* -------------------------------------------------------------------------- */
+/* Task / approval / continuation write relays                                */
+/* -------------------------------------------------------------------------- */
+
+export interface CreateTaskRequest {
+  project: string;
+  description: string;
+  taskType?: string;
+  agentId?: string;
+  discordUserId?: string;
+  channelId?: string;
+}
+
+export interface CreateTaskResponse {
+  taskId: string;
+  folder: string;
+}
+
+export async function createTask(body: CreateTaskRequest): Promise<CreateTaskResponse> {
+  const c = require_();
+  const res = await request(`${c.baseUrl}/api/tasks`, {
+    method: 'POST',
+    headers: authHeader(),
+    body: JSON.stringify(body),
+  });
+  return readJson<CreateTaskResponse>(res.statusCode, res.body, 'createTask');
+}
+
+export async function recordApproval(
+  slug: string,
+  taskId: string,
+  body: { phase: string; decision: 'APPROVED' | 'REJECTED'; feedback?: string },
+): Promise<{ ok: true } | null> {
+  const c = require_();
+  const res = await request(
+    `${c.baseUrl}/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(
+      taskId,
+    )}/approve`,
+    {
+      method: 'POST',
+      headers: authHeader(),
+      body: JSON.stringify(body),
+    },
+  );
+  if (res.statusCode === 404) {
+    try {
+      await res.body.text();
+    } catch {
+      // Non-actionable
+    }
+    return null;
+  }
+  return readJson<{ ok: true }>(res.statusCode, res.body, 'recordApproval');
+}
+
+export async function deleteTaskFile(
+  slug: string,
+  taskId: string,
+  filename: string,
+): Promise<void> {
+  const c = require_();
+  const res = await request(
+    `${c.baseUrl}/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(
+      taskId,
+    )}/files/${encodeURIComponent(filename)}`,
+    { method: 'DELETE', headers: authHeader() },
+  );
+  if (res.statusCode >= 200 && res.statusCode < 300) {
+    try {
+      await res.body.text();
+    } catch {
+      // Non-actionable
+    }
+    return;
+  }
+  const detail = await res.body.text().catch(() => '');
+  throw new LeaderError(
+    res.statusCode,
+    `deleteTaskFile: HTTP ${res.statusCode}${detail ? ' ' + detail.slice(0, 200) : ''}`,
+  );
+}
+
+export async function continuationTick(): Promise<{
+  dispatched: number;
+  pending: number;
+  checkpoints: number;
+  skipped: number;
+}> {
+  const c = require_();
+  const res = await request(`${c.baseUrl}/api/continuation/tick`, {
+    method: 'POST',
+    headers: authHeader(),
+  });
+  return readJson<{ dispatched: number; pending: number; checkpoints: number; skipped: number }>(
+    res.statusCode,
+    res.body,
+    'continuationTick',
+  );
+}
+
+/**
+ * Raw HTTP relay — sends the request and returns the leader's `(statusCode,
+ * body)` verbatim so the follower's route handler can mirror them on its
+ * reply. Used when status-code distinctions matter (claim 200/404/409/410,
+ * dispatch state edges, etc.) and constructing typed helpers each time
+ * would be more code than the call site warrants.
+ */
+export async function rawRelay(
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+  path: string,
+  body?: unknown,
+): Promise<{ statusCode: number; body: unknown }> {
+  const c = require_();
+  const res = await request(`${c.baseUrl}${path}`, {
+    method,
+    headers: authHeader(),
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  let parsed: unknown = null;
+  try {
+    const text = await res.body.text();
+    if (text.length > 0) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = text;
+      }
+    }
+  } catch {
+    // Empty body — leave parsed as null.
+  }
+  return { statusCode: res.statusCode, body: parsed };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Agents                                                                     */
+/* -------------------------------------------------------------------------- */
+
+export async function listAgents(): Promise<Agent[]> {
+  const c = require_();
+  const res = await request(`${c.baseUrl}/api/agents`, {
+    method: 'GET',
+    headers: authHeader(),
+  });
+  return readJson<Agent[]>(res.statusCode, res.body, 'listAgents');
+}
+
+/* -------------------------------------------------------------------------- */
 /* Dispatch surface                                                           */
 /* -------------------------------------------------------------------------- */
 
-export async function listPendingForAgents(agentIds: readonly string[]): Promise<Dispatch[]> {
+interface DispatchListFilters {
+  state?: DispatchState;
+  projectSlug?: string;
+  taskId?: string;
+  limit?: number;
+}
+
+export async function listDispatches(
+  filters: DispatchListFilters,
+): Promise<Dispatch[]> {
+  const c = require_();
+  const qs = new URLSearchParams();
+  if (filters.state) qs.set('state', filters.state);
+  if (filters.projectSlug) qs.set('projectSlug', filters.projectSlug);
+  if (filters.taskId) qs.set('taskId', filters.taskId);
+  if (filters.limit !== undefined) qs.set('limit', String(filters.limit));
+  const url = `${c.baseUrl}/api/dispatches${qs.size ? '?' + qs.toString() : ''}`;
+  const res = await request(url, { method: 'GET', headers: authHeader() });
+  return readJson<Dispatch[]>(res.statusCode, res.body, 'listDispatches');
+}
+
+/**
+ * Slim shape returned by GET /api/dispatches/pending. The leader strips
+ * the heavy fields (prompt, log details) on its way out; surfacing the
+ * trimmed type here prevents future callers from relying on `prompt` /
+ * `failureCount` etc. that are not actually populated. Callers that need
+ * the full row should `getById` the candidate they want to act on.
+ */
+export type PendingDispatchSummary = Pick<
+  Dispatch,
+  'id' | 'projectSlug' | 'taskId' | 'phase' | 'agentId' | 'createdAt'
+>;
+
+/**
+ * Returns the leader's claimable list as the slim shape. The worker only
+ * reads `id` from each entry and re-fetches via `claim`, so the slim shape
+ * is sufficient. To reach the full row, call `getById(id)`.
+ *
+ * Compatibility: legacy callers expected `Dispatch[]`. The slim type is
+ * structurally compatible with that interface for the read sites that
+ * matter (id-based selection); structural compatibility prevents a silent
+ * regression where a caller reads `.prompt` and gets `''`.
+ */
+export async function listPendingForAgents(
+  agentIds: readonly string[],
+): Promise<PendingDispatchSummary[]> {
   const c = require_();
   const qs = encodeURIComponent(agentIds.join(','));
   const res = await request(`${c.baseUrl}/api/dispatches/pending?agentIds=${qs}`, {
     method: 'GET',
     headers: authHeader(),
   });
-  // The /pending route returns a slim shape; cast to Dispatch is acceptable
-  // because the worker only reads the listed fields. If callers need the
-  // full row they should use getById on the chosen candidate.
-  const slim = await readJson<
-    Array<{
-      id: string;
-      projectSlug: string;
-      taskId: string;
-      phase: string;
-      agentId: string;
-      createdAt: string;
-    }>
-  >(res.statusCode, res.body, 'listPendingForAgents');
-  // Fill in the rest of Dispatch with conservative defaults — the worker
-  // only inspects id; downstream calls (claim, getById) re-fetch full state.
-  return slim.map((s) => ({
-    id: s.id,
-    projectSlug: s.projectSlug,
-    taskId: s.taskId,
-    phase: s.phase,
-    agentId: s.agentId,
-    prompt: '',
-    state: 'pending',
-    failureCount: 0,
-    exitCode: null,
-    durationMs: null,
-    stderrSnippet: null,
-    createdBy: '',
-    claimedBy: null,
-    createdAt: s.createdAt,
-    claimedAt: null,
-    completedAt: null,
-  }));
+  return readJson<PendingDispatchSummary[]>(
+    res.statusCode,
+    res.body,
+    'listPendingForAgents',
+  );
 }
 
 export async function claim(id: string, claimedBy: string): Promise<Dispatch | null> {
@@ -320,6 +600,48 @@ export async function listMemory(scope: MemoryScope, _ownerId?: string): Promise
     headers: authHeader(),
   });
   return readJson<unknown[]>(res.statusCode, res.body, 'listMemory');
+}
+
+/**
+ * Typed `listMemory` for the storage facade — same wire format as listMemory
+ * above, but the typed `MemoryEntry[]` return signals the caller's intent.
+ * The leader's route already includes private-FS entries when the leader
+ * IS the owner; the follower simply relays its view.
+ */
+export async function listMemoryScope(scope: MemoryScope): Promise<MemoryEntry[]> {
+  const c = require_();
+  const res = await request(`${c.baseUrl}/api/memories/${encodeURIComponent(scope)}`, {
+    method: 'GET',
+    headers: authHeader(),
+  });
+  return readJson<MemoryEntry[]>(res.statusCode, res.body, 'listMemoryScope');
+}
+
+export async function deleteMemory(
+  scope: MemoryScope,
+  ownerId: string,
+  filename: string,
+): Promise<void> {
+  const c = require_();
+  const res = await request(
+    `${c.baseUrl}/api/memories/${encodeURIComponent(scope)}/${encodeURIComponent(
+      ownerId,
+    )}/${encodeURIComponent(filename)}`,
+    { method: 'DELETE', headers: authHeader() },
+  );
+  if (res.statusCode >= 200 && res.statusCode < 300) {
+    try {
+      await res.body.text();
+    } catch {
+      // Non-actionable
+    }
+    return;
+  }
+  const detail = await res.body.text().catch(() => '');
+  throw new LeaderError(
+    res.statusCode,
+    `deleteMemory: HTTP ${res.statusCode}${detail ? ' ' + detail.slice(0, 200) : ''}`,
+  );
 }
 
 export async function readMemory(

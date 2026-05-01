@@ -10,6 +10,7 @@ import {
   type Dispatch,
 } from './db/index.js';
 import * as leaderClient from './leaderClient.js';
+import type { PendingDispatchSummary } from './leaderClient.js';
 
 /**
  * Dispatch worker — thin orchestrator over a queue adapter.
@@ -17,20 +18,31 @@ import * as leaderClient from './leaderClient.js';
  * Two adapters with the same surface: `localQueueAdapter()` is direct
  * DispatchRepo calls (used by the leader's own worker), and
  * `remoteQueueAdapter()` is HTTP calls via leaderClient (used by
- * followers; full implementation lands in Batch 3).
+ * followers).
  *
  * The poison policy is NOT implemented in this file — it lives in
- * `DispatchRepo.markDone` (Batch 1, partial UNIQUE index +
- * K-recent-failed window) so both the leader's own worker and a follower
- * hitting `POST /api/dispatches/:id/done` go through the same code path.
+ * `DispatchRepo.markDone` (partial UNIQUE index + K-recent-failed window)
+ * so both the leader's own worker and a follower hitting
+ * `POST /api/dispatches/:id/done` go through the same code path.
  *
- * Per implementation-plan.md §7 line 779: the 10-second polling interval
- * is preserved as the SSE-reconnect-failure floor. Push notifications
- * (Batch 3) supersede polling when the SSE channel is healthy.
+ * SSE-vs-polling (per implementation-plan.md §5 lines 538-577 and §7 line
+ * 779): on a follower we subscribe to the leader's
+ * `/api/stream?topics=dispatch` and trigger an immediate drain on every
+ * `null` (re)connect or `dispatch.pending` event. The 10-second polling
+ * interval is preserved as the SSE-reconnect-failure floor. The
+ * subscription's reconnect logic (exponential backoff capped at 30 s)
+ * lives in `leaderClient.subscribeDispatchSse` — we only consume it here.
  */
 
+/**
+ * QueueAdapter contract — `listPendingForAgents` returns the slim
+ * `PendingDispatchSummary` shape. The worker only inspects `id` to decide
+ * what to claim; full state comes back from `claim()`. Restricting the
+ * type prevents future callers from relying on lossy fields (the leader's
+ * /api/dispatches/pending strips `prompt` etc. for bandwidth).
+ */
 interface QueueAdapter {
-  listPendingForAgents(agentIds: readonly string[]): Promise<Dispatch[]>;
+  listPendingForAgents(agentIds: readonly string[]): Promise<PendingDispatchSummary[]>;
   claim(id: string, claimedBy: string): Promise<Dispatch | null>;
   markDone(
     id: string,
@@ -41,7 +53,17 @@ interface QueueAdapter {
 function localQueueAdapter(): QueueAdapter {
   return {
     async listPendingForAgents(agentIds) {
-      return DispatchRepo.listPendingForAgents(agentIds);
+      // The leader has the full Dispatch row in hand; project to the slim
+      // shape so leader/follower paths share the contract.
+      const rows = DispatchRepo.listPendingForAgents(agentIds);
+      return rows.map((d) => ({
+        id: d.id,
+        projectSlug: d.projectSlug,
+        taskId: d.taskId,
+        phase: d.phase,
+        agentId: d.agentId,
+        createdAt: d.createdAt,
+      }));
     },
     async claim(id, claimedBy) {
       return DispatchRepo.claim(id, claimedBy);
@@ -57,12 +79,27 @@ function localQueueAdapter(): QueueAdapter {
 }
 
 function remoteQueueAdapter(): QueueAdapter {
-  // Stubs throw at call time — Batch 3 wires these to leaderClient HTTP.
   return {
     listPendingForAgents: (agentIds) => leaderClient.listPendingForAgents(agentIds),
     claim: (id, claimedBy) => leaderClient.claim(id, claimedBy),
     markDone: (id, info) => leaderClient.markDone(id, info),
   };
+}
+
+/**
+ * Subscribe to the leader's dispatch SSE topic so a follower learns of new
+ * pending rows within ~one round-trip instead of waiting for the 10 s
+ * polling tick. Returns the subscription stop function (or null when this
+ * is a leader, in which case there is no leader to talk to).
+ *
+ * Exposed as a seam for tests: `__setSubscribeForTests` swaps the
+ * underlying `leaderClient.subscribeDispatchSse` so the wiring can be
+ * asserted without standing up a real follower↔leader pair.
+ */
+type SubscribeFn = (callback: (event: { event: string; data: unknown } | null) => void) => () => void;
+let subscribeImpl: SubscribeFn = leaderClient.subscribeDispatchSse;
+export function __setSubscribeForTests(fn: SubscribeFn | null): void {
+  subscribeImpl = fn ?? leaderClient.subscribeDispatchSse;
 }
 
 const queue: QueueAdapter = config.leader ? localQueueAdapter() : remoteQueueAdapter();
@@ -198,6 +235,28 @@ export async function processOneDispatch(): Promise<{ processed: boolean; dispat
 
 let timer: NodeJS.Timeout | null = null;
 let stopping = false;
+let stopSubscription: (() => void) | null = null;
+let draining = false;
+
+/**
+ * Drain pending dispatches addressed to this machine. Reentrant-safe via
+ * the `draining` guard — multiple SSE events firing in quick succession
+ * coalesce into a single drain so we never have two concurrent
+ * `processOneDispatch` chains racing against the same row.
+ */
+async function drainOnce(): Promise<void> {
+  if (draining || stopping) return;
+  draining = true;
+  try {
+    while ((await processOneDispatch()).processed) {
+      // keep going until the queue is empty
+    }
+  } catch (err) {
+    console.error('[dispatch] drain error', err);
+  } finally {
+    draining = false;
+  }
+}
 
 export function startDispatchWorker(intervalMs = 10_000): void {
   if (timer) return;
@@ -205,16 +264,42 @@ export function startDispatchWorker(intervalMs = 10_000): void {
   const tick = async () => {
     if (stopping) return;
     try {
-      while ((await processOneDispatch()).processed) {
-        // drain
-      }
-    } catch (err) {
-      console.error('[dispatch] worker error', err);
+      await drainOnce();
     } finally {
       if (!stopping) timer = setTimeout(tick, intervalMs);
     }
   };
   timer = setTimeout(tick, intervalMs);
+
+  // Followers subscribe to the leader's dispatch SSE so push notifications
+  // trigger an immediate drain. The polling tick above remains as the
+  // floor — it covers SSE-stream gaps, leader restarts, and config errors
+  // that prevent the subscription from establishing.
+  if (!config.leader) {
+    try {
+      stopSubscription = subscribeImpl((event) => {
+        // `null` fires on every (re)connect — a fresh drain catches anything
+        // that arrived during the disconnect window.
+        if (event === null) {
+          void drainOnce();
+          return;
+        }
+        // Push events of interest: `dispatch.pending` (new work) and
+        // `dispatch.taken`/`dispatch.done`/etc which can free up another
+        // candidate for a multi-agent host. Be permissive — drain on any
+        // dispatch.* event.
+        if (typeof event.event === 'string' && event.event.startsWith('dispatch.')) {
+          void drainOnce();
+        }
+      });
+    } catch (err) {
+      // Subscription setup failed (e.g. leaderClient not configured). We
+      // still have the polling timer above — log and continue.
+      console.warn('[dispatch] subscribeDispatchSse failed; falling back to polling only', err);
+      stopSubscription = null;
+    }
+  }
+
   console.log(`[dispatch] worker started for local agents: ${config.localAgentIds.join(', ')}`);
 }
 
@@ -224,4 +309,23 @@ export function stopDispatchWorker(): void {
     clearTimeout(timer);
     timer = null;
   }
+  if (stopSubscription) {
+    try {
+      stopSubscription();
+    } catch {
+      // best-effort tear-down
+    }
+    stopSubscription = null;
+  }
+}
+
+/** Test-only: reset the worker's running state between tests. */
+export function _resetDispatchWorkerForTests(): void {
+  stopping = false;
+  draining = false;
+  if (timer) {
+    clearTimeout(timer);
+    timer = null;
+  }
+  stopSubscription = null;
 }

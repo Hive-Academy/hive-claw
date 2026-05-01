@@ -20,7 +20,12 @@ export type {
   ApprovalLogEntry,
   InsertTaskInput,
 } from './tasks.js';
-export { DispatchRepo, isTerminalState } from './dispatches.js';
+export {
+  DispatchRepo,
+  isTerminalState,
+  UnknownDispatchError,
+  DispatchStateError,
+} from './dispatches.js';
 export type {
   Dispatch,
   DispatchState,

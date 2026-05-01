@@ -32,6 +32,24 @@ export interface BridgeInvokeResult {
   translations?: number;
 }
 
+/**
+ * Final envelope written by scripts/ptah-bridge.mjs as the last line of the
+ * NDJSON response stream — signalled by `_bridge: 'done'`. Field shape lives
+ * with the host bridge script; we only narrow what we read.
+ */
+interface BridgeDoneEnvelope {
+  _bridge: 'done';
+  exitCode?: number | null;
+  stderr?: string;
+  durationMs?: number;
+  translatedCwd?: string;
+  translations?: number;
+}
+
+interface BridgeHealthResponse {
+  ptahVersion?: string | null;
+}
+
 export function isBridgeEnabled(): boolean {
   return Boolean(config.ptah.bridgeUrl);
 }
@@ -52,8 +70,8 @@ export async function invokeViaBridge(opts: BridgeInvokeOptions): Promise<Bridge
       bodyTimeout: 0, // disable body timeout — runs can be long
       headersTimeout: 30_000,
     });
-  } catch (err: any) {
-    const message = err?.message ?? String(err);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
     return {
       ok: false,
       exitCode: null,
@@ -76,7 +94,7 @@ export async function invokeViaBridge(opts: BridgeInvokeOptions): Promise<Bridge
 
   let stdout = '';
   let leftover = '';
-  let envelope: any = null;
+  let envelope: BridgeDoneEnvelope | null = null;
 
   for await (const chunk of res.body) {
     const text = leftover + chunk.toString();
@@ -87,12 +105,14 @@ export async function invokeViaBridge(opts: BridgeInvokeOptions): Promise<Bridge
       // Try to peek at the line — is it the bridge's final envelope?
       if (line.startsWith('{') && line.includes('"_bridge"')) {
         try {
-          const parsed = JSON.parse(line);
+          const parsed = JSON.parse(line) as Partial<BridgeDoneEnvelope>;
           if (parsed?._bridge === 'done') {
-            envelope = parsed;
+            envelope = parsed as BridgeDoneEnvelope;
             continue;
           }
-        } catch {}
+        } catch {
+          // Malformed envelope line — fall through and treat as stdout.
+        }
       }
       // Otherwise treat as a ptah JSON-RPC event line; pass through to SSE.
       stdout += line + '\n';
@@ -102,9 +122,11 @@ export async function invokeViaBridge(opts: BridgeInvokeOptions): Promise<Bridge
   if (leftover.trim()) {
     if (leftover.includes('"_bridge"')) {
       try {
-        const parsed = JSON.parse(leftover);
-        if (parsed?._bridge === 'done') envelope = parsed;
-      } catch {}
+        const parsed = JSON.parse(leftover) as Partial<BridgeDoneEnvelope>;
+        if (parsed?._bridge === 'done') envelope = parsed as BridgeDoneEnvelope;
+      } catch {
+        // Malformed trailing envelope — discard rather than crash the run.
+      }
     } else {
       stdout += leftover;
       broadcast('invoker.stdout', { taskId: opts.taskId, chunk: leftover.slice(0, 500) });
@@ -140,9 +162,10 @@ export async function pingBridge(): Promise<{ ok: boolean; ptahVersion?: string 
       headersTimeout: 3000,
     });
     if (res.statusCode !== 200) return { ok: false, error: `health returned ${res.statusCode}` };
-    const data = (await res.body.json()) as any;
+    const data = (await res.body.json()) as BridgeHealthResponse;
     return { ok: true, ptahVersion: data?.ptahVersion ?? null };
-  } catch (err: any) {
-    return { ok: false, error: err?.message ?? String(err) };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: message };
   }
 }

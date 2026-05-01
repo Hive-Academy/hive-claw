@@ -14,6 +14,16 @@
  * throws on follower mode without OPENCLAW_LEADER_URL). Tests that need
  * the daemon's HTTP routes import this first; tests that only touch
  * repos still benefit from the isolated DB harness.
+ *
+ * LEADER MODE: setup.ts no longer hardcodes `OPENCLAW_LEADER=1`. Each test
+ * file declares its mode explicitly — leader-mode tests set
+ * `OPENCLAW_LEADER=1` before this import (see env-stamp.ts), and the
+ * follower-mode test (`follower-read.test.ts`) imports its own env-stamp
+ * that sets `OPENCLAW_LEADER=0` and `OPENCLAW_LEADER_URL=...`. We default
+ * to leader-mode here only when the caller did not stamp the env — so the
+ * existing leader-only tests continue to work without per-file changes.
+ * The CD1 follower smoke test stamps deliberately and bypasses
+ * `setupTestDb` (it never opens a local DB).
  */
 
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -21,8 +31,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-// Make config.ts happy. Set BEFORE any import of ../src/config.js (transitively).
-process.env.OPENCLAW_LEADER = '1';
+// Default to leader mode if the caller did not stamp the env. Test files
+// that need follower mode set OPENCLAW_LEADER=0 + OPENCLAW_LEADER_URL
+// before importing this module (env-stamp.ts pattern).
+process.env.OPENCLAW_LEADER = process.env.OPENCLAW_LEADER ?? '1';
 process.env.OPENCLAW_INTERNAL_TOKEN = process.env.OPENCLAW_INTERNAL_TOKEN ?? 'test-internal-token';
 process.env.OPENCLAW_JWT_SECRET = process.env.OPENCLAW_JWT_SECRET ?? 'test-jwt-secret';
 // Empty REDIS_URL so bus.ts does not actually connect.

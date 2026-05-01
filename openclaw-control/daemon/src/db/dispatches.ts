@@ -42,6 +42,33 @@ export function isTerminalState(s: DispatchState): boolean {
   return TERMINAL_STATES.has(s);
 }
 
+/**
+ * Typed error classes for dispatch state transitions. The HTTP layer uses
+ * `instanceof` checks to map these to 404 / 409 — string-prefix matching
+ * was fragile (cf. code-style-review.md S4 / code-logic-review.md LG4).
+ */
+export class UnknownDispatchError extends Error {
+  readonly dispatchId: string;
+  constructor(dispatchId: string) {
+    super(`unknown dispatch ${dispatchId}`);
+    this.name = 'UnknownDispatchError';
+    this.dispatchId = dispatchId;
+  }
+}
+
+export class DispatchStateError extends Error {
+  readonly dispatchId: string;
+  readonly state: DispatchState;
+  readonly operation: string;
+  constructor(operation: string, dispatchId: string, state: DispatchState) {
+    super(`${operation}: cannot complete from state=${state}`);
+    this.name = 'DispatchStateError';
+    this.dispatchId = dispatchId;
+    this.state = state;
+    this.operation = operation;
+  }
+}
+
 export interface Dispatch {
   id: string;
   projectSlug: string;
@@ -350,9 +377,9 @@ export const DispatchRepo = {
     const stderr = info.stderrSnippet ?? null;
     const tx = db.transaction(() => {
       const cur = DispatchRepo.getById(id);
-      if (!cur) throw new Error(`markDone: unknown dispatch ${id}`);
+      if (!cur) throw new UnknownDispatchError(id);
       if (cur.state !== 'taken') {
-        throw new Error(`markDone: cannot complete from state=${cur.state}`);
+        throw new DispatchStateError('markDone', id, cur.state);
       }
 
       // Healthy completion.
@@ -433,7 +460,7 @@ export const DispatchRepo = {
     const db = getDb();
     const tx = db.transaction(() => {
       const cur = DispatchRepo.getById(id);
-      if (!cur) throw new Error(`markFailed: unknown dispatch ${id}`);
+      if (!cur) throw new UnknownDispatchError(id);
       const newCount = cur.failureCount + 1;
       stmts().markFailed.run({
         id,
@@ -454,7 +481,7 @@ export const DispatchRepo = {
     const db = getDb();
     const tx = db.transaction(() => {
       const cur = DispatchRepo.getById(id);
-      if (!cur) throw new Error(`markPoisoned: unknown dispatch ${id}`);
+      if (!cur) throw new UnknownDispatchError(id);
       stmts().markPoisoned.run({
         id,
         failure_count: cur.failureCount,
@@ -475,7 +502,7 @@ export const DispatchRepo = {
     const tx = db.transaction(() => {
       stmts().incrementFailureCount.run({ id });
       const cur = DispatchRepo.getById(id);
-      if (!cur) throw new Error(`incrementFailureCount: unknown dispatch ${id}`);
+      if (!cur) throw new UnknownDispatchError(id);
       return cur.failureCount;
     });
     return tx();
