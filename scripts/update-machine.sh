@@ -49,6 +49,12 @@ done
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR"
 
+# Minimum ptah-cli version (must match setup.sh phase 13). 0.1.3 is the first
+# release where headless `session start --task` actually drives a turn — older
+# versions silently no-op, which makes the dispatch worker look healthy while
+# nothing happens. See docs/HANDOFF-ptah-cli.md.
+PTAH_MIN_VERSION="0.1.3"
+
 bold "[1/3] git pull"
 if [ "$PULL" = "1" ]; then
     if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -92,14 +98,44 @@ DEADLINE=$(( $(date +%s) + 60 ))
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     if curl -fsS --max-time 2 "$URL" >/dev/null 2>&1; then
         ok "$URL responded"
-        echo
-        info "logs:           ./scripts/dc.sh compose logs -f openclaw"
-        info "daemon log:     ./scripts/dc.sh compose exec openclaw tail -f /tmp/openclaw-control-daemon.log"
-        info "bot-bridge log: ./scripts/dc.sh compose exec openclaw tail -f /tmp/openclaw-control-bot.log"
-        exit 0
+        DAEMON_OK=1
+        break
     fi
     sleep 2
 done
-warn "$URL did not respond within 60s — check logs:"
-warn "  ./scripts/dc.sh compose logs --tail 100 openclaw"
-exit 1
+
+if [ "${DAEMON_OK:-0}" != "1" ]; then
+    warn "$URL did not respond within 60s — check logs:"
+    warn "  ./scripts/dc.sh compose logs --tail 100 openclaw"
+    exit 1
+fi
+
+# Host-side ptah upgrade: keep this machine's bridge in sync with the version
+# floor set by setup.sh phase 13. Skips silently on hosts that never installed
+# the bridge (e.g. operator boxes that only deploy the container).
+if command -v ptah >/dev/null 2>&1; then
+    PTAH_VERSION="$(ptah --version 2>&1 | head -1 | tr -d '[:space:]')"
+    PTAH_LOWEST="$(printf '%s\n%s\n' "$PTAH_VERSION" "$PTAH_MIN_VERSION" | sort -V | head -1)"
+    if [ "$PTAH_VERSION" != "$PTAH_MIN_VERSION" ] && [ "$PTAH_LOWEST" = "$PTAH_VERSION" ]; then
+        warn "host ptah ${PTAH_VERSION} is below the required ${PTAH_MIN_VERSION} — upgrading"
+        if command -v npm >/dev/null 2>&1 \
+           && npm install -g "@hive-academy/ptah-cli@^${PTAH_MIN_VERSION}" 2>&1 | tail -3; then
+            ok "ptah upgraded to $(ptah --version 2>&1 | head -1)"
+            if systemctl --user is-enabled --quiet ptah-bridge.service 2>/dev/null; then
+                systemctl --user restart ptah-bridge.service
+                ok "ptah-bridge.service restarted to pick up new binary"
+            fi
+        else
+            warn "ptah upgrade failed — orchestration may silently no-op on ${PTAH_VERSION}"
+            info "manually: npm install -g @hive-academy/ptah-cli@^${PTAH_MIN_VERSION} && systemctl --user restart ptah-bridge.service"
+        fi
+    else
+        ok "host ptah ${PTAH_VERSION} (>= ${PTAH_MIN_VERSION})"
+    fi
+fi
+
+echo
+info "logs:           ./scripts/dc.sh compose logs -f openclaw"
+info "daemon log:     ./scripts/dc.sh compose exec openclaw tail -f /tmp/openclaw-control-daemon.log"
+info "bot-bridge log: ./scripts/dc.sh compose exec openclaw tail -f /tmp/openclaw-control-bot.log"
+exit 0

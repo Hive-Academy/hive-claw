@@ -390,10 +390,16 @@ else
         [ -z "$PTAH_BIN_PATH" ] && PTAH_BIN_PATH="$(command -v ptah || true)"
         [ -z "$NODE_BIN_PATH" ] && NODE_BIN_PATH="$(command -v node || true)"
     fi
+    # Minimum ptah-cli version. 0.1.3 is the first release where headless
+    # `session start --task` actually drives a turn end-to-end (0.1.1 emitted
+    # session.created and exited 0 without ever spawning the underlying claude
+    # subprocess — see docs/HANDOFF-ptah-cli.md for the original investigation).
+    PTAH_MIN_VERSION="0.1.3"
+
     # Auto-install ptah if we have npm but not ptah.
     if [ -z "$PTAH_BIN_PATH" ] && command -v npm >/dev/null 2>&1; then
-        info "ptah-cli not found — installing @hive-academy/ptah-cli globally"
-        if npm install -g @hive-academy/ptah-cli 2>&1 | tail -3; then
+        info "ptah-cli not found — installing @hive-academy/ptah-cli@^${PTAH_MIN_VERSION} globally"
+        if npm install -g "@hive-academy/ptah-cli@^${PTAH_MIN_VERSION}" 2>&1 | tail -3; then
             PTAH_BIN_PATH="$(command -v ptah || true)"
             [ -z "$NODE_BIN_PATH" ] && NODE_BIN_PATH="$(command -v node || true)"
         fi
@@ -402,10 +408,25 @@ else
     if [ -z "$PTAH_BIN_PATH" ] || [ -z "$NODE_BIN_PATH" ]; then
         warn "node or ptah not found on host — skipping bridge install"
         info "install Node.js 22+ (https://nodejs.org or via nvm), then re-run ./setup.sh"
-        info "or, manually: npm install -g @hive-academy/ptah-cli && ./setup.sh"
+        info "or, manually: npm install -g @hive-academy/ptah-cli@^${PTAH_MIN_VERSION} && ./setup.sh"
     else
+        PTAH_VERSION="$($PTAH_BIN_PATH --version 2>&1 | head -1 | tr -d '[:space:]')"
         ok "node: $NODE_BIN_PATH"
-        ok "ptah: $PTAH_BIN_PATH ($($PTAH_BIN_PATH --version 2>&1 | head -1))"
+        ok "ptah: $PTAH_BIN_PATH (${PTAH_VERSION})"
+
+        # Compare against minimum. Sort -V puts smallest first; if the installed
+        # version sorts before the minimum and isn't equal, upgrade is required.
+        PTAH_LOWEST="$(printf '%s\n%s\n' "$PTAH_VERSION" "$PTAH_MIN_VERSION" | sort -V | head -1)"
+        if [ "$PTAH_VERSION" != "$PTAH_MIN_VERSION" ] && [ "$PTAH_LOWEST" = "$PTAH_VERSION" ]; then
+            warn "ptah ${PTAH_VERSION} is older than the required ${PTAH_MIN_VERSION} — upgrading"
+            if npm install -g "@hive-academy/ptah-cli@^${PTAH_MIN_VERSION}" 2>&1 | tail -3; then
+                PTAH_VERSION="$($PTAH_BIN_PATH --version 2>&1 | head -1 | tr -d '[:space:]')"
+                ok "ptah upgraded to ${PTAH_VERSION}"
+            else
+                warn "ptah upgrade failed — orchestration runs may no-op silently on ${PTAH_VERSION}"
+                info "manually: npm install -g @hive-academy/ptah-cli@^${PTAH_MIN_VERSION}"
+            fi
+        fi
 
         TOKEN_FOR_BRIDGE="$(grep -E '^OPENCLAW_INTERNAL_TOKEN=' .env | tail -1 | cut -d= -f2-)"
         if [ -z "$TOKEN_FOR_BRIDGE" ]; then
@@ -441,10 +462,14 @@ else
                 ok "ptah-bridge.service enabled and started"
             fi
 
-            # Health check.
+            # Health check. The bridge caches `ptah --version` at startup, so
+            # restart-after-upgrade (above) is what makes /health report the
+            # right version when an existing 0.1.1 install was just upgraded.
             sleep 2
-            if curl -fsS --max-time 3 http://127.0.0.1:8744/health >/dev/null 2>&1; then
-                ok "bridge responding at http://127.0.0.1:8744/health"
+            HEALTH_BLOB="$(curl -fsS --max-time 3 http://127.0.0.1:8744/health 2>/dev/null || true)"
+            if [ -n "$HEALTH_BLOB" ]; then
+                BRIDGE_PTAH_VERSION="$(echo "$HEALTH_BLOB" | grep -oE '"ptahVersion":"[^"]+"' | head -1 | cut -d'"' -f4)"
+                ok "bridge responding at http://127.0.0.1:8744/health (ptah=${BRIDGE_PTAH_VERSION:-unknown})"
             else
                 warn "bridge not responding — check: journalctl --user -u ptah-bridge.service -n 30"
             fi
