@@ -9,7 +9,10 @@ log.md
 .DS_Store
 node_modules/
 .claude/
-.ptah/
+# Ignore .ptah/ machine-local state (analysis, deep-agent-sessions, ptah-cli
+# scratch) but track .ptah/specs/ — task plans must be visible on followers.
+.ptah/*
+!.ptah/specs/
 vscode-extensions.txt
 
 # Docker auth blob written by scripts/dc.sh
