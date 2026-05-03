@@ -80,6 +80,21 @@ async function readDiscordJson(agentId: string): Promise<unknown | null> {
   return JSON.parse(result.content);
 }
 
+/**
+ * Fetch a persona's harness.yaml from shared memory (TASK_2026_002).
+ *
+ * Unlike persona.md (PRIVATE_AGENT_FILES), harness.yaml is public and
+ * traverses HTTP — it lists skills, subagents, MCP server commands, and
+ * model tier. The persona privacy invariant is unaffected.
+ *
+ * Returns null on 404 (persona has no harness configured yet — common case
+ * during rollout). 5xx and unexpected 4xx propagate as `HttpStatusError`
+ * for the caller to log and treat as transient.
+ */
+async function readHarnessYaml(agentId: string): Promise<MemoryReadResult | null> {
+  return readMemory('agents', agentId, 'harness.yaml');
+}
+
 export const daemon = {
   listProjects: () => call<any[]>('GET', '/api/projects'),
   listAgents: () => call<any[]>('GET', '/api/agents'),
@@ -103,4 +118,5 @@ export const daemon = {
   readMemory,
   readAgentIdentity,
   readDiscordJson,
+  readHarnessYaml,
 };

@@ -36,4 +36,13 @@ export const config = {
     customBaseUrl: process.env.CUSTOM_BASE_URL ?? '',
     customApiKey: process.env.CUSTOM_API_KEY ?? '',
   },
+
+  // TASK_2026_002 — chat-tier tool-calling feature flag + loop bounds.
+  // Default OFF for safe rollout. See docs/CONFIGURATION.md (B8) for the
+  // operator flip procedure once a per-persona harness.yaml lands.
+  toolCallsEnabled: (process.env.OPENCLAW_BOT_TOOL_CALLS_ENABLED ?? '0') === '1',
+  toolCallDepthLimit: Number(process.env.OPENCLAW_TOOL_CALL_DEPTH_LIMIT ?? 8),
+  subagentDepthLimit: Number(process.env.OPENCLAW_SUBAGENT_DEPTH_LIMIT ?? 2),
+  mcpDefaultTimeoutMs: Number(process.env.OPENCLAW_MCP_DEFAULT_TIMEOUT_MS ?? 30_000),
+  skillsRoot: process.env.OPENCLAW_SKILLS_ROOT ?? '/home/agent/skills',
 };

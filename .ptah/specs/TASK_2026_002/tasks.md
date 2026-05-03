@@ -49,7 +49,7 @@ The architect's plan is internally consistent and grounded in spike findings (R1
 
 ### B1 — Tool-calling loop in `llm.ts` + harness types + agentRegistry harness wiring
 
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Phase:** 1 (per `context.md` phase table)
 - **Files (in/out):**
   - NEW `openclaw-control/daemon/src/harness/types.ts` (HarnessConfig, SubagentDef, McpServerSpec, `parseHarnessYaml`, `harnessHash`)
