@@ -42,15 +42,21 @@ async function startAgent(def: AgentDef): Promise<RunningAgent | null> {
 
   client.on(Events.MessageCreate, async (msg) => {
     if (msg.author.bot) return;
-    if (def.channelAllowList?.length && !def.channelAllowList.includes(msg.channel.id)) return;
+    // Always dereference through the `running` registry so harness/sync
+    // hot-reload (which mutates `running.get(id).def = next`) is observed by
+    // the next message. Closing over the original `def` parameter would pin
+    // every chat to the at-startup harness — the bug TASK_2026_003 surfaced
+    // when newly-added chatTier.tools never reached the registry.
+    const current = running.get(def.id)?.def ?? def;
+    if (current.channelAllowList?.length && !current.channelAllowList.includes(msg.channel.id)) return;
     const mentioned = msg.mentions.users.has(client.user?.id ?? '');
     const isCommand = msg.content.startsWith(config.commandPrefix);
     if (!isCommand && !mentioned) return;
-    await publishStatus(def.id, { status: 'busy', busyWith: `discord:${msg.channel.id}` });
+    await publishStatus(current.id, { status: 'busy', busyWith: `discord:${msg.channel.id}` });
     try {
-      await route({ agent: def, message: msg });
+      await route({ agent: current, message: msg });
     } finally {
-      await publishStatus(def.id, { status: 'online' });
+      await publishStatus(current.id, { status: 'online' });
     }
   });
 
