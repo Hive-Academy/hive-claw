@@ -23,3 +23,12 @@ openclaw-control/dashboard/dist/
 openclaw-control/dashboard/.angular/
 openclaw-control/daemon/dist/
 openclaw-control/bot-bridge/dist/
+
+# VitePress documentation build artifacts
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+
+# Persona privacy invariant — local-memory must never be committed.
+# PRIVATE_AGENT_FILES (persona.md, secrets.md, *.json) live here and never
+# traverse HTTP or git. See CLAUDE.md and docs/SECURITY.md.
+local-memory/

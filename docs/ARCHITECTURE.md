@@ -272,6 +272,64 @@ This is **separate** from the control-plane agent registry's persona system (the
 
 ---
 
+## Two-tier persona runtime (chat tier + orchestration tier)
+
+A registered agent runs in two tiers from a single per-agent `harness.yaml`. The split is structural, not configurational — every persona has both tiers, and the boundary is one file.
+
+### The `ptahLauncher` seam
+
+`daemon/src/harness/ptahLauncher.ts:spawnPtahForAgent({ agentId, cwd, prompt, taskId, dispatchId })` is the only place in the codebase that knows how to invoke ptah. `invoker.ts:invokeClaudeForTask` no longer hand-builds the ptah arg list — it calls the launcher and consumes the result.
+
+The launcher reads a cached ptah-version probe and branches:
+
+- **Today (ptah 0.1.3)** — emits `--config <~/.ptah/agents/<id>/settings.json>` plus a per-persona Claude plugin under `~/.ptah/plugins/openclaw-<id>-harness/`. This is the only shape that actually loads workspace subagents (spike findings R2 + R4).
+- **Future fixed branch** — gated by `PTAH_MIN_VERSION` advancing past the version that lands `--config-dir` / `--subagent` / workspace `.claude/agents/` upstream. Migration is a single branch swap inside `ptahLauncher.ts` + a `PTAH_MIN_VERSION` bump; nothing else moves.
+
+Because every ptah invocation goes through the launcher, the `--profile` flag survives unchanged for unconfigured personas (no `harness.yaml` → default settings.json with `enabledPluginIds:[]` and `profile:'claude_code'`). Backwards compatibility is byte-equivalent.
+
+### Per-persona Claude plugin layout
+
+For each registered agent `<id>`, the daemon's `harness/materialize.ts` writes:
+
+```
+~/.ptah/agents/<id>/settings.json                              # ptah --config target; mcpServers + enabledPluginIds + modelTier
+~/.ptah/plugins/openclaw-<id>-harness/.claude-plugin/plugin.json   # Claude Plugin manifest
+~/.ptah/plugins/openclaw-<id>-harness/agents/<subagent>.md     # one file per orchestration-tier subagent in harness.yaml
+```
+
+Plugin id format: `openclaw-<id>-harness`, regex-validated. `~/.ptah/plugins/` is global, but per-persona subdirs do not collide and `materialize.ts` is idempotent (only touches its own subdir). Multiple personas coexist.
+
+The materialized tree is **config, not memory** — the persona-privacy invariant does not apply. A fourth defense layer (`assertMaterializedPathSafety`) refuses to write any output path that resolves under `OPENCLAW_LOCAL_MEMORY` so a misconfigured `OPENCLAW_HOST_HOME` still cannot leak materialization into the private tree. See [SECURITY.md](SECURITY.md#persona-privacy-invariant).
+
+### Container ↔ host path translation
+
+The daemon emits **host paths** (computed against `OPENCLAW_HOST_HOME`) because the host-side ptah-bridge runs ptah on the host. To make those paths writable from inside the container, `${OPENCLAW_HOST_HOME}/.ptah` is **identity-bind-mounted** (`/home/anubis/.ptah:/home/anubis/.ptah:rw`) — same path on both sides, no regex translation in `ptah-bridge.mjs`. The daemon writes materialized configs through this mount; the bridge runs ptah and reads them back.
+
+`mkdir -p ${OPENCLAW_HOST_HOME}/.ptah/agents ${OPENCLAW_HOST_HOME}/.ptah/plugins` runs in `entrypoint.sh` on first boot and `materialize.ts` calls it again defensively.
+
+### Peer-model resilience
+
+The chat tier never depends on ptah being healthy or even installed. When ptah is broken, every chat-tier code path keeps working:
+
+- `chat.ts` reads the persona's `harness.yaml` from the daemon and assembles its own tool registry (daemon-CRUD tools + per-persona MCP stdio clients via `@modelcontextprotocol/sdk` + openclaw-native subagents spawned by `subagentRunner.run()` — NOT `ptah --profile`).
+- The persona answers questions, calls subagents, and surfaces MCP tools without any ptah hop.
+- Only the `dispatch_orchestration_task` chat-tool touches ptah, and even that hop is asynchronous: it queues a `dispatches` row, the dispatch worker picks it up, and the existing `invokeViaBridge` returns failed-state on bridge unreachable. Dispatch SSE still fires; the operator sees the failure on the dashboard rather than the chat blocking.
+
+This is the **peer model**: bot-bridge and ptah are peers, not parent/child. Either tier can degrade independently. The team-leader designed it this way deliberately — see `.ptah/specs/TASK_2026_002/implementation-plan.md` §"Architecture summary".
+
+### Harness-authoring chat (Phase 3)
+
+Operator flow for putting a project under harness:
+
+1. Operator says "set up the harness for this disposable test repo" in Discord.
+2. The persona's tool registry includes `start_harness_setup`. Calling it flips `ctx.state.harnessSetup` and re-runs the LLM with a **different** system prompt and a **different** tool subset (`probe_project`, `read_file`, `propose_harness`, `confirm_harness`, `write_harness_file`).
+3. The persona probes the project, proposes a yaml, asks "does this look right?".
+4. Operator says "yes" → `chat.ts` flips `stage` to `'writing'` → `write_harness_file` calls the daemon's `POST /api/projects/:slug/files` with `.claude/harness.yaml`. Operator says "no" → state resets to probing. Operator says "cancel harness setup" (case-insensitive) or 30 min idle → state cleared, friendly reply posted.
+
+No `ptah setup`, no Pro RPCs (`wizard:*` and `harness:analyze-intent` are explicitly forbidden — the daemon's outbound HTTP wrapper throws on those when `OPENCLAW_REQUIRE_COMMUNITY_TIER=1`).
+
+---
+
 ## Why these specific choices
 
 | Decision | Reason |

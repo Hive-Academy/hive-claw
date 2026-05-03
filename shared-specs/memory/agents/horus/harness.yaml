@@ -1,0 +1,66 @@
+# Horus harness — pilot per-persona harness for the openclaw-control two-tier
+# runtime. Loaded by the bot-bridge (chat tier) and materialized by the daemon
+# into ~/.ptah/agents/horus/settings.json + ~/.ptah/plugins/openclaw-horus-harness/
+# (orchestration tier). Schema enforced by parseHarnessYaml in
+# openclaw-control/daemon/src/harness/types.ts (mirrored byte-identically in
+# bot-bridge/src/harness/types.ts).
+#
+# This file is shared via the daemon HTTP API at
+# GET /api/memories/agents/horus/harness.yaml — public config, NOT memory.
+version: 1
+
+chatTier:
+  skills:
+    - security-review
+    - simplify
+  subagents:
+    - name: pr-diff-triage
+      description: Quick triage of PR diffs against OWASP Top 10.
+      systemPrompt: |
+        You are pr-diff-triage. Read the diff handed to you and produce a
+        single-paragraph triage against OWASP Top 10. Lead with the highest
+        severity finding (CRITICAL / HIGH / MEDIUM / LOW / NONE). Cite
+        file_path:line_number for every claim. If the diff is clean, say
+        "NONE — no OWASP-relevant changes." in one line and stop. Do not
+        expand scope: code style, test coverage, and architecture are out
+        of scope for this subagent.
+      tools:
+        - mcp__gh__get_pull_request_diff
+  mcpServers:
+    - id: gh
+      command: npx
+      args:
+        - "-y"
+        - "@modelcontextprotocol/server-github"
+      env:
+        GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}"
+      timeoutMs: 30000
+
+orchestrationTier:
+  skills:
+    - security-review
+  subagents:
+    - name: security-review
+      description: Deep security review for orchestration runs.
+      systemPrompt: |
+        You are security-review. The dispatch worker has handed you a task
+        whose diff or working tree needs a full security pass. Walk the
+        OWASP Top 10, the persona-privacy invariant (the four layers in
+        docs/SECURITY.md), and any auth or secret-handling code path.
+        Produce findings as: severity, file_path:line_number, one sentence
+        on the issue, one sentence on the fix. When a finding spans more
+        than three locations, summarize as one observation. Cite every
+        claim. Do not run wizard:* or harness:analyze-intent — those are
+        Pro RPCs and the community-tier wrapper will throw.
+      tools:
+        - Read
+        - Grep
+        - Edit
+  mcpServers:
+    - id: gh
+      command: npx
+      args:
+        - "-y"
+        - "@modelcontextprotocol/server-github"
+  enabledPluginIds: []
+  modelTier: claude_code

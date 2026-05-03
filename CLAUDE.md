@@ -9,6 +9,8 @@ This repo is **openclaw-control**: a multi-machine, multi-agent control plane bu
 
 Both run inside the same Docker container. `docker-compose.yml` is the composition.
 
+- **Chat tier and orchestration tier are peers, not parent/child.** Each registered agent runs in two tiers from a single `shared-specs/memory/agents/<id>/harness.yaml` (schema in `daemon/src/harness/types.ts`). The chat tier (bot-bridge) drives Discord-side tool-calling against the configured chat model with a per-persona registry of daemon-CRUD tools, MCP stdio clients, and openclaw-native subagents (`subagentRunner.run()`, NOT `ptah --profile`); the orchestration tier (daemon dispatch worker → ptah subprocess) runs dispatched task phases. The split lives along one seam — `daemon/src/harness/ptahLauncher.ts`. The chat tier never depends on ptah being healthy or installed; only `dispatch_orchestration_task` touches ptah, asynchronously.
+
 ## Multi-machine topology
 
 Each physical machine runs the same image. They differ only in `.env`:
@@ -32,11 +34,12 @@ There are two storage backends in `daemon/src/memory.ts`:
 
 `PRIVATE_AGENT_FILES = {persona.md, secrets.md, persona.json, secrets.json}` are routed to the local backend whenever `scope=agents`; everything else goes to shared. Writes under `agents/<id>/*` are 403'd unless `<id> ∈ OPENCLAW_LOCAL_AGENT_IDS` (ownership check).
 
-The privacy invariant is enforced at three layers — defense in depth:
+The privacy invariant is enforced at four layers — defense in depth:
 
 1. **`resolveBackend()` in `daemon/src/memory.ts`** routes any `(scope='agents', file ∈ PRIVATE_AGENT_FILES)` to `localAgentDir(id)` on the local FS. The DB never sees these filenames.
 2. **HTTP gate in `daemon/src/api.ts`** runs *before* any DB call: PUT/DELETE on `/api/memories/agents/:id/<private-file>` returns 403; GET on the same URL returns **404 (not 403)** — deliberately, so an attacker cannot distinguish "persona exists, you can't have it" from "no such file".
 3. **`MemoryRepo.write` / `MemoryRepo.delete` in `daemon/src/db/memory.ts`** synchronously throws if any caller smuggles a private filename past the chokepoint. This is belt-and-braces: a programming error becomes a hard crash, not a silent leak.
+4. **`assertMaterializedPathSafety` in `daemon/src/harness/materialize.ts`** runs before every materialization write and throws if the resolved absolute output path lives under `config.localMemoryRoot`. The materialized ptah config tree (`~/.ptah/agents/<id>/...`, `~/.ptah/plugins/openclaw-<id>-harness/...`) is config not memory, but this layer guarantees the new writer cannot leak into the private tree even on a misconfigured `OPENCLAW_HOST_HOME` or path-traversal in an agent id.
 
 The bot-bridge skips any agent whose `local-memory/agents/<id>/persona.md` is missing.
 

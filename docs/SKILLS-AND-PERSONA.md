@@ -26,6 +26,84 @@ See [docs/OPENCLAW_CONTROL.md#the-persona-privacy-rule](OPENCLAW_CONTROL.md#the-
 
 ---
 
+## Two tiers, one persona — chat tier vs orchestration tier
+
+A registered agent runs in **two tiers**, sharing one persona file but two distinct execution surfaces. The split lives along a single seam — `daemon/src/harness/ptahLauncher.ts` — and is declared in a per-agent `harness.yaml`.
+
+| Tier | Process | What it does | Tool surface |
+|---|---|---|---|
+| **Chat tier** | `openclaw-control/bot-bridge/` | Answers Discord mentions. Drives the OpenAI-compatible tool-calling loop against the configured chat model. Runs sub-chats in-process via `subagentRunner.run()` (NOT `ptah --profile`). | Hardcoded daemon-CRUD tools + persona's MCP servers (per-persona stdio clients) + persona's openclaw-native subagents + (when in harness-authoring mode) the harness-authoring tool subset |
+| **Orchestration tier** | daemon's dispatch worker → ptah subprocess | Runs dispatched task phases (`CONTEXT → PLAN → … → DONE`). Reads its config from a materialized per-agent `~/.ptah/agents/<id>/settings.json` and a per-persona Claude plugin under `~/.ptah/plugins/openclaw-<id>-harness/`. | Native ptah toolbelt (Read, Grep, Edit, Bash, etc.) + materialized subagents + materialized MCP servers + `enabledPluginIds` |
+
+The chat tier never depends on ptah being healthy or even installed. When ptah is broken, the persona still answers questions, calls subagents, and surfaces MCP tools — only the `dispatch_orchestration_task` chat-tool (which queues a row for the dispatch worker) touches ptah, and that hop is asynchronous.
+
+### `harness.yaml` — file format
+
+One file per registered agent at `shared-specs/memory/agents/<id>/harness.yaml` (also reachable via `GET /api/memories/agents/<id>/harness.yaml`). Schema enforced by `parseHarnessYaml` in `openclaw-control/daemon/src/harness/types.ts` (mirrored byte-identically at `bot-bridge/src/harness/types.ts`).
+
+```yaml
+version: 1
+
+chatTier:
+  skills:                    # names referencing skills/<name>/SKILL.md
+    - security-review
+    - simplify
+  subagents:                 # openclaw-native sub-chats; bot-bridge spawns these
+    - name: pr-diff-triage
+      description: Quick triage of PR diffs against OWASP Top 10.
+      systemPrompt: |
+        ...
+      tools:                 # subset filter — must ⊆ parent's effective tools
+        - mcp__gh__get_pull_request_diff
+  mcpServers:                # per-persona stdio MCP clients
+    - id: gh                 # matches /^[a-z0-9_-]+$/
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-github"]
+      env:
+        GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}"
+      timeoutMs: 30000
+
+orchestrationTier:
+  skills:                    # materialized into the per-agent plugin
+    - security-review
+  subagents:
+    - name: security-review
+      description: Deep security review for orchestration runs.
+      systemPrompt: |
+        ...
+      tools: ["Read", "Grep", "Edit"]
+  mcpServers:
+    - id: gh
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-github"]
+  enabledPluginIds: []       # plus auto-added: openclaw-<id>-harness
+  modelTier: claude_code     # "claude_code" | "enhanced"
+```
+
+Skill names must reference real `skills/<name>/SKILL.md` files. The chat tier loads each skill's body verbatim into the persona's system prompt. The orchestration tier materializes them into the per-agent plugin.
+
+### Materialization — where the on-disk config ends up
+
+When the daemon boots (leader-only) and on every `harness/sync` event, `daemon/src/harness/materialize.ts` walks every registered agent and writes:
+
+```
+~/.ptah/agents/<id>/settings.json                              # ptah --config target
+~/.ptah/plugins/openclaw-<id>-harness/.claude-plugin/plugin.json
+~/.ptah/plugins/openclaw-<id>-harness/agents/<subagent>.md     # one file per orchestration-tier subagent
+```
+
+The materialized tree is **config, not memory** — the persona-privacy invariant does not apply to it (skills, subagent system prompts, and MCP server specs are public by construction). A fourth defense layer (`assertMaterializedPathSafety`) refuses to write any output path that resolves under the local-memory root, so materialization can never leak into the private tree even on a misconfigured `OPENCLAW_HOST_HOME`.
+
+The container does not need access to the materialized tree — the host-side ptah-bridge runs ptah on the host, and `OPENCLAW_HOST_HOME` is identity-bind-mounted into the container so the daemon can write host-path strings the bridge will execute byte-equivalent. See [ARCHITECTURE.md](ARCHITECTURE.md) for the seam, [CONFIGURATION.md](CONFIGURATION.md) for the env vars.
+
+### Editing a persona's harness
+
+The harness-authoring chat is the supported path: mention the persona, say "set up the harness for this project", answer the persona's probe questions, then say "yes" when it proposes the yaml. The persona writes `<project>/.claude/harness.yaml` via the daemon's project-files endpoint. No `ptah setup`, no Pro RPCs.
+
+For per-agent harness changes (the file at `shared-specs/memory/agents/<id>/harness.yaml`), edit it directly via `PUT /api/memories/agents/<id>/harness.yaml` or by writing the file and triggering `POST /api/agents/<id>/harness/sync`. The daemon re-materializes; the bot-bridge hot-reloads on the same SSE event.
+
+---
+
 ## Authoring a registered-agent persona
 
 The shape of `local-memory/agents/<id>/persona.md`:

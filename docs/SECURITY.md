@@ -98,7 +98,7 @@ When you stop using Funnel: `tailscale funnel reset` AND set `OPENCLAW_CONTROL_B
 
 ### Persona privacy invariant
 
-The `local-memory/agents/<id>/persona.md` file is the agent's voice. The implementation-plan §8 specifies a three-layer defense; each layer would, by itself, prevent a leak. We run all three because programming errors happen and the cost of a leak is high.
+The `local-memory/agents/<id>/persona.md` file is the agent's voice. The implementation-plan §8 specifies a three-layer defense for the read/write path; TASK_2026_002 adds a **fourth layer** to cover the new harness-materialization writer. Each layer would, by itself, prevent a leak. We run all four because programming errors happen and the cost of a leak is high. **The privacy invariant itself is unchanged** — what TASK_2026_002 adds is a new writer (`harness/materialize.ts`) operating on a different tree (the materialized ptah config), and a fourth layer that hard-asserts the new writer cannot reach the private tree.
 
 **Layer 1 — FS chokepoint** (`daemon/src/memory.ts`):
 `resolveBackend(scope, id, filename)` is the single function every read/write/delete passes through. When `scope === 'agents' && PRIVATE_AGENT_FILES.has(filename)`, it returns `{kind: 'local', dir: localAgentDir(id), filename}` and the caller writes to `~/.claude/local-memory/agents/<id>/<filename>`. The "shared" branch — `MemoryRepo.read/write/delete` against the SQLite `memory_files` table — is never reached for these names. `PRIVATE_AGENT_FILES = {persona.md, secrets.md, persona.json, secrets.json}` is the canonical allowlist, declared once in `daemon/src/db/memory.ts` and re-exported through the barrel. The DB literally never sees a row with one of these filenames in scope=agents.
@@ -114,7 +114,14 @@ The 404 on GET is deliberate, not 403. A 403 would leak the existence of a perso
 **Layer 3 — defense-in-depth allowlist** (`daemon/src/db/memory.ts`):
 `MemoryRepo.write` and `MemoryRepo.delete` call `assertNotPrivate(scope, filename)` synchronously, which `throw`s if a private filename ever reaches the repo. `MemoryRepo.read` returns `null` rather than reading the DB. This is the belt-and-braces guard: if a future contributor refactors the chokepoint or adds a code path that bypasses `resolveBackend`, the repo refuses anyway. A bug becomes a hard crash, not a silent leak.
 
-Both invariants — that the DB never holds a private row, and that the HTTP API responds 403 (write) and 404 (read) on a private filename — are continuously verified by `openclaw-control/daemon/test/persona-privacy.test.ts`.
+**Layer 4 — materialization output guard** (`daemon/src/harness/materialize.ts`):
+The harness materializer writes a per-agent ptah config tree (`~/.ptah/agents/<id>/settings.json`, `~/.ptah/plugins/openclaw-<id>-harness/.claude-plugin/plugin.json`, `~/.ptah/plugins/openclaw-<id>-harness/agents/<n>.md`). These outputs are **config, not memory** — they hold skill names, MCP server specs, subagent system prompts, all of which are public by construction (sourced from the public `harness.yaml`). The persona-privacy invariant does not apply to them.
+
+What this layer does is hard-assert the new writer cannot accidentally reach the private tree. `assertMaterializedPathSafety(resolved)` runs before every write and throws if the resolved absolute path lives under `config.localMemoryRoot` (default `~/.claude/local-memory/`). A misconfigured `OPENCLAW_HOST_HOME`, a path-traversal in an agent id, or a future contributor adding a new write target inside `materialize.ts` all hit this guard rather than silently writing into local-memory. The crash is the contract.
+
+All four invariants — DB never holds a private row, HTTP API responds 403 (write) and 404 (read) on a private filename, and the materializer refuses any path under local-memory — are continuously verified by `openclaw-control/daemon/test/persona-privacy.test.ts` and (for layer 4) by the materialize unit tests.
+
+Audit note (TASK_2026_002 forward-looking, not a fix for a known vulnerability): `safeFile`'s `.yaml` extension allowance in `daemon/src/memory.ts` was added in B3 to enable `harness.yaml` shared-memory storage. The privacy invariant is currently intact because `PRIVATE_AGENT_FILES` is a literal-set match — `persona.yaml` is NOT a member and would route to shared, which is documented behavior, not a leak. A future surface-area minimization would scope-narrow the regex to `harness.yaml` only, or extension-gate by scope. Tracked as a backlog audit item.
 
 Things the system does **not** guarantee:
 

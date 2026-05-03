@@ -75,6 +75,12 @@ Defaults below are read in `openclaw-control/daemon/src/config.ts` (the cited li
 | `OPENCLAW_TICK_MS` | `30000` (compose-side; not in `config.ts`) | always optional | leader-only | Continuation loop interval. The follower does not run the loop. |
 | `OPENCLAW_DEFAULT_PROJECT` | empty (compose-side; not in `config.ts`) | always optional | both | Used by `!task <description>` when no project is supplied. |
 | `OPENCLAW_PTAH_BRIDGE_URL` | empty → fallback (`config.ts:102`) | always optional | both | URL of the host-side ptah-bridge. Empty = spawn ptah inside the container. See [OPENCLAW_CONTROL.md](OPENCLAW_CONTROL.md#orchestration-runs-via-the-host-side-ptah-bridge). |
+| `OPENCLAW_BOT_TOOL_CALLS_ENABLED` | `0` | always optional | bot-bridge | Master flag for the chat-tier tool-calling loop. `0` = legacy `<<oc:...>>` directive flow only. `1` = `chat.ts` calls `chatCompleteWithTools()` against the configured model with the per-persona tool registry (daemon-CRUD + MCP + native subagents). Roll out per-machine; flip to `0` to fall back without redeploy. |
+| `OPENCLAW_TOOL_CALL_DEPTH_LIMIT` | `8` | always optional | bot-bridge | Max round-trips through the tool-calling loop before the bot-bridge truncates with `truncated:true` and posts a partial reply. Increase only if a persona legitimately needs longer chains. |
+| `OPENCLAW_HARNESS_AUTHOR_TIMEOUT_MS` | `1800000` (30 min) | always optional | bot-bridge | Idle-timeout for harness-authoring mode. If `Date.now() - ctx.state.harnessSetup.startedAt` exceeds this, the next message clears the state and posts a friendly cancel reply. Bump up for longer interactive sessions. |
+| `OPENCLAW_HOST_HOME` | `${HOME}` | always optional | leader-only (daemon) | Host-side `$HOME` for path translation. The daemon writes materialized ptah configs to `${OPENCLAW_HOST_HOME}/.ptah/agents/<id>/settings.json` and `${OPENCLAW_HOST_HOME}/.ptah/plugins/openclaw-<id>-harness/`. Must be identity-bind-mounted (host path = container path) so the host-side ptah-bridge sees the same bytes the daemon wrote. See [ARCHITECTURE.md](ARCHITECTURE.md) for the bind-mount and [SKILLS-AND-PERSONA.md](SKILLS-AND-PERSONA.md) for the materialization output paths. |
+| `PTAH_MIN_VERSION` | `0.1.3` | always optional | leader-only (daemon) | Minimum supported ptah CLI version. Probed at daemon boot; below this, `ptahLauncher.ts` takes the 0.1.3 branch (per-agent settings.json + per-persona Claude plugin). Above the version that lands `--config-dir` / `--subagent` / workspace `.claude/agents/` upstream, the launcher swaps branches — bumping this var is the migration. |
+| `OPENCLAW_REQUIRE_COMMUNITY_TIER` | `0` | always optional | both | Hard-asserts the operator runs only ptah's community-tier RPCs. When `1`: (a) the daemon's outbound HTTP wrapper throws on any JSON body whose `method` matches `^wizard:` or `^harness:analyze-intent$`; (b) on boot, the daemon probes `ptah --json license status` via the bridge and refuses to start unless tier is `community`. Default off. Flip to `1` on a host where you want belt-and-braces enforcement that no Pro RPC ever fires. |
 
 ### Control plane tier — Leader / follower mode
 
@@ -122,6 +128,14 @@ DISCORD_TOKEN_CHAPPIE=...
 ```
 
 The bot-bridge skips any agent whose token env var is unset or whose `local-memory/agents/<id>/persona.md` is missing. (Agents on *other* machines don't need a token here.)
+
+### Per-agent harness — `shared-specs/memory/agents/<id>/harness.yaml`
+
+One file per registered agent declares the chat-tier and orchestration-tier surfaces (skills, openclaw-native subagents, MCP servers, `enabledPluginIds`, `modelTier`). Schema enforced by `parseHarnessYaml` in `openclaw-control/daemon/src/harness/types.ts` (mirrored byte-identically at `bot-bridge/src/harness/types.ts`).
+
+The file lives in the leader's `memory_files` table at `(scope='agents', owner_id=<id>, filename='harness.yaml')` — public config, NOT memory. Reachable via `GET /api/memories/agents/<id>/harness.yaml`. The materialized on-disk output (`~/.ptah/agents/<id>/settings.json` + `~/.ptah/plugins/openclaw-<id>-harness/`) is regenerated from this file on every `harness/sync` event and on daemon boot.
+
+See [SKILLS-AND-PERSONA.md](SKILLS-AND-PERSONA.md#harness-yaml--file-format) for the full schema and the materialization output paths. The pilot harness lives at `shared-specs/memory/agents/horus/harness.yaml`.
 
 ### Optional — Redis (cross-agent presence + handoff bus)
 
