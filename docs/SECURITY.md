@@ -98,7 +98,7 @@ When you stop using Funnel: `tailscale funnel reset` AND set `OPENCLAW_CONTROL_B
 
 ### Persona privacy invariant
 
-The `local-memory/agents/<id>/persona.md` file is the agent's voice. The implementation-plan §8 specifies a three-layer defense for the read/write path; TASK_2026_002 adds a **fourth layer** to cover the new harness-materialization writer. Each layer would, by itself, prevent a leak. We run all four because programming errors happen and the cost of a leak is high. **The privacy invariant itself is unchanged** — what TASK_2026_002 adds is a new writer (`harness/materialize.ts`) operating on a different tree (the materialized ptah config), and a fourth layer that hard-asserts the new writer cannot reach the private tree.
+The `local-memory/agents/<id>/persona.md` file is the agent's voice. The implementation-plan §8 specifies a three-layer defense for the read/write path; TASK_2026_002 added a **fourth layer** to cover the harness-materialization writer; the bot-bridge agent registry (layer 5) and the TASK_2026_003 Discord-tools path guard (layer 6) each add another. Each layer would, by itself, prevent a leak. We run all six because programming errors happen and the cost of a leak is high. **The privacy invariant itself is unchanged** — each new writer or new tool surface comes with its own enforcement layer that hard-asserts it cannot reach the private tree.
 
 **Layer 1 — FS chokepoint** (`daemon/src/memory.ts`):
 `resolveBackend(scope, id, filename)` is the single function every read/write/delete passes through. When `scope === 'agents' && PRIVATE_AGENT_FILES.has(filename)`, it returns `{kind: 'local', dir: localAgentDir(id), filename}` and the caller writes to `~/.claude/local-memory/agents/<id>/<filename>`. The "shared" branch — `MemoryRepo.read/write/delete` against the SQLite `memory_files` table — is never reached for these names. `PRIVATE_AGENT_FILES = {persona.md, secrets.md, persona.json, secrets.json}` is the canonical allowlist, declared once in `daemon/src/db/memory.ts` and re-exported through the barrel. The DB literally never sees a row with one of these filenames in scope=agents.
@@ -130,6 +130,24 @@ All four invariants — DB never holds a private row, HTTP API responds 403 (wri
 - **Surface-area recommendation.** Keep the allowance as-is for now. If more YAML-shaped agent files are introduced later (e.g., `secrets.yaml`, an alternate persona format), `PRIVATE_AGENT_FILES` should grow at the same time, OR the allowance should be scope-gated — restricted to `harness.yaml` literally, or to non-`agents` scopes. Either narrowing is mechanical when the need appears; pre-narrowing today would just make adding a future public YAML file harder without closing any actual gap.
 
 Cross-reference: the `safeFile` regex and the `PRIVATE_AGENT_FILES` constant are co-located in `daemon/src/memory.ts` and `daemon/src/db/memory.ts` respectively, so any future change touches both files in one PR by construction.
+
+**Layer 5 — agent registry persona-from-FS-only** (`bot-bridge/src/agentRegistry.ts`):
+The bot-bridge reads `personaMd` directly from `~/.claude/local-memory/agents/<id>/persona.md` via `fs.readFile`. There is intentionally NO `daemon.readPersona` HTTP helper — `daemonClient.ts` short-circuits before any such call could exist. An agent missing a local persona is skipped entirely, not loaded with a remote-fetched one. This is the bot-bridge mirror of layer 2's HTTP gate.
+
+**Layer 6 — Discord-tools path guard** (`bot-bridge/src/tools/discordTools.ts`, TASK_2026_003):
+The `upload_attachment` chat tool's `path` source mode is the highest-risk attack surface in the chat tier — an LLM that misroutes a path argument could ask the bot to upload `local-memory/agents/<id>/persona.md` into a Discord channel. The path guard runs `path.resolve(projectRoot, relativePath)` then asserts:
+1. The resolved path is `<projectRoot>` itself, or starts with `<projectRoot>` followed by the path separator. The trailing-separator check is critical — without it, `/proj` would `startsWith('/proj')` but so would `/projfoo`, so the prefix check uses `path.resolve` + segment-equality instead of `String#includes`. The `String#includes` pattern is explicitly refused.
+2. No path component is `local-memory`, `.claude`, or `.ptah`. Component-equality, not substring-match, so `mylocal-memory-stuff/` does not falsely trip.
+3. The basename is not in `PRIVATE_AGENT_FILES`. Even a file named `persona.md` that lives outside `local-memory/` is refused — defense in depth against future repos that accidentally put a persona-shaped file in a project workspace.
+
+Failure throws a `path guard:` -prefixed `Error`; the chat dispatcher converts it into a tool-error message visible to the LLM and the operator. Unit-tested in `bot-bridge/test/discord-tools.test.ts` against `../../../etc/passwd` (escape), `local-memory/agents/horus/persona.md` (forbidden segment), `docs/persona.md` (private basename), and the `/projfoo` sibling-prefix attack.
+
+**SSRF guard for `upload_attachment(source.type='url')`** is colocated in the same module:
+- HTTPS only (refuse `http://`, `file://`, `data:`, `gopher://`, etc.).
+- DNS resolution via `dns.lookup({ all: true })` is run before the connect; if ANY resolved address is in a private/loopback range, the whole hostname is refused. This defends against DNS rebinding — an attacker who controls DNS for `evil.com` cannot serve a public IP to our resolver and a private one to our connect.
+- Private ranges covered: IPv4 `0.x`, `10.x`, `127.x`, `169.254.x` (cloud metadata), `172.16-31.x`, `192.168.x`, `224-239.x`, `255.x`; IPv6 `::1`, `fe80::/10`, `fc00::/7`, `ff00::/8`, IPv4-mapped `::ffff:0.0.0.0/96`.
+- Redirects bounded to 3 hops; the SSRF guard re-runs on every hop — a public URL that redirects to `127.0.0.1` is refused mid-chain.
+- 5-second timeout on headers and body; streaming size cap so a malicious server cannot exhaust memory.
 
 Things the system does **not** guarantee:
 

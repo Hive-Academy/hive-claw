@@ -125,6 +125,18 @@ export interface ToolCallContext {
   channelId: string;
   state: Map<string, unknown>;
   emit: (event: string, data: unknown) => void;
+  /**
+   * Discord side-channel for chat-tier tools that need to call back into the
+   * conversation surface (read history, post attachments, etc.). Optional —
+   * only populated by `chat.ts` when handling a real Discord Message; tests
+   * and subagent contexts may omit it. Tools that require this surface MUST
+   * throw a clear error when it is missing rather than crashing on a null
+   * deref. See `tools/discordTools.ts` (TASK_2026_003).
+   *
+   * Typed as `unknown` here so the LLM module stays decoupled from
+   * discord.js. The Discord-tools module narrows it via a runtime check.
+   */
+  discord?: { message: unknown };
 }
 
 export interface ChatWithToolsOptions {

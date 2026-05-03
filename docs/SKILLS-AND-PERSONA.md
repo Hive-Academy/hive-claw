@@ -82,6 +82,27 @@ orchestrationTier:
 
 Skill names must reference real `skills/<name>/SKILL.md` files. The chat tier loads each skill's body verbatim into the persona's system prompt. The orchestration tier materializes them into the per-agent plugin.
 
+### Discord-native chat tools (TASK_2026_003)
+
+The chat tier ships two opt-in built-in tools in addition to the daemon-CRUD / MCP / subagent slices. They are listed in `harness.yaml` under `chatTier.tools` and only appear in the registry when listed there — no list, no tools, byte-equivalent behavior to before.
+
+```yaml
+chatTier:
+  skills: [...]
+  subagents: [...]
+  mcpServers: [...]
+  tools:
+    - read_channel_history     # fetch recent messages for context awareness
+    - upload_attachment        # post a file/image into the current channel
+```
+
+| Tool | What it does | Notable boundary check |
+|---|---|---|
+| `read_channel_history` | Wraps discord.js `channel.messages.fetch({ limit, before })`. Returns slim JSON: `{ id, authorId, authorTag, timestamp, content, attachmentUrls[] }[]` (newest first). Strips embeds and reactions to keep token cost low. | `channelId` defaults to the conversation's channel; an explicit non-default channel is allowed but the bot must already be a member (Discord's REST gate enforces). |
+| `upload_attachment` | Posts a file/image. Three source modes: `url` (HTTPS only, SSRF-guarded, redirects ≤3, 5s timeout), `path` (project-relative, refuses paths under `local-memory/` / `.claude/` / `.ptah/` and any `PRIVATE_AGENT_FILES` basename — this is the 6th layer of the persona-privacy invariant), and `data` (base64 with size cap). | Per-attachment cap is `OPENCLAW_DISCORD_TOOLS_MAX_ATTACHMENT_MB` (default 25 MB). Filenames go through a local `safeFile` allow-list. |
+
+Subagents do NOT inherit access to these tools — `subagentRunner.buildChildContext` does not propagate `ctx.discord`, so a subagent that tries to invoke them gets a clean structured error rather than a credential leak. See `docs/SECURITY.md` for the SSRF and path-guard details.
+
 ### Materialization — where the on-disk config ends up
 
 When the daemon boots (leader-only) and on every `harness/sync` event, `daemon/src/harness/materialize.ts` walks every registered agent and writes:

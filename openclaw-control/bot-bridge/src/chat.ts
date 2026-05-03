@@ -6,6 +6,7 @@ import { config } from './config.js';
 import * as daemonTools from './tools/daemonTools.js';
 import * as mcpTools from './tools/mcpTools.js';
 import * as subagentTools from './tools/subagentTools.js';
+import * as discordTools from './tools/discordTools.js';
 import { merge as mergeToolRegistries } from './tools/index.js';
 import { loadSkills, type LoadedSkill } from './skills/skillLoader.js';
 import { PARENT_TOOL_REGISTRY_STATE_KEY } from './subagents/subagentRunner.js';
@@ -276,10 +277,15 @@ async function buildToolRegistry(
   // loop") stays intact for personas that never delegate. Subagent tool names
   // are snake_case (`delegate_to_subagent`, `delegate_to_<n>`) so they don't
   // collide with daemon CRUD tools or the `mcp__` namespace.
+  //
+  // TASK_2026_003 — opt-in Discord-native tools (`read_channel_history`,
+  // `upload_attachment`). Agents with no `chatTier.tools` field in their
+  // harness get an empty slice; the registry is unchanged for them.
   return mergeToolRegistries(
     daemonTools.list(),
     mcpTools.listForAgent(agent.id),
     subagentTools.listForAgent(agent),
+    discordTools.listForAgent(agent),
   );
 }
 
@@ -461,6 +467,12 @@ export async function handleChat(agent: AgentDef, msg: Message): Promise<void> {
       emit: (event, data) => {
         void daemon.emitSseHint(event, data);
       },
+      // TASK_2026_003 — Discord side-channel for the chat-tier tools that
+      // need to act on the live conversation surface (read history, post
+      // attachments). Subagents inherit this through `buildChildContext` if
+      // present; tools that require it throw a structured error when it's
+      // missing rather than crashing on a null deref.
+      discord: { message: msg },
     };
     // TASK_2026_002 B7 — load the persistent harness session into ctx.state
     // BEFORE building the tool registry, so the registry decision below sees

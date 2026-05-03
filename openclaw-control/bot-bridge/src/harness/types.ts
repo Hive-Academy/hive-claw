@@ -26,6 +26,21 @@ export interface HarnessTier {
   skills: string[];
   subagents: SubagentDef[];
   mcpServers: McpServerSpec[];
+  /**
+   * Opt-in chat-tier built-in tools (TASK_2026_003).
+   *
+   * Free-form list of names that select from the set of statically registered
+   * Discord-native tools. Today: `read_channel_history`, `upload_attachment`.
+   * Unknown names are dropped at registry-build time with a console warning so
+   * a typo in `harness.yaml` does not silently disable a tool the operator
+   * thought they enabled.
+   *
+   * The schema is a free-form `string[]` rather than an enum so harness files
+   * can stay forward-compatible with new built-ins added in later batches —
+   * the same convention `subagents.tools` follows. The chat-tier registry is
+   * the validator, not the parser.
+   */
+  tools?: string[];
   enabledPluginIds?: string[];
   modelTier?: 'claude_code' | 'enhanced';
 }
@@ -133,8 +148,13 @@ function parseTier(v: unknown, path: string, allowOrchestrationFields: boolean):
   const mcpRaw = v.mcpServers ?? [];
   if (!Array.isArray(mcpRaw)) fail(`${path}.mcpServers`, `expected array, got ${typeof mcpRaw}`);
   const mcpServers = mcpRaw.map((s, i) => parseMcpServer(s, `${path}.mcpServers[${i}]`));
+  // TASK_2026_003 — opt-in chat-tier built-in tools (e.g. `read_channel_history`,
+  // `upload_attachment`). Free-form list; the chat-tier registry validates the
+  // names. Optional everywhere — undefined means "no built-in tools".
+  const toolsOpt = asOptionalStringArray(v.tools, `${path}.tools`);
 
   const tier: HarnessTier = { skills, subagents, mcpServers };
+  if (toolsOpt !== undefined) tier.tools = toolsOpt;
 
   if (allowOrchestrationFields) {
     if (v.enabledPluginIds !== undefined && v.enabledPluginIds !== null) {
@@ -176,9 +196,16 @@ export function parseHarnessYaml(yamlText: string): HarnessConfig {
   const chatTier = parseTier(parsed.chatTier, 'chatTier', false);
   const orchestrationTier = parseTier(parsed.orchestrationTier, 'orchestrationTier', true) as HarnessConfig['orchestrationTier'];
 
+  const chatTierOut: HarnessTier = {
+    skills: chatTier.skills,
+    subagents: chatTier.subagents,
+    mcpServers: chatTier.mcpServers,
+  };
+  if (chatTier.tools !== undefined) chatTierOut.tools = chatTier.tools;
+
   return {
     version: 1,
-    chatTier: { skills: chatTier.skills, subagents: chatTier.subagents, mcpServers: chatTier.mcpServers },
+    chatTier: chatTierOut,
     orchestrationTier,
   };
 }
