@@ -364,7 +364,7 @@ The architect's plan is internally consistent and grounded in spike findings (R1
 
 ### B9 — E2E demo polish + rollback rehearsal + ops doc
 
-- **Status:** PENDING
+- **Status:** COMPLETE (commit `066c265`)
 - **Phase:** 5
 - **Files (in/out):**
   - MODIFIED `docs/OPERATIONS.md` (rollback playbook for `OPENCLAW_BOT_TOOL_CALLS_ENABLED=0`; harness-resync runbook)
@@ -377,17 +377,19 @@ The architect's plan is internally consistent and grounded in spike findings (R1
 - **Execution Mode:** sequential
 - **Size:** S
 - **Sub-tasks:**
-  1. Add a "Rollback: turn off tool-calling chat" section to `docs/OPERATIONS.md`: set `OPENCLAW_BOT_TOOL_CALLS_ENABLED=0`, restart bot-bridge (`docker compose restart openclaw`), verify chat falls through to `chatComplete` (Horus replies in plain text). Include a "harness-resync runbook" section: edit `harness.yaml` in shared memory, `POST /api/agents/horus/harness/sync` (curl with internal-token), confirm SSE event `harness.materialized` fires, confirm next chat reflects the change. ~40 min.
-  2. Author `.ptah/specs/TASK_2026_002/demo-walkthrough.md`: a step-by-step operator demo for AT#1 → AT#6 against the disposable test repo. Include exact curl commands, expected Discord behaviors, and SSE-stream observations (`curl http://localhost:7878/api/stream?topics=invoker,harness | jq`). ~50 min.
-  3. (Optional) Author `scripts/smoke-horus-tool-calls.sh`: invokes the bridge `/health`, the daemon `/api/health`, posts a synthetic chat message via the daemon HTTP test seam, and asserts an `invoker.tool_call` event appears on the SSE stream. Useful for CI smoke + post-deploy verification. ~30 min.
-  4. Add 4 entries to `docs/TROUBLESHOOTING.md`: (a) "MCP server failed and tools missing from chat" — explain backoff + resync procedure; (b) "Harness/sync didn't fire" — check Redis, check daemon `psubscribe` health; (c) "Materialize failed; persona stuck on old config" — explain `harness.materialize_failed` SSE + manual `POST /api/agents/:id/harness/materialize`; (d) "Host/container path mismatch (R5)" — explain `OPENCLAW_HOST_HOME` + bind-mount + `/health.ptahConfigDirExists`. ~40 min.
-  5. Run the demo end-to-end on the dev host and capture any gaps; loop back to fix or document deviations. ~30 min.
+  1. [x] `docs/OPERATIONS.md` §7 (Rollback: turn off tool-calling chat) and §8 (Harness-resync runbook) added.
+  2. [x] `.ptah/specs/TASK_2026_002/demo-walkthrough.md` authored (~330 lines, AT#1–#6, NOTE blocks for test-vs-real deviations).
+  3. **Skipped (justified).** `scripts/smoke-horus-tool-calls.sh` was optional. Skipped because (a) bot-bridge has no `/health` endpoint (Discord client process, no embedded HTTP server), and (b) chat enters via Discord gateway events, not via a daemon HTTP test seam — a meaningful smoke would require code changes (forbidden by B9's docs-only constraint) to add either a fake Discord WebSocket peer or a new HTTP test seam in bot-bridge.
+  4. [x] `docs/TROUBLESHOOTING.md` "Tool-calling chat and harness materialization" category added with 4 `### Symptom:` entries: MCP server failure + backoff, harness/sync no-fire, materialize stuck (notes the absence of a dedicated `harness.materialize_failed` SSE event — surface is the 400 response and partial writes), host/container path mismatch (R5).
+  5. [x] Demo run synthesized — both test suites green (daemon 70/70, bot-bridge 85+1 skipped). Demo doc cross-checked against `docs/CONFIGURATION.md` and the actual integration tests; deviations called out via `> [!NOTE]` blocks in-line. Real Discord interaction not driveable in this environment (per brief).
+  6. [x] (Forwarded B8 sub-task #10) `safeFile` `.yaml` audit documented in `docs/SECURITY.md`.
+  7. [x] (Forwarded B8 sub-task #11) MCP integration smoke runbook added as `docs/OPERATIONS.md` §9.
 - **Verification (MODE 2 will check):**
-  - [ ] `docs/OPERATIONS.md` has a "Rollback: turn off tool-calling chat" section AND a "Harness-resync runbook" section (grep header text).
-  - [ ] `.ptah/specs/TASK_2026_002/demo-walkthrough.md` exists and the curl commands listed there are syntactically valid (manual review; or `bash -n` for any shell-block).
-  - [ ] (If included) `scripts/smoke-horus-tool-calls.sh` is `chmod +x` and runs cleanly against the dev host.
-  - [ ] `docs/TROUBLESHOOTING.md` has 4 new entries matching the topics in sub-task 4 (grep section headers).
-  - [ ] Operator can complete the AT#1–#6 walkthrough following only the demo doc, with no out-of-band help (qualitative; team-leader spot-checks 1–2 steps during MODE 2 verification).
+  - [x] `docs/OPERATIONS.md` §7 (Rollback) + §8 (Harness-resync) headers present (grep confirmed at lines 263, 298).
+  - [x] `.ptah/specs/TASK_2026_002/demo-walkthrough.md` exists; all 16 bash code blocks `bash -n` clean.
+  - [x] sub-task 3 skipped — see justification above.
+  - [x] `docs/TROUBLESHOOTING.md` 4 new `### Symptom:` entries at lines 547, 577, 603, 637 (grep confirmed).
+  - [x] AT#1–#6 walkthrough is operator-complete in the demo doc; deviations flagged via NOTE blocks.
 - **Commit message stem:** `docs: rollback playbook + AT demo walkthrough + troubleshooting (TASK_2026_002 B9)`
 
 ---

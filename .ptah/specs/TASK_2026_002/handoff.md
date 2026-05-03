@@ -1,73 +1,57 @@
-# TASK_2026_002 — Session Handoff
+# TASK_2026_002 — Closed
 
-**Last session ended:** 2026-05-03 (B8 closed)
-**Total Batches:** 9 | **Status:** 8/9 complete
+**Closed:** 2026-05-03
+**Total Batches:** 9 | **Status:** 9/9 complete
 
-## Batch state
+## Final commit ledger
 
-| Batch | Status | Commit | Notes |
-|---|---|---|---|
-| B1 — tool-calling loop + harness types | COMPLETE | `221d096` | foundation |
-| B2 — daemon-CRUD tool registry + chat.ts branching | COMPLETE | `325597b` | 9-tool registry |
-| B3 — native skill loading + harness/sync hot-reload | COMPLETE | `f3fc072` | Redis pub/sub |
-| B4 — native MCP client (mcpManager) + mcpTools | COMPLETE | `cfe3d66` | backoff + concurrency budget |
-| B5 — native subagent runtime + delegate_to_subagent | COMPLETE | `cac67ef` | parent registry plumbed cycle-free |
-| B6 — ptahLauncher + materialize + invoker rewire | COMPLETE | `e62a396` | privacy 4th defense layer |
-| B7 — harness-authoring chat + project-files | COMPLETE | `1c5de5c` | 5-tool state machine |
-| B8 — pilot Horus + integration sweep + community-tier | COMPLETE | `e1df121` (track A) + `87c14d0` (track B) | Sub-tasks 10/11 deferred to B9 |
-| **B9 — E2E demo polish + rollback rehearsal** | **PENDING** | — | next batch |
+| Batch | Commit | Subject |
+|---|---|---|
+| B1 | `221d096` | tool-calling loop + harness types + agentRegistry harness wiring |
+| B2 | `325597b` | daemon-CRUD tool registry + chat.ts branching |
+| B3 | `f3fc072` | native skill loading + harness/sync hot-reload |
+| B4 | `cfe3d66` | native MCP client manager + chat tool registry integration |
+| B5 | `cac67ef` | openclaw-native subagent runtime + delegate_to_subagent |
+| B6 | `e62a396` | ptahLauncher + harness materialize + per-agent ptah scope |
+| B7 | `1c5de5c` | harness-authoring chat tools + project-files write |
+| B8 track A | `e1df121` | pilot Horus persona + chat-tier docs |
+| B8 track B | `87c14d0` | community-tier guard + Horus AT sweep |
+| B8 specs   | `3eadc8f` | bookkeeping |
+| B9 | `066c265` | rollback playbook + AT demo walkthrough + troubleshooting |
 
-## What B8 produced
+## Final test status
 
-**Track A (commit `e1df121`):**
-- `local-memory/agents/horus/persona.md` (private; gitignored)
-- `shared-specs/memory/agents/horus/{identity.md, harness.yaml}`
-- `skills/{security-review, simplify}/SKILL.md` (frontmatter-only stubs)
-- 5 doc updates: `CLAUDE.md`, `docs/{ARCHITECTURE,CONFIGURATION,SECURITY,SKILLS-AND-PERSONA}.md`
-- `.gitignore` now excludes `local-memory/` (privacy invariant at git layer)
+- daemon: 70/70 pass
+- bot-bridge: 85 pass + 1 pre-existing gated MCP skip (`mcp-everything: round-trip add(a:1, b:2)` — runs only with `OPENCLAW_TEST_REAL_MCP=1` and `@modelcontextprotocol/server-everything` installed)
+- `npx tsc --noEmit`: 0 errors in both packages
+- `grep -rnE 'wizard:[a-z-]+|harness:analyze-intent' openclaw-control/{daemon,bot-bridge}/src/`: 6 enforcement-only matches (guard constants, doc comments, system-prompt forbid clauses). Zero invocations.
 
-**Track B (commit `87c14d0`):**
-- `daemon/src/harness/outboundGuard.ts` — JSON-RPC body inspection; throws on `wizard:*` / `harness:analyze-intent` when `NODE_ENV=test` or `OPENCLAW_REQUIRE_COMMUNITY_TIER=1`. Wired into `ptahBridge.invokeViaBridge` and `leaderClient` outbound calls.
-- `daemon/src/harness/licenseGuard.ts:assertCommunityTier()` — boot-time probe via bridge `/health`; refuses to listen if tier ≠ `community`. Wired into `daemon/src/index.ts`.
-- `scripts/ptah-bridge.mjs` — `/health` now reports `ptahLicenseTier` via `ptah --json license status`.
-- `daemon/test/community-tier-only.test.ts` — guard pass/throw matrix + licenseGuard contract via undici MockAgent.
-- `bot-bridge/test/integration/horus-end-to-end.test.ts` — AT#1–#5.
-- `daemon/test/horus-spawn.test.ts` — AT#6 (split out because `materializeAgent` pulls in `better-sqlite3`, not a bot-bridge dep).
-- `daemon/test/api-harness-materialize-follower.test.ts` — extended with `harness/sync` 405 case (forwarded from B3).
+## Acceptance tests covered
 
-**Test status at end of B8:** daemon 70/70, bot-bridge 85 + 1 pre-existing gated MCP skip. `npx tsc --noEmit` 0 errors in both packages.
+- AT#1 (list_projects tool-call → assistant text contains project names) — `bot-bridge/test/integration/horus-end-to-end.test.ts`
+- AT#2 (security-review skill body present in system prompt) — same file
+- AT#3 (delegate_to_subagent → invoker SSE events) — same file
+- AT#4 (mocked stdio MCP returns a tool result) — same file
+- AT#5 (harness-authoring dialog writes `.claude/harness.yaml`) — same file
+- AT#6 (`spawnPtahForAgent` produces correct bridge body; `~/.ptah/plugins/openclaw-horus-harness/agents/security-review.md` exists post-materialize) — `daemon/test/horus-spawn.test.ts` (split out for `better-sqlite3` dep boundary)
+- AT#7 (no Pro-tier RPCs) — `daemon/test/community-tier-only.test.ts`
 
-## Items deferred from B8 → B9
+## Privacy invariant — five enforcement layers (was four)
 
-Both have minimal scope and fit B9's docs surface naturally:
+1. `daemon/src/memory.ts:resolveBackend()` routes private filenames to `local-memory/`
+2. `daemon/src/api.ts` HTTP gate — 403 on PUT/DELETE, 404 on GET (deliberately indistinguishable from "not found")
+3. `daemon/src/db/memory.ts:MemoryRepo.{write,delete}` — synchronous throw on private filenames at the DB chokepoint
+4. `daemon/src/harness/materialize.ts:assertMaterializedPathSafety` — refuses materialization writes that resolve under `localMemoryRoot`
+5. `.gitignore:local-memory/` (added in B8 track A) — closes the git-staging vector
 
-- **B8 sub-task 10** (security audit note): `safeFile` `.yaml` extension scope-narrowing analysis. Document finding in `docs/SECURITY.md`. ~15 min.
-- **B8 sub-task 11** (MCP smoke-test runbook entry): `npm i -D @modelcontextprotocol/server-everything` precondition for `OPENCLAW_TEST_REAL_MCP=1 npm test -- --test-name-pattern mcp-everything`. Add to `docs/TROUBLESHOOTING.md` (or `docs/OPERATIONS.md`). ~10 min.
+## Dashboard (Phase 6) — explicitly out of scope
 
-## How to resume — next session
+`openclaw-control/dashboard/` was not touched. Phase 6 deferred to v2 per the original plan.
 
-B9 is sequential, ~190 min. Single `backend-developer` per `tasks.md:376`. Sub-tasks at `tasks.md:379–384`:
+## Operator references for the new behavior
 
-1. `docs/OPERATIONS.md` — add "Rollback: turn off tool-calling chat" + "Harness-resync runbook" sections.
-2. `.ptah/specs/TASK_2026_002/demo-walkthrough.md` — operator-runnable AT#1–#6 demo.
-3. (Optional) `scripts/smoke-horus-tool-calls.sh`.
-4. `docs/TROUBLESHOOTING.md` — 4 entries (MCP failure, harness/sync miss, materialize stuck, host/container path mismatch).
-5. End-to-end demo run on dev host.
-
-Plus the two deferred items above (#10 and #11 from B8).
-
-Commit message stem: `docs: rollback playbook + AT demo walkthrough + troubleshooting (TASK_2026_002 B9)`.
-
-## Invariants to preserve (unchanged from prior handoff)
-
-1. **Persona privacy** — `PRIVATE_AGENT_FILES` route to `local-memory/`, never traverse HTTP. Four enforcement layers; `.gitignore` is now the fifth (B8 track A).
-2. **Legacy `<<oc:>>` directive flow** — chat.ts byte-equivalent on flag-off path.
-3. **Pro-tier ptah RPCs forbidden** — `outboundGuard.ts` enforces (B8 track B).
-4. **Backwards compat** — personas without `harness.yaml` get default `settings.json`.
-5. **Hot-reload contract** — Redis `harness/sync` triggers `reloadAgent` (bot-bridge) AND `materializeAgent` (daemon).
-
-## Key files and references (unchanged)
-
-- `tasks.md`, `implementation-plan.md`, `context.md`, `spike-findings.md`, `source-dive.md`
-- `CLAUDE.md` (privacy invariant)
-- `docs/OPENCLAW_CONTROL.md` (canonical operational landing)
+- Rollback: `docs/OPERATIONS.md §7` (set `OPENCLAW_BOT_TOOL_CALLS_ENABLED=0`)
+- Harness resync: `docs/OPERATIONS.md §8`
+- MCP integration smoke: `docs/OPERATIONS.md §9`
+- AT demo walkthrough: `.ptah/specs/TASK_2026_002/demo-walkthrough.md`
+- Tool-calling-chat troubleshooting: `docs/TROUBLESHOOTING.md` "Tool-calling chat and harness materialization" category
