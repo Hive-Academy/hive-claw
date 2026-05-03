@@ -45,4 +45,14 @@ export const config = {
   subagentDepthLimit: Number(process.env.OPENCLAW_SUBAGENT_DEPTH_LIMIT ?? 2),
   mcpDefaultTimeoutMs: Number(process.env.OPENCLAW_MCP_DEFAULT_TIMEOUT_MS ?? 30_000),
   skillsRoot: process.env.OPENCLAW_SKILLS_ROOT ?? '/home/agent/skills',
+
+  // TASK_2026_002 B7 — harness-authoring chat idle timeout. Default 30 min
+  // matches impl-plan §"Harness-authoring chat" line 1056. After this many
+  // ms without user input, chat.ts auto-clears `ctx.state.harnessSetup` so
+  // a forgotten conversation can't pin the LLM to the harness-author tool
+  // registry forever. Zero or negative disables the timeout (test harness
+  // override only — production should not run with auto-clear off).
+  harnessAuthorTimeoutMs: Number(
+    process.env.OPENCLAW_HARNESS_AUTHOR_TIMEOUT_MS ?? 1_800_000,
+  ),
 };

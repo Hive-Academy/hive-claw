@@ -21,7 +21,7 @@ export interface MemoryReadResult {
   private: boolean;
 }
 
-class HttpStatusError extends Error {
+export class HttpStatusError extends Error {
   statusCode: number;
   constructor(statusCode: number, message: string) {
     super(message);
@@ -95,6 +95,139 @@ async function readHarnessYaml(agentId: string): Promise<MemoryReadResult | null
   return readMemory('agents', agentId, 'harness.yaml');
 }
 
+// ---------------------------------------------------------------------------
+// Project-files helpers (TASK_2026_002 B7) — consume the daemon endpoints
+// landed in B6 (`api.ts` lines 752–910).
+//
+// The bot-bridge harness-author tools (harnessAuthor.ts) call these to probe
+// a project's working tree, read individual files for shape inference, and
+// (after operator confirmation) write `<project>/.claude/harness.yaml`.
+//
+// All three helpers go through the internal-token Bearer auth path. The
+// daemon enforces leader-only on these endpoints (405 from a follower) and
+// runs `safeProjectPath` for every relative-path argument — these helpers
+// are thin transports, not validators. The harness-author tools are
+// responsible for their own boundary checks before calling here.
+// ---------------------------------------------------------------------------
+
+export interface ProjectFileMeta {
+  path: string;
+  size: number;
+  mtime: string;
+}
+
+export interface ProjectFileReadResult {
+  content: string;
+  sizeBytes: number;
+  mtime: string;
+}
+
+/**
+ * GET /api/projects/:slug/files?path=<relativePath>
+ *
+ * Returns the file contents + stat metadata. `null` on 404 (file missing).
+ * 5xx and unexpected 4xx propagate as `HttpStatusError` so the caller can
+ * surface a meaningful error to the LLM rather than papering over it.
+ *
+ * The daemon caps the body at PROJECT_FILE_MAX_BYTES; oversize → 413, which
+ * propagates as `HttpStatusError` (the harness-author tool re-shapes that
+ * into a friendly LLM message).
+ */
+async function readProjectFile(
+  slug: string,
+  relativePath: string,
+): Promise<ProjectFileReadResult | null> {
+  const url =
+    `${config.daemonUrl}/api/projects/${encodeURIComponent(slug)}/files` +
+    `?path=${encodeURIComponent(relativePath)}`;
+  const r = await request(url, {
+    method: 'GET',
+    headers: { authorization: `Bearer ${config.internalToken}` },
+  });
+  if (r.statusCode === 404) {
+    await r.body.dump();
+    return null;
+  }
+  const text = await r.body.text();
+  if (r.statusCode >= 400) {
+    throw new HttpStatusError(
+      r.statusCode,
+      `GET /api/projects/${slug}/files?path=${relativePath} → ${r.statusCode}: ${text}`,
+    );
+  }
+  return JSON.parse(text) as ProjectFileReadResult;
+}
+
+/**
+ * GET /api/projects/:slug/files?prefix=<dir>
+ *
+ * Returns the (non-recursive) file listing under `<project>/<prefix>`.
+ * `prefix` is "" → list `<project>` root. Uses the same Bearer auth and
+ * daemon-side `safeProjectPath` validation as the read helper.
+ *
+ * Returns an empty array on 404 (prefix dir missing) — the caller's probe
+ * loop treats "no such directory" as "no entries to consider".
+ */
+async function listProjectFiles(
+  slug: string,
+  prefix: string = '',
+): Promise<ProjectFileMeta[]> {
+  const qs = prefix.length > 0 ? `?prefix=${encodeURIComponent(prefix)}` : '';
+  const url = `${config.daemonUrl}/api/projects/${encodeURIComponent(slug)}/files${qs}`;
+  const r = await request(url, {
+    method: 'GET',
+    headers: { authorization: `Bearer ${config.internalToken}` },
+  });
+  if (r.statusCode === 404) {
+    await r.body.dump();
+    return [];
+  }
+  const text = await r.body.text();
+  if (r.statusCode >= 400) {
+    throw new HttpStatusError(
+      r.statusCode,
+      `GET /api/projects/${slug}/files${qs} → ${r.statusCode}: ${text}`,
+    );
+  }
+  return JSON.parse(text) as ProjectFileMeta[];
+}
+
+/**
+ * POST /api/projects/:slug/files
+ *
+ * Writes `<project>/<relativePath>` with `content`. The daemon mkdirs the
+ * parent directory recursively (matching api.ts:867). Returns the byte size
+ * the daemon recorded; throws `HttpStatusError` on 4xx/5xx so the caller
+ * can decide whether to retry or surface the error to the operator.
+ *
+ * This is the only mutation in the project-files surface. The harness-author
+ * `write_harness_file` tool guards on `stage === 'writing'` BEFORE calling
+ * this; do not relax the gating elsewhere.
+ */
+async function writeProjectFile(
+  slug: string,
+  relativePath: string,
+  content: string,
+): Promise<{ ok: boolean; sizeBytes: number }> {
+  const url = `${config.daemonUrl}/api/projects/${encodeURIComponent(slug)}/files`;
+  const r = await request(url, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${config.internalToken}`,
+    },
+    body: JSON.stringify({ path: relativePath, content }),
+  });
+  const text = await r.body.text();
+  if (r.statusCode >= 400) {
+    throw new HttpStatusError(
+      r.statusCode,
+      `POST /api/projects/${slug}/files (path=${relativePath}) → ${r.statusCode}: ${text}`,
+    );
+  }
+  return JSON.parse(text) as { ok: boolean; sizeBytes: number };
+}
+
 export const daemon = {
   listProjects: () => call<any[]>('GET', '/api/projects'),
   listAgents: () => call<any[]>('GET', '/api/agents'),
@@ -151,6 +284,11 @@ export const daemon = {
   readAgentIdentity,
   readDiscordJson,
   readHarnessYaml,
+
+  // TASK_2026_002 B7 — harness-author project-files surface.
+  readProjectFile,
+  listProjectFiles,
+  writeProjectFile,
 
   /**
    * Forward a chat-tier observability event to the daemon's SSE bus

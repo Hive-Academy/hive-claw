@@ -23,18 +23,12 @@
 
 import { daemon } from '../daemonClient.js';
 import type { ToolDef } from '../llm.js';
-
-/**
- * Placeholder body for the `start_harness_setup` tool.
- *
- * B7 will replace this with the real HARNESS_AUTHOR_SYSTEM_PROMPT — for the
- * B2 cut we only wire the state mutation (`ctx.state.set('harnessSetup', …)`)
- * and return a stable placeholder so the chat layer has something to surface.
- */
-// HARNESS_AUTHOR: replaced by B7
-const HARNESS_AUTHOR_SYSTEM_PROMPT_PLACEHOLDER =
-  '[harness-author placeholder] Now in harness-authoring mode. ' +
-  'B7 will replace this string with the real HARNESS_AUTHOR_SYSTEM_PROMPT body.';
+import {
+  HARNESS_AUTHOR_SYSTEM_PROMPT,
+  entryModeMessage,
+  type HarnessAuthorState,
+  HARNESS_SETUP_STATE_KEY,
+} from '../harnessAuthor.js';
 
 // ---------------------------------------------------------------------------
 // Markdown rendering helpers — kept tiny and inline so the tool registry is
@@ -271,13 +265,21 @@ export function list(): ToolDef[] {
       },
       handler: async (args, ctx) => {
         const project = requireString(args, 'project', 'start_harness_setup');
-        ctx.state.set('harnessSetup', {
+        // TASK_2026_002 B7 — write the canonical state slot. `chat.ts` swaps
+        // the tool registry on the next round when it sees this key, per
+        // impl-plan line 1068 (replacement, not merge).
+        const state: HarnessAuthorState = {
           project,
           stage: 'probing',
           startedAt: Date.now(),
-        });
-        // HARNESS_AUTHOR: replaced by B7
-        return HARNESS_AUTHOR_SYSTEM_PROMPT_PLACEHOLDER;
+        };
+        ctx.state.set(HARNESS_SETUP_STATE_KEY, state);
+        // Return: entry-mode message (impl-plan lines 996–998) + a blank
+        // line + the full HARNESS_AUTHOR_SYSTEM_PROMPT body (lines 1032–1053).
+        // The model gets this as its `tool` role response on the round it
+        // fired start_harness_setup, then chat.ts hot-swaps the registry to
+        // harnessAuthor.tools(...) on the next round.
+        return `${entryModeMessage(project)}\n\n${HARNESS_AUTHOR_SYSTEM_PROMPT}`;
       },
     },
     {

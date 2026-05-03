@@ -1,6 +1,6 @@
 # TASK_2026_002 — Tasks
 
-**Total Batches:** 9 | **Status:** 6/9 complete | **Plan source of truth:** `implementation-plan.md` §"Sequencing and batching" (lines 794–820)
+**Total Batches:** 9 | **Status:** 7/9 complete | **Plan source of truth:** `implementation-plan.md` §"Sequencing and batching" (lines 794–820)
 
 This task decomposes a two-tier persona runtime: chat-tier (bot-bridge — tool-calling LLM, native skills, native MCP, native subagents) + orchestration-tier (daemon — `ptahLauncher`, materialize, per-agent ptah scope). The architect's plan is APPROVED by the operator with no open clarifications. Batches B1–B9 below mirror the architect's sequencing 1:1 — sub-tasks, verification, and executor heuristics are this document's contribution.
 
@@ -279,7 +279,7 @@ The architect's plan is internally consistent and grounded in spike findings (R1
 
 ### B7 — Harness-authoring chat (`harnessAuthor.ts`) + start_harness_setup state machine + project-files daemon route consumed
 
-- **Status:** IN PROGRESS
+- **Status:** COMPLETE
 - **Phase:** 3
 - **Files (in/out):**
   - NEW `openclaw-control/bot-bridge/src/harnessAuthor.ts`
@@ -303,21 +303,21 @@ The architect's plan is internally consistent and grounded in spike findings (R1
   9. Modify `chat.ts`: when `ctx.state.has('harnessSetup')`, REPLACE the tool registry with `harnessAuthor.tools(ctx.state)` (not a merge) — keeps the LLM focused per impl-plan line 1068. Detect operator strings on next user message: "yes" / "y" → flip `stage` to `'writing'`; "no" / "n" → clear `proposed`, stage to `'probing'`; "cancel harness setup" (case-insensitive) → clear all `harnessSetup` state and post a "cancelled" reply. Auto-clear if `Date.now() - startedAt > config.harnessAuthorTimeoutMs` (default 1_800_000). ~50 min.
   10. Tests: `bot-bridge/test/harness-author.test.ts` per-tool unit tests (probe bounded, read_file rejects `..`, propose_harness validates, confirm_harness flips stage, write_harness_file gated on stage). Integration test that drives the full dialog with a scripted mock LLM emitting the canonical 4-tool-call sequence (`probe_project` → `propose_harness` → `confirm_harness` → operator says "yes" → `write_harness_file`); assert the file exists at `<project>/.claude/harness.yaml` (via mocked daemon), parses cleanly, matches the expected fixture. ~70 min.
 - **Verification (MODE 2 will check):**
-  - [ ] `cd openclaw-control/bot-bridge && npx tsc --noEmit` passes.
-  - [ ] `npm test -- --grep harness-author` passes; the integration test asserts the final yaml round-trips through `parseHarnessYaml` cleanly.
-  - [ ] `grep -n 'harnessSetup.startedAt' openclaw-control/bot-bridge/src/chat.ts` shows the timeout check is wired.
-  - [ ] `grep -nE '\bcancel harness setup\b' openclaw-control/bot-bridge/src/chat.ts` shows the cancel detection.
-  - [ ] `read_file` handler rejects an input like `'../etc/passwd'` (test assertion).
-  - [ ] `write_harness_file` rejects when `stage !== 'writing'` (test assertion).
-  - [ ] `start_harness_setup` is no longer the placeholder from B2 (`grep // HARNESS_AUTHOR: replaced by B7` returns nothing).
-  - [ ] No `wizard:*` or `harness:analyze-intent` invocation in any new code path (grep confirms; B8's CI assertion will re-verify).
+  - [x] `cd openclaw-control/bot-bridge && npx tsc --noEmit` passes.
+  - [x] `npm test -- --grep harness-author` passes; the integration test asserts the final yaml round-trips through `parseHarnessYaml` cleanly.
+  - [x] `grep -n 'harnessSetup.startedAt' openclaw-control/bot-bridge/src/chat.ts` shows the timeout check is wired.
+  - [x] `grep -nE '\bcancel harness setup\b' openclaw-control/bot-bridge/src/chat.ts` shows the cancel detection.
+  - [x] `read_file` handler rejects an input like `'../etc/passwd'` (test assertion).
+  - [x] `write_harness_file` rejects when `stage !== 'writing'` (test assertion).
+  - [x] `start_harness_setup` is no longer the placeholder from B2 (`grep // HARNESS_AUTHOR: replaced by B7` returns nothing).
+  - [x] No `wizard:*` or `harness:analyze-intent` invocation in any new code path (grep confirms; B8's CI assertion will re-verify).
 - **Commit message stem:** `feat(bot-bridge): harness-authoring chat tools + project-files write integration (TASK_2026_002 B7)`
 
 ---
 
 ### B8 — Pilot persona + Horus harness + integration sweep + community-tier assertion
 
-- **Status:** PENDING
+- **Status:** IN PROGRESS
 - **Phase:** 5
 - **Files (in/out):**
   - NEW `local-memory/agents/horus/persona.md`

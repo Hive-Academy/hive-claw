@@ -9,6 +9,11 @@ import * as subagentTools from './tools/subagentTools.js';
 import { merge as mergeToolRegistries } from './tools/index.js';
 import { loadSkills, type LoadedSkill } from './skills/skillLoader.js';
 import { PARENT_TOOL_REGISTRY_STATE_KEY } from './subagents/subagentRunner.js';
+import {
+  tools as harnessAuthorTools,
+  HARNESS_SETUP_STATE_KEY,
+  type HarnessAuthorState,
+} from './harnessAuthor.js';
 
 const TOOLBELT_DOC = `## Operational tools (emit at the END of your reply, one per line)
 
@@ -278,6 +283,58 @@ async function buildToolRegistry(
   );
 }
 
+// ---------------------------------------------------------------------------
+// TASK_2026_002 B7 — harness-authoring conversation state.
+//
+// `ctx.state` is per-message (rebuilt on every handleChat), so the multi-turn
+// harness-authoring flow needs a longer-lived store. We key by
+// `<agentId>:<channelId>`: same persona in the same Discord channel = same
+// authoring session. Bot-bridge restart drops everything (impl-plan line
+// 1058 "state lives in-process … restart drops the conversation").
+// ---------------------------------------------------------------------------
+
+const harnessSessions = new Map<string, HarnessAuthorState>();
+
+function harnessKey(agent: AgentDef, msg: Message): string {
+  return `${agent.id}:${msg.channel.id}`;
+}
+
+/**
+ * Test seam — exposed solely so unit tests can clear the in-process map
+ * between cases without doing a process restart. NOT exported in
+ * `index.ts`; only `harness-author.test.ts` reaches for it via dynamic import.
+ */
+export function __resetHarnessSessionsForTests(): void {
+  harnessSessions.clear();
+}
+
+/** Strings that abort the harness-author session entirely (case-insensitive). */
+const HARNESS_CANCEL_PHRASE = /\bcancel harness setup\b/i;
+
+/**
+ * Operator-confirmation parser. Run on the user's next message AFTER
+ * `confirm_harness` flipped stage to 'awaiting-operator-confirmation'.
+ *
+ * Match precedence: cancel > yes > no > unrecognized. The cancel phrase wins
+ * over "yes" / "no" so an operator typing "no, cancel harness setup" gets
+ * the stronger action.
+ *
+ * Returns:
+ *   - 'cancel' → chat.ts wipes the session, replies "cancelled".
+ *   - 'yes'    → flip stage to 'writing'.
+ *   - 'no'     → clear `proposed`, stage back to 'probing'.
+ *   - null     → unrecognized (let the LLM see the message verbatim).
+ */
+function detectOperatorReply(text: string): 'cancel' | 'yes' | 'no' | null {
+  if (HARNESS_CANCEL_PHRASE.test(text)) return 'cancel';
+  // Strict word-boundary match so "yesterday" doesn't fire "yes" and
+  // "north" doesn't fire "no".
+  const trimmed = text.trim();
+  if (/^(yes|y)\b/i.test(trimmed)) return 'yes';
+  if (/^(no|n)\b/i.test(trimmed)) return 'no';
+  return null;
+}
+
 /**
  * Legacy plain-chat path: existing `buildSystemPrompt` + `chatComplete` +
  * `parseDirectives` flow. Kept byte-identical (TASK_2026_002 B2 hard rule)
@@ -329,6 +386,67 @@ export async function handleChat(agent: AgentDef, msg: Message): Promise<void> {
   // needed). On null content (provider error / no usable text) we fall
   // through to the legacy directive flow — the safety net survives.
   if (config.toolCallsEnabled) {
+    const sessionKey = harnessKey(agent, msg);
+
+    // TASK_2026_002 B7 — harness-authoring session lifecycle.
+    //
+    // Steps:
+    //  (a) Auto-clear if the in-process session is older than the configured
+    //      idle timeout (default 30 min — config.harnessAuthorTimeoutMs).
+    //  (b) "cancel harness setup" anywhere in the message wipes the session.
+    //  (c) When stage === 'awaiting-operator-confirmation', interpret the
+    //      next message as the yes/no answer.
+    let harnessSession = harnessSessions.get(sessionKey);
+    if (
+      harnessSession &&
+      config.harnessAuthorTimeoutMs > 0 &&
+      Date.now() - harnessSession.startedAt > config.harnessAuthorTimeoutMs
+    ) {
+      // Auto-clear via harnessSetup.startedAt timestamp. Reference site for
+      // verification grep: `harnessSetup.startedAt` (impl-plan line 1056).
+      harnessSessions.delete(sessionKey);
+      harnessSession = undefined;
+      await msg.reply(
+        '_(harness-author session timed out and was cleared. Say "set up the harness" again to restart.)_',
+      );
+      // Fall through to the rest of the handler so the user's actual
+      // message is still processed against the default tool registry.
+    }
+
+    if (harnessSession && HARNESS_CANCEL_PHRASE.test(text)) {
+      // "cancel harness setup" — wipe state, post a "cancelled" reply, return.
+      harnessSessions.delete(sessionKey);
+      await msg.reply('Harness-authoring cancelled. No file was written.');
+      return;
+    }
+
+    if (harnessSession && harnessSession.stage === 'awaiting-operator-confirmation') {
+      const decision = detectOperatorReply(text);
+      if (decision === 'yes') {
+        harnessSession = { ...harnessSession, stage: 'writing' };
+        harnessSessions.set(sessionKey, harnessSession);
+        // Fall through with the user's "yes" — the LLM will see it and
+        // (per the system prompt) call write_harness_file on this round.
+      } else if (decision === 'no') {
+        harnessSession = {
+          ...harnessSession,
+          stage: 'probing',
+          ...(harnessSession.proposed ? {} : {}),
+        };
+        // Clear `proposed` explicitly (spread above keeps it; rebuild without).
+        const next: HarnessAuthorState = {
+          project: harnessSession.project,
+          stage: 'probing',
+          startedAt: harnessSession.startedAt,
+        };
+        if (harnessSession.projectPath) next.projectPath = harnessSession.projectPath;
+        harnessSessions.set(sessionKey, next);
+        harnessSession = next;
+      }
+      // decision === null → leave the stage alone; the LLM will see the
+      // message verbatim and can ask the operator to clarify.
+    }
+
     const ctx: ToolCallContext = {
       agentId: agent.id,
       userId: msg.author.id,
@@ -344,7 +462,22 @@ export async function handleChat(agent: AgentDef, msg: Message): Promise<void> {
         void daemon.emitSseHint(event, data);
       },
     };
-    const tools = await buildToolRegistry(agent, ctx);
+    // TASK_2026_002 B7 — load the persistent harness session into ctx.state
+    // BEFORE building the tool registry, so the registry decision below sees
+    // the same slot the tool handlers will mutate.
+    if (harnessSession) {
+      ctx.state.set(HARNESS_SETUP_STATE_KEY, harnessSession);
+    }
+
+    // TASK_2026_002 B7 — when the harness-author session is live, REPLACE
+    // (not merge) the registry with the 5 author tools. impl-plan line 1068:
+    // "keeps the LLM focused per impl-plan line 1068".
+    let tools: ToolDef[];
+    if (ctx.state.has(HARNESS_SETUP_STATE_KEY)) {
+      tools = harnessAuthorTools(ctx.state);
+    } else {
+      tools = await buildToolRegistry(agent, ctx);
+    }
     // TASK_2026_002 B5 — stash the parent tool registry on the shared state
     // map so `subagentRunner.run` can intersect against it without a circular
     // import (chat.ts → subagentTools.ts → subagentRunner.ts → chat.ts would
@@ -359,6 +492,19 @@ export async function handleChat(agent: AgentDef, msg: Message): Promise<void> {
       ctx,
       { maxDepth: config.toolCallDepthLimit },
     );
+
+    // TASK_2026_002 B7 — persist any harness-state mutations the tool handlers
+    // wrote during this round. `start_harness_setup` (in daemonTools.ts) and
+    // `propose_harness` / `confirm_harness` / `write_harness_file` (in
+    // harnessAuthor.ts) all write to ctx.state.harnessSetup; we must copy
+    // those mutations back into the cross-message store.
+    const finalHarnessState = ctx.state.get(HARNESS_SETUP_STATE_KEY) as
+      | HarnessAuthorState
+      | undefined;
+    if (finalHarnessState) {
+      harnessSessions.set(sessionKey, finalHarnessState);
+    }
+
     if (result.content) {
       return await postReply(msg, result.content);
     }
