@@ -199,12 +199,15 @@ async function buildSystemPrompt(agent: AgentDef, msg: Message): Promise<string>
     }
   } catch {}
 
-  // ## Available tools — placeholder until B4 (mcpTools) and B5 (subagentTools)
-  // fill the registry. The current `TOOLBELT_DOC` is the legacy directive
-  // surface; when toolCallsEnabled is on, the OpenAI-compat tool definitions
-  // are passed via `tools=[...]` in the request body, NOT the system prompt,
-  // so a markdown table here is documentation only.
-  parts.push(TOOLBELT_DOC);
+  // Legacy directive grammar — only included on the rollback path
+  // (toolCallsEnabled=false). With tool-calling on, structured OpenAI-compat
+  // tool definitions go via `tools=[...]` in the request body and the LLM
+  // must NOT see the directive grammar; otherwise it emits both — visibly
+  // leaking `<<oc:create_task ...>>` strings into Discord replies AND
+  // skipping the structured tool path. Surfaced 2026-05-03 against Anubis.
+  if (!config.toolCallsEnabled) {
+    parts.push(TOOLBELT_DOC);
+  }
 
   parts.push(`## Discord context
 user: ${msg.author.username} (${userId})
@@ -518,7 +521,25 @@ export async function handleChat(agent: AgentDef, msg: Message): Promise<void> {
     }
 
     if (result.content) {
-      return await postReply(msg, result.content);
+      // Defensive scrub: even with TOOLBELT_DOC removed from the system
+      // prompt, an LLM can still hallucinate the directive grammar from
+      // training data or echo it from a quoted user message. Strip any
+      // residual `<<oc:...>>` from the visible reply (NOT executed — the
+      // structured tool registry is the only sanctioned mutation path
+      // when toolCallsEnabled is on; silent execution would be a footgun).
+      // If a directive was stripped, log a warning so production drift
+      // is detectable.
+      const cleaned = result.content.replace(/<<oc:[^>]*>>/g, '').trimEnd();
+      if (cleaned.length !== result.content.trimEnd().length) {
+        console.warn(
+          `[chat] ${agent.id}: stripped <<oc:>> directive(s) from tool-call reply — model is mixing legacy + structured paths. Check skill prose.`,
+        );
+      }
+      if (cleaned.length > 0) {
+        return await postReply(msg, cleaned);
+      }
+      // If scrubbing left an empty reply, fall through to the legacy path
+      // so the operator sees something rather than silence.
     }
     // Fall through to the legacy path on null content.
   }
