@@ -5,11 +5,16 @@ description: Compressed working memory of docs/SETUP.md, docs/CONFIGURATION.md, 
 
 # openclaw-onboarding skill
 
-This skill is the persona's compressed working memory of how openclaw-control
-comes up from cold. Every claim here is anchored to a file path the persona
-can re-read at runtime. When the operator is in setup, route through this
-skill first; when an answer is uncertain, re-read the cited file before
-speaking.
+This skill compresses the operator runbook in `docs/PLAYBOOKS.md` Runbook A
+(first-boot leader, add-a-follower). When the operator asks for a step-by-step
+procedure, point them at `docs/PLAYBOOKS.md`; this skill is for the persona to
+*understand* the workflow well enough to *guide* the operator through it.
+
+The persona's job is diagnosis and correction, not execution. Where a step
+requires a host-side action (editing `.env`, running `docker compose`, curling
+`/api/agents/<id>/harness/sync`), the persona names the action and the file or
+endpoint involved — it does not pretend to perform it. See "Operator-action vs
+persona-action boundary" below.
 
 ## The two tiers in one container
 
@@ -44,9 +49,7 @@ Source under `openclaw-control/`:
 All three run in every container. Their roles diverge based on
 `OPENCLAW_LEADER`.
 
-## Leader vs follower topology
-
-Every machine runs the same image. Configuration distinguishes them:
+## The four `.env` keys that distinguish leader from follower
 
 | Env var | Leader | Follower |
 |---|---|---|
@@ -54,35 +57,99 @@ Every machine runs the same image. Configuration distinguishes them:
 | `OPENCLAW_LEADER_URL` | unset / self | `https://leader.example.com` |
 | `OPENCLAW_INTERNAL_TOKEN` | required (signs internal HTTP) | required (matches leader) |
 | `OPENCLAW_LOCAL_AGENT_IDS` | comma-sep list of agent ids on this host | comma-sep list of agent ids on this host |
-| DB path `/data/specs.db` | opened, WAL mode | never opened |
 
-Exactly one machine sets `OPENCLAW_LEADER=1`. There is no shared filesystem,
-no git clone, no periodic sync. The leader's DB is the single source of
-truth for projects, tasks, task files, dispatches, dispatch logs, and
-shared memory.
-
-Internal HTTP between follower and leader carries
+Exactly one machine sets `OPENCLAW_LEADER=1`. The leader's DB at
+`/data/specs.db` is the single source of truth for projects, tasks, task
+files, dispatches, dispatch logs, and shared memory. Followers never open a
+DB. Internal HTTP between follower and leader carries
 `Authorization: Bearer ${OPENCLAW_INTERNAL_TOKEN}`. The atomic linearization
 point is `POST /api/dispatches/:id/claim` — see `docs/ARCHITECTURE.md` for
 the multi-claimant race semantics.
+
+## The `local-memory/` trap
+
+Two directories share the name `local-memory/` and confuse new operators.
+Distinguish them every time the operator mentions either:
+
+- **Repo `local-memory/`** at `<repo-root>/local-memory/`. Gitignored.
+  Source of truth for private agent files (`agents/<id>/persona.md`,
+  `agents/<id>/secrets.md`) on the host. The operator edits files here.
+- **Runtime `~/.claude/local-memory/`** on the host home directory.
+  Bind-mounted into the container at the path `daemon/src/memory.ts`
+  resolves via `localAgentDir(id)`. The daemon reads private files from
+  here.
+
+Whether the bind-mount maps the repo directory or the home directory is
+controlled by `OPENCLAW_HOST_HOME` and the `volumes:` block in
+`docker-compose.yml`. When the operator says "I edited persona.md but the
+agent didn't pick it up," the first hypothesis is that the file lives in the
+wrong directory. Confirm both paths before suggesting a fix.
+
+## The `shared-specs/` vs leader-DB distinction
+
+Two backends in `daemon/src/memory.ts`:
+
+- **Repo `shared-specs/memory/...`** — the canonical authored copy of public
+  agent files (`agents/<id>/identity.md`, `agents/<id>/harness.yaml`),
+  project notes, and templates. Operator-edited, committed to git.
+- **Leader DB `memory_files` table** — the daemon-served copy. On startup
+  and on `harness/sync`, the daemon reads from `shared-specs/memory/...`
+  and writes into the DB. Followers read these files only via the leader's
+  HTTP endpoint `GET /api/memories/<scope>/<id>/<file>`.
+
+The persona consults the leader's HTTP API for "what does the cluster
+currently see," and `shared-specs/memory/...` for "what is in the repo."
+When they disagree, the leader hasn't synced — name `harness/sync` as the
+likely cure.
+
+## The persona-privacy invariant in plain English
+
+The set `PRIVATE_AGENT_FILES = {persona.md, secrets.md, persona.json,
+secrets.json}` always routes to the local backend when `scope=agents`.
+Everything else under `scope=agents` (notably `identity.md` and
+`harness.yaml`) is public.
+
+Five enforcement layers (`docs/SECURITY.md` is canonical):
+
+1. `resolveBackend` in `daemon/src/memory.ts` routes private filenames to
+   the local FS. The leader's DB never sees the filename.
+2. The HTTP gate in `daemon/src/api.ts` returns **404** on any read of
+   `agents/<id>/<private-file>`. Not 403. The 404 is deliberate — denies
+   the existence oracle.
+3. `MemoryRepo.write/delete` in `daemon/src/db/memory.ts` throws
+   synchronously on any private filename. Belt-and-braces against a
+   programming error.
+4. `assertMaterializedPathSafety` in `daemon/src/harness/materialize.ts`
+   refuses any output path under `config.localMemoryRoot`.
+5. The bot-bridge `upload_attachment` tool's path-source guard
+   (`assertPathInsideProject` in `tools/discordTools.ts`) refuses any path
+   containing the segments `local-memory`, `.claude`, or `.ptah`, and
+   rejects basenames in `PRIVATE_AGENT_FILES`.
+
+When an operator asks "show me agent X's persona," refuse and cite layer 2.
+The `agent-fleet-overview` skill carries the conversational rules.
 
 ## Where to look first when something is broken
 
 In order, by likely root cause:
 
-1. **Container logs.** `docker compose logs openclaw --tail=200`. The
-   gateway logs and the control-plane logs interleave; both go to stdout.
-2. **Daemon health.** `curl localhost:7878/api/health`. If 5xx, the daemon
+1. **Container logs.** `docker compose logs openclaw --tail=200`. Gateway
+   and control-plane logs interleave; both go to stdout.
+2. **Bot-bridge log.** `docker compose exec openclaw cat /tmp/openclaw-control-bot.log`.
+   This is the chat-tier log — distinct from the daemon's stdout. Persona
+   load failures, tool-call errors, MCP backoff messages all surface here.
+3. **Daemon health.** `curl localhost:7878/api/health`. If 5xx, the daemon
    is alive but degraded; the response body names the failing subsystem.
-3. **Bot-bridge health.** `curl localhost:7879/health` (or whichever host
+4. **Bot-bridge health.** `curl localhost:7879/health` (or whichever host
    port `BOT_BRIDGE_PORT` maps to). If unreachable, the bot-bridge crashed
-   on startup — usually a missing persona file (the bot-bridge skips any
+   on startup — usually a missing persona file. The bot-bridge skips any
    agent whose `local-memory/agents/<id>/persona.md` is missing, which is
-   not an error, but skipping every agent leaves it idle).
-4. **Leader DB.** On the leader only, `sqlite3 /data/specs.db
-   '.tables'`. If `dispatches` and `tasks` are missing, migrations did not
-   run; check daemon startup logs.
-5. **Dashboard 401.** Discord OAuth not configured. Either set
+   not an error, but skipping every agent leaves it idle.
+5. **Leader DB.** On the leader only,
+   `docker compose exec openclaw sqlite3 /data/specs.db '.tables'`. If
+   `dispatches` and `tasks` are missing, migrations did not run; check
+   daemon startup logs.
+6. **Dashboard 401.** Discord OAuth not configured. Either set
    `DISCORD_CLIENT_ID` etc. or, for loopback dev, leave them empty and the
    daemon falls back to the anonymous `local-dev` user.
 
@@ -90,58 +157,30 @@ The full SQL one-liner playbook lives in `docs/OPERATIONS.md`. When the
 operator describes a state question ("how many dispatches are pending?",
 "which agents are claimed right now?"), reach for that file first.
 
-## The persona-privacy invariant in plain English
+## Operator-action vs persona-action boundary
 
-Two storage backends in `daemon/src/memory.ts`:
+The persona drives Discord conversation and fires structured tools. It does
+NOT directly:
 
-- **Shared.** SQLite `memory_files` table on the leader, served via
-  `/api/memories/:scope/:id/:file`. Holds public agent bios
-  (`agents/<id>/identity.md`), Discord user profiles, thread context,
-  project notes. Followers read/write via HTTP.
-- **Local.** `~/.claude/local-memory/...` on the host, bind-mounted into
-  the container. Never synced. Never sent over HTTP.
+- Edit `.env` or restart `docker compose`. Those happen on the host.
+- Write to `~/.claude/local-memory/agents/<id>/persona.md`. Layer 4 of the
+  privacy invariant prevents any tool surface from doing this.
+- Fire `POST /api/agents/<id>/harness/sync`. No chat-tier tool exposes this
+  endpoint; it is an operator curl after a memory write.
+- Read another agent's `identity.md` from a chat-tier tool — the chat tier
+  has no general-purpose `read_memory` tool today. Public memory reads go
+  through the daemon's HTTP API, fired by the operator (curl) or surfaced
+  by a subagent that has been given a Read-shaped tool. The persona names
+  the endpoint and asks the operator to fetch it when needed.
 
-The set `PRIVATE_AGENT_FILES = {persona.md, secrets.md, persona.json,
-secrets.json}` always routes to local backend when `scope=agents`.
-Everything else goes to shared. Writes under `agents/<id>/*` are 403'd
-unless `<id>` is in `OPENCLAW_LOCAL_AGENT_IDS` on the writing machine.
+When walking an operator through a step the persona cannot execute, the
+persona names the exact command: "run `curl -X POST -H 'Authorization:
+Bearer $OPENCLAW_INTERNAL_TOKEN' $LEADER/api/agents/<id>/harness/sync` from
+the leader host," and waits for the operator to confirm before continuing.
 
-The defense is in four layers (`docs/SECURITY.md` enumerates them):
-`resolveBackend` routes; the HTTP gate in `daemon/src/api.ts` returns 404
-on private-file reads (deliberately not 403, to deny existence
-oracle); `MemoryRepo.write/delete` throws on private filenames as
-belt-and-braces; `assertMaterializedPathSafety` refuses any
-materialization output under the local-memory root.
+## First-boot pointer
 
-When an operator asks "show me agent X's persona," refuse and cite the
-layer that would block it. Identity files are public; personas are not,
-even between machines on the same fleet.
-
-## First-boot checklist
-
-For a new leader machine:
-
-1. `.env` has `OPENCLAW_LEADER=1`, `OPENCLAW_INTERNAL_TOKEN` set to a fresh
-   random value, `DISCORD_*` configured (or empty for loopback dev).
-2. `docker compose up -d`. Wait for both health endpoints.
-3. Hit `/api/health` from the host — must be 200.
-4. Author a registered agent: write
-   `local-memory/agents/<id>/persona.md` (private) and
-   `shared-specs/memory/agents/<id>/identity.md` + `harness.yaml` (public).
-   Set `OPENCLAW_LOCAL_AGENT_IDS=<id>` and restart.
-5. Verify the bot-bridge picked it up: `GET /api/agents` lists the new id.
-
-For a new follower machine:
-
-1. `.env` has `OPENCLAW_LEADER=0`, `OPENCLAW_LEADER_URL=<leader>`,
-   `OPENCLAW_INTERNAL_TOKEN` matching the leader's token.
-2. `OPENCLAW_LOCAL_AGENT_IDS` lists the agents this follower owns. The
-   matching `local-memory/agents/<id>/persona.md` files must exist on this
-   host.
-3. `docker compose up -d`. The follower's daemon connects to the leader's
-   SSE stream at `/api/stream?topics=dispatch` for dispatch push.
-4. Verify: `curl -H "Authorization: Bearer $TOKEN"
-   $LEADER_URL/api/dispatches/pending?agentId=<id>` returns an array.
-
-When a step fails, name the file or env var that controls it. Do not
-proceed past a failure; surface it.
+When the operator has never set this up, point them at `docs/SETUP.md` and
+Runbook A in `docs/PLAYBOOKS.md`. The persona's role in first-boot is to
+answer questions about specific steps in those documents, not to recite the
+documents in chat.
