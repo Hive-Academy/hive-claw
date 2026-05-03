@@ -1,6 +1,6 @@
 # TASK_2026_002 — Tasks
 
-**Total Batches:** 9 | **Status:** 0/9 complete | **Plan source of truth:** `implementation-plan.md` §"Sequencing and batching" (lines 794–820)
+**Total Batches:** 9 | **Status:** 2/9 complete | **Plan source of truth:** `implementation-plan.md` §"Sequencing and batching" (lines 794–820)
 
 This task decomposes a two-tier persona runtime: chat-tier (bot-bridge — tool-calling LLM, native skills, native MCP, native subagents) + orchestration-tier (daemon — `ptahLauncher`, materialize, per-agent ptah scope). The architect's plan is APPROVED by the operator with no open clarifications. Batches B1–B9 below mirror the architect's sequencing 1:1 — sub-tasks, verification, and executor heuristics are this document's contribution.
 
@@ -88,7 +88,7 @@ The architect's plan is internally consistent and grounded in spike findings (R1
 
 ### B2 — Daemon-CRUD tool registry + chat.ts branching + plain-chat fallback test
 
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Phase:** 1
 - **Files (in/out):**
   - NEW `openclaw-control/bot-bridge/src/tools/daemonTools.ts`
@@ -120,7 +120,7 @@ The architect's plan is internally consistent and grounded in spike findings (R1
 
 ### B3 — Native skill loading + persona system-prompt assembly + harness/sync wiring
 
-- **Status:** PENDING
+- **Status:** IN PROGRESS
 - **Phase:** 4.5
 - **Files (in/out):**
   - NEW `openclaw-control/bot-bridge/src/skills/skillLoader.ts`
@@ -212,6 +212,7 @@ The architect's plan is internally consistent and grounded in spike findings (R1
   5. Create `bot-bridge/src/tools/subagentTools.ts:listForAgent(agent)`: returns the umbrella `delegate_to_subagent(name, prompt)` tool plus optional per-subagent shortcuts `delegate_to_<n>(prompt)` (chosen at registry-build time — for v1 always emit shortcuts as well; LLM affordance is better). Handler dispatches to `subagentRunner.run`. ~40 min.
   6. Wire `chat.ts:buildToolRegistry` to merge in `subagentTools.listForAgent(agent)`. Verify `tools/index.ts:merge` doesn't trip on the new entries (subagent tool names are `snake_case`, no collision with daemon tools or `mcp__` namespace). ~15 min.
   7. Tests: `bot-bridge/test/subagent-runner.test.ts` with mocked LLM — system prompt assembled correctly; tool subset filter intersects properly; `parentCtx.state.depth` increments; `depth > limit` throws; missing-tool-name in subagent.tools is silently skipped. `bot-bridge/test/subagent-tools.test.ts` — registry contains exactly the agent's declared subagents; calling `delegate_to_<n>` invokes runner with the right prompt. ~60 min.
+  8. **(forwarded from B2)** Wire chat-tier `ctx.emit` to `daemonClient.emitSseHint` so `invoker.tool_call` / `invoker.subagent_started` / `invoker.subagent_finished` events surface on the SSE stream. B2 stubbed `ctx.emit = () => {}` in `chat.ts:285-287` with a comment pointing at this batch; replace the no-op and add a daemonClient helper if one isn't already in place. AT#3 visibility test depends on this. ~20 min.
 - **Verification (MODE 2 will check):**
   - [ ] `cd openclaw-control/bot-bridge && npx tsc --noEmit` passes.
   - [ ] `npm test -- --grep subagent-runner` passes (5+ assertions: prompt composition, tool filter, depth increment, depth limit throws, missing tool skipped).
@@ -257,6 +258,7 @@ The architect's plan is internally consistent and grounded in spike findings (R1
   10. Wire `daemon/src/index.ts`: `if (config.leader) await materializeAll();` after migrations, before `buildApp`. ~15 min.
   11. Add the missing `.env.example` entries `OPENCLAW_HOST_HOME`, `PTAH_MIN_VERSION`, `OPENCLAW_REQUIRE_COMMUNITY_TIER`, `OPENCLAW_HARNESS_AUTHOR_TIMEOUT_MS`, `OPENCLAW_MCP_MAX_CONCURRENT_SERVERS` (only the subset not already added in B1's TASK_2026_002 env block). ~10 min.
   12. Tests: `daemon/test/harness-launcher.test.ts` (`__setProbedVersionForTests` to fix branch; assert produced bridge body shape per branch). `daemon/test/harness-materialize.test.ts` (golden fixture → exact bytes of settings.json + plugin.json + agents/*.md; idempotent second run returns `changed:false`; privacy-invariant assertion fires on `local-memory/` path). `daemon/test/api-project-files.test.ts` (real-DB pattern from `daemon/test/persona-privacy.test.ts`: tempdir + Fastify `inject`; happy path POST/GET/DELETE; rejection of `..` and absolute paths; 1 MB cap). `daemon/test/api-harness-materialize.test.ts` (POST returns `MaterializeResult`; follower returns 405). ~150 min.
+  13. **(forwarded from B2)** `POST /api/continuation/tick` currently returns counts only (`{dispatched, checkpoints, pending}`). The B2 `dispatch_orchestration_task` tool synthesizes a `dispatchId="dispatched:<n>"` string because no specific id is exposed. If orchestrator-persona consumers need to track the specific dispatch row created during a tool-driven dispatch, extend the tick endpoint to optionally return `dispatchedIds: string[]` (or a similar shape) and update `daemonClient.tickContinuation` + `dispatch_orchestration_task` to surface the real id. Decide here based on whether B7's harness-author dispatch flow needs it; otherwise keep the synthetic-string contract and document the limitation. ~30 min.
 - **Verification (MODE 2 will check):**
   - [ ] `cd openclaw-control/daemon && npx tsc --noEmit` passes.
   - [ ] `npm test -- --grep harness-launcher` passes (both branches assertable via `__setProbedVersionForTests`).

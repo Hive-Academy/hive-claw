@@ -107,6 +107,29 @@ export const daemon = {
   handoff: (slug: string, id: string, toAgent: string, reason?: string) =>
     call('POST', `/api/projects/${slug}/tasks/${id}/handoff`, { toAgent, reason }),
   tick: () => call<{ dispatched: number; checkpoints: number; pending: number }>('POST', '/api/continuation/tick'),
+
+  // -------------------------------------------------------------------------
+  // TASK_2026_002 B2 — daemon-CRUD tool surface helpers.
+  //
+  // These are the canonical names the chat-tier tool registry calls
+  // (tools/daemonTools.ts). They alias the existing helpers above with the
+  // names the impl-plan §`tools/daemonTools.ts` enumerates so the tool
+  // handlers can stay one-line wrappers. We keep the legacy names so the
+  // pre-existing `chat.ts` directive flow doesn't churn — both surfaces
+  // coexist by design.
+  // -------------------------------------------------------------------------
+  approveTask: (
+    slug: string,
+    id: string,
+    body: { phase: string; decision: 'APPROVED' | 'REJECTED'; feedback?: string },
+  ) => call('POST', `/api/projects/${slug}/tasks/${id}/approve`, body),
+  handoffTask: (slug: string, id: string, toAgent: string, reason?: string) =>
+    call('POST', `/api/projects/${slug}/tasks/${id}/handoff`, { toAgent, reason }),
+  tickContinuation: () =>
+    call<{ dispatched: number; checkpoints: number; pending: number }>(
+      'POST',
+      '/api/continuation/tick',
+    ),
   // NOTE: `appendInteraction` was removed in TASK_2026_001 Batch 8 — it was
   // a 4-arg stub that ignored 3 of its arguments, wrote a placeholder body,
   // and silently swallowed errors (`.catch(() => {})`). It had no callers.

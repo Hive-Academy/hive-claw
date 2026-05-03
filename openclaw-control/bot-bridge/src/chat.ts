@@ -1,7 +1,10 @@
 import type { Message } from 'discord.js';
 import { daemon } from './daemonClient.js';
-import { chatComplete } from './llm.js';
+import { chatComplete, chatCompleteWithTools, type ToolDef, type ToolCallContext } from './llm.js';
 import type { AgentDef } from './agentRegistry.js';
+import { config } from './config.js';
+import * as daemonTools from './tools/daemonTools.js';
+import { merge as mergeToolRegistries } from './tools/index.js';
 
 const TOOLBELT_DOC = `## Operational tools (emit at the END of your reply, one per line)
 
@@ -186,14 +189,51 @@ function chunkBy(text: string, max = 1900): string[] {
   return out;
 }
 
-export async function handleChat(agent: AgentDef, msg: Message): Promise<void> {
-  const text = stripMentions(msg.content);
-  if (!text) {
-    await msg.reply('hello — ask me something. for the command list, send `!help`.');
-    return;
+/**
+ * Send `text` back as a Discord reply, chunking to fit the message size cap.
+ *
+ * Extracted from the legacy `handleChat` (TASK_2026_002 B2) so the
+ * tool-calling branch can render its assistant text via the same path.
+ * The byte-level behavior — `msg.reply(chunk)` with a `(channel as any).send`
+ * fallback on throw — is preserved exactly.
+ */
+async function postReply(msg: Message, text: string): Promise<void> {
+  for (const chunk of chunkBy(text)) {
+    try {
+      await msg.reply(chunk);
+    } catch {
+      await (msg.channel as any).send?.(chunk).catch(() => {});
+    }
   }
-  await (msg.channel as any).sendTyping?.().catch(() => {});
+}
 
+/**
+ * Assemble the chat-tier tool registry for this agent.
+ *
+ * Per the impl-plan §"Tool registry & dispatch loop" the registry is the
+ * merge of: daemonTools.list() + (later batches) mcpTools.listForAgent(...) +
+ * subagentTools.list(agent) + (when in harness-authoring mode) the
+ * harness-author tools. B2 ships only the daemon CRUD surface; the other
+ * registries arrive in B3/B4/B5 and slot in here without further chat.ts
+ * churn.
+ */
+async function buildToolRegistry(
+  _agent: AgentDef,
+  _ctx: ToolCallContext,
+): Promise<ToolDef[]> {
+  // Future batches will append registries here. Keep the merge call so
+  // collision policy is exercised even with a single registry.
+  return mergeToolRegistries(daemonTools.list());
+}
+
+/**
+ * Legacy plain-chat path: existing `buildSystemPrompt` + `chatComplete` +
+ * `parseDirectives` flow. Kept byte-identical (TASK_2026_002 B2 hard rule)
+ * so disabling `OPENCLAW_BOT_TOOL_CALLS_ENABLED` produces exactly today's
+ * Discord behavior. Do NOT refactor `buildSystemPrompt` or directive
+ * parsing here — that's B3's territory.
+ */
+async function legacyHandleChat(agent: AgentDef, msg: Message, text: string): Promise<void> {
   const systemPrompt = await buildSystemPrompt(agent, msg);
   const reply = await chatComplete(systemPrompt, text);
 
@@ -218,11 +258,48 @@ export async function handleChat(agent: AgentDef, msg: Message): Promise<void> {
     final = `${stripped}\n\n— actions —\n${results.join('\n')}`;
   }
 
-  for (const chunk of chunkBy(final)) {
-    try {
-      await msg.reply(chunk);
-    } catch {
-      await (msg.channel as any).send?.(chunk).catch(() => {});
-    }
+  await postReply(msg, final);
+}
+
+export async function handleChat(agent: AgentDef, msg: Message): Promise<void> {
+  const text = stripMentions(msg.content);
+  if (!text) {
+    await msg.reply('hello — ask me something. for the command list, send `!help`.');
+    return;
   }
+  await (msg.channel as any).sendTyping?.().catch(() => {});
+
+  // TASK_2026_002 B2 — feature-flagged tool-calling branch.
+  // When OPENCLAW_BOT_TOOL_CALLS_ENABLED=1, build the per-persona tool
+  // registry and run the OpenAI-compatible tool-call loop. On truthy
+  // assistant content we surface it directly (the tool calls themselves
+  // already mutated daemon state, so no <<oc:...>> directive layer is
+  // needed). On null content (provider error / no usable text) we fall
+  // through to the legacy directive flow — the safety net survives.
+  if (config.toolCallsEnabled) {
+    const ctx: ToolCallContext = {
+      agentId: agent.id,
+      userId: msg.author.id,
+      channelId: msg.channel.id,
+      state: new Map(),
+      // B2 wires emit to a no-op; B5 will route this to daemonClient.emitSseHint
+      // so operators see invoker.tool_call events on the SSE stream.
+      emit: () => {},
+    };
+    const tools = await buildToolRegistry(agent, ctx);
+    const systemPrompt = await buildSystemPrompt(agent, msg);
+    const result = await chatCompleteWithTools(
+      systemPrompt,
+      [{ role: 'user', content: text }],
+      tools,
+      ctx,
+      { maxDepth: config.toolCallDepthLimit },
+    );
+    if (result.content) {
+      return await postReply(msg, result.content);
+    }
+    // Fall through to the legacy path on null content.
+  }
+
+  return await legacyHandleChat(agent, msg, text);
 }
