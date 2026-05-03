@@ -257,3 +257,102 @@ The runtime payload is whatever the second arg of each `broadcast()` call evalua
 ```
 
 `done` / `failed` / `poisoned` are terminal. The partial UNIQUE index `dispatches_unique_open` only enforces uniqueness for `state IN ('pending','taken')`, so the continuation loop can issue a fresh pending row once an open row terminates (or is deleted via the recipes above).
+
+---
+
+## 7. Rollback: turn off tool-calling chat
+
+The tool-calling chat path (TASK_2026_002 B1–B8) is gated by a single env flag. Flipping it back to `0` falls through to the legacy `chatComplete` codepath — byte-equivalent to pre-B2 behavior, including the `<<oc:>>` directive parser. Use this when a misbehaving harness, a flaky MCP server, or a regression in the tool-call loop needs to be neutralized fast.
+
+1. Set the flag in `.env` on every host running a bot-bridge:
+
+   ```bash
+   sed -i 's|^OPENCLAW_BOT_TOOL_CALLS_ENABLED=.*|OPENCLAW_BOT_TOOL_CALLS_ENABLED=0|' .env
+   ```
+
+2. Restart the container (the bot-bridge boots inside the same image as the daemon and gateway):
+
+   ```bash
+   docker compose restart openclaw
+   ```
+
+3. Verify chat falls through to the legacy path. @mention an agent that previously had a harness with tools — the reply should be plain text only, no tool-call evidence in the SSE stream:
+
+   ```bash
+   curl -N -H "Authorization: Bearer $OPENCLAW_INTERNAL_TOKEN" \
+     "http://localhost:7878/api/stream?topics=invoker"
+   # While that's open, ping the agent in Discord. No `invoker.tool_call`
+   # events should appear. Plain-chat replies do not emit on this topic.
+   ```
+
+4. Confirm the bot-bridge log records the flag-off branch:
+
+   ```bash
+   docker compose exec openclaw grep 'tool_calls_enabled=0\|chatComplete fallback' /tmp/openclaw-control-bot.log | tail -5
+   ```
+
+When the flag is `0`, the legacy `<<oc:>>` directive path is byte-equivalent to pre-B2. Personas that depended on tool calls (Horus's MCP `gh` server, `delegate_to_subagent`, etc.) lose those capabilities and fall back to whatever the directive grammar can express; the agent will still respond, just without tools. Re-enable by reversing step 1 and restarting.
+
+---
+
+## 8. Harness-resync runbook
+
+The `harness.yaml` lives in shared memory at `agents/<id>/harness.yaml`. Edits do NOT auto-apply — the bot-bridge caches a parsed harness per agent at boot and at every Redis `harness/sync` event. To push a change cleanly:
+
+1. PUT the new YAML body to shared memory. The internal-token bearer is the only credential the daemon accepts on this path. The body is the literal YAML; `Content-Type` must be `application/yaml` (or `text/yaml`):
+
+   ```bash
+   curl -fsS -X PUT \
+     -H "Authorization: Bearer $OPENCLAW_INTERNAL_TOKEN" \
+     -H 'Content-Type: application/yaml' \
+     --data-binary @./harness.yaml \
+     "http://localhost:7878/api/memories/agents/<id>/harness.yaml"
+   ```
+
+2. Trigger the resync. This publishes `harness/sync` on Redis (which the bot-bridge consumes to invalidate its cache) AND on the leader runs `materializeAgent` to write the per-agent ptah config tree under `~/.ptah/agents/<id>/`:
+
+   ```bash
+   curl -fsS -X POST \
+     -H "Authorization: Bearer $OPENCLAW_INTERNAL_TOKEN" \
+     "http://localhost:7878/api/agents/<id>/harness/sync"
+   ```
+
+3. Confirm the SSE event fires. In a separate terminal, before step 2:
+
+   ```bash
+   curl -N -H "Authorization: Bearer $OPENCLAW_INTERNAL_TOKEN" \
+     "http://localhost:7878/api/stream?topics=harness"
+   # Expect: harness.synced (always) and harness.materialized (leader only,
+   # with `changed: true` when the YAML actually altered the materialized tree).
+   ```
+
+4. Confirm the next chat with the agent reflects the new harness. A simple smoke is to ask the agent which tools/skills it has — the buildSystemPrompt output enumerates them, and a new skill name will appear in the reply. The bot-bridge log records the cache invalidation:
+
+   ```bash
+   docker compose exec openclaw grep 'reloadAgent.*<id>\|harnessVersion=' /tmp/openclaw-control-bot.log | tail -5
+   ```
+
+If `harness.materialized` does not fire, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md#symptom-harnesssync-didnt-fire-no-harnessmaterialized-event-after-post-apiagentsidharnesssync). If `materializeAgent` fails mid-flight (filesystem error, bad YAML, path-traversal in agent id), see [the materialize-failed entry](TROUBLESHOOTING.md#symptom-materialize-failed-persona-stuck-on-old-config).
+
+---
+
+## 9. MCP integration smoke test
+
+The MCP path has an integration test that spawns a real `@modelcontextprotocol/server-everything` stdio server and exercises start/list/call/stop end-to-end. The package is intentionally NOT in `bot-bridge/package.json` deps — it's a local-only diagnostic, never run in CI — so the test is gated behind `OPENCLAW_TEST_REAL_MCP=1` and otherwise skips silently.
+
+Precondition (one-time per checkout):
+
+```bash
+cd openclaw-control/bot-bridge
+npm i -D @modelcontextprotocol/server-everything
+```
+
+Run:
+
+```bash
+OPENCLAW_TEST_REAL_MCP=1 npm test -- --test-name-pattern mcp-everything
+```
+
+Expected: `mcp-everything: …` test passes; without the env var the same test shows as `skipped` in `npm test` output (this is normal — the gated test is `t.skip()`-ing itself, not failing).
+
+When to run it: after any change to `bot-bridge/src/mcp/mcpManager.ts`, before flipping `OPENCLAW_BOT_TOOL_CALLS_ENABLED=1` in production for the first time, or when diagnosing "tools missing from chat" against a real MCP server.

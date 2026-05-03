@@ -540,6 +540,141 @@ If empty, the build step in the Dockerfile failed silently. `docker compose up -
 
 ---
 
+## Tool-calling chat and harness materialization
+
+Entries below cover the TASK_2026_002 surface: the inline tool-call loop, native skill loading, MCP servers, harness materialization, and the host/container path mapping that backs all of it. If a chat regression appears suddenly and you can't pin it, the rollback is one env flag — see [OPERATIONS.md §7](OPERATIONS.md#7-rollback-turn-off-tool-calling-chat).
+
+### Symptom: MCP server failed and tools missing from chat
+
+A persona's harness lists an MCP server, but `mcp__<server>__*` tools never appear in tool-call output. The bot-bridge log shows `[mcp] <agent>/<server> backoff exhausted after 6 attempts — emitting mcp.server_failed`.
+
+The MCP manager's spawn/respawn loop uses a hard-coded backoff curve `[1000, 2000, 4000, 8000, 16000, 30000]` ms — six attempts total. After the sixth crash the entry flips to `failed=true`, an `mcp.server_failed` SSE event fires, and `getOpenServers()` filters that server out of every subsequent tool list. The chat keeps working without it; the agent just doesn't know the tool exists.
+
+**Diagnose**:
+
+```bash
+# Watch the SSE stream for the fail event:
+curl -N -H "Authorization: Bearer $OPENCLAW_INTERNAL_TOKEN" \
+  "http://localhost:7878/api/stream?topics=mcp"
+
+# And read the bot-bridge log for the actual stderr from the dying child:
+docker compose exec openclaw grep -E '\[mcp\] .*spawn|exit|backoff' \
+  /tmp/openclaw-control-bot.log | tail -30
+```
+
+Common root causes: the MCP server's binary isn't on `PATH` inside the container, a required env var (`GH_TOKEN` for `gh`, etc.) is unset, or the package's stdio protocol mismatched the SDK version.
+
+**Fix** — once the underlying issue is resolved, the cleanest recovery is a harness resync (which tears down and respawns the MCP entry from scratch). See [OPERATIONS.md §8](OPERATIONS.md#8-harness-resync-runbook). If you want to skip the YAML edit and just kick the manager, restart the container — the bot-bridge re-instantiates `mcpManager` on boot:
+
+```bash
+docker compose restart openclaw
+```
+
+There is no `POST /api/agents/<id>/mcp/resync` endpoint (B9 audit confirmed). The harness-sync path is the supported manual reconcile.
+
+Reference: `bot-bridge/src/mcp/mcpManager.ts` (`BACKOFF_CURVE_MS` constant + `respawn` logic).
+
+### Symptom: harness/sync didn't fire — no `harness.materialized` event after `POST /api/agents/<id>/harness/sync`
+
+You PUT a new `harness.yaml` to shared memory and POST'd to `/harness/sync`, but no SSE event arrived on `?topics=harness` and the agent's chat behavior is unchanged. Three things to check, in order.
+
+1. **Redis is reachable from the container.** The harness-sync fanout is a Redis pub/sub. If Redis is down or partitioned, the leader emits the event locally but no follower hears it; on a single-host install the local emit still works, but on a multi-host install only the leader's bot-bridge sees it.
+
+   ```bash
+   docker compose exec openclaw redis-cli -h "${REDIS_HOST:-redis}" ping
+   # Expect: PONG
+   ```
+
+2. **The daemon successfully subscribed.** If the daemon couldn't `psubscribe` at boot (auth failure, DNS hiccup), it logs a one-shot error and silently continues without pub/sub. Grep for it:
+
+   ```bash
+   docker compose exec openclaw grep -E 'psubscribe|REDIS|\[bus\]' \
+     /tmp/openclaw-control-daemon.log | tail -20
+   ```
+
+3. **The agent ID is in `OPENCLAW_LOCAL_AGENT_IDS` on the materializing machine.** `materializeAgent` is leader-only (followers return 405 on `/api/agents/<id>/harness/materialize`). If the leader's `.env` doesn't list `<id>`, the materialize step is correctly skipped and only `harness.synced` fires (no `harness.materialized`). The bot-bridge cache invalidates fine, but no on-disk ptah config is rewritten.
+
+   ```bash
+   docker compose exec openclaw printenv OPENCLAW_LOCAL_AGENT_IDS
+   docker compose exec openclaw printenv OPENCLAW_LEADER
+   # If LEADER=1 and the id is missing from the comma-list, add it and restart.
+   ```
+
+### Symptom: materialize failed; persona stuck on old config
+
+`POST /api/agents/<id>/harness/sync` returned 200 and `harness.synced` fired, but `harness.materialized` never arrived OR the next dispatch still uses an old `settings.json`. This means `materializeAgent` threw mid-flight.
+
+There is no `harness.materialize_failed` SSE event in the current daemon — failures surface as a 400 from `POST /api/agents/<id>/harness/materialize` and as a thrown exception inside the Redis-fanout handler in `daemon/src/bus.ts`. Diagnose via the daemon log:
+
+```bash
+docker compose exec openclaw grep -E 'materialize|assertMaterializedPathSafety|harness/materialize' \
+  /tmp/openclaw-control-daemon.log | tail -30
+```
+
+Common failures:
+
+- **`assertMaterializedPathSafety: refusing to write under local-memory`** — the resolved output path landed under `~/.claude/local-memory/`. This is layer 4 of the privacy invariant doing its job (see [SECURITY.md](SECURITY.md#persona-privacy-invariant)). Root cause is almost always a misconfigured `OPENCLAW_HOST_HOME` overlapping with `OPENCLAW_LOCAL_MEMORY` — fix the env, don't bypass the guard.
+- **`invalid id` / `invalid filename` from `safeId`/`safeFile`** — the agent id contained characters outside `[A-Za-z0-9_\-.]`. Rename the agent.
+- **YAML parse error from `parseHarnessYaml`** — re-PUT a valid YAML body. The validator log line names the offending field.
+
+**Manual retry** once the underlying issue is fixed:
+
+```bash
+curl -fsS -X POST \
+  -H "Authorization: Bearer $OPENCLAW_INTERNAL_TOKEN" \
+  "http://localhost:7878/api/agents/<id>/harness/materialize"
+# Expect: { agentId, changed, settingsPath, pluginDir }
+```
+
+Partial writes from a previous failure live under `~/.ptah/agents/<id>/` and `~/.ptah/plugins/openclaw-<id>-harness/`. The materializer is idempotent — re-running over a partial state converges to the YAML's intent. If you want a clean slate:
+
+```bash
+rm -rf "${OPENCLAW_HOST_HOME:-$HOME}/.ptah/agents/<id>"
+rm -rf "${OPENCLAW_HOST_HOME:-$HOME}/.ptah/plugins/openclaw-<id>-harness"
+# Then POST /harness/materialize again.
+```
+
+### Symptom: host/container path mismatch (R5) — `/health.ptahConfigDirExists: false` or ptah can't find its config
+
+The daemon emits absolute host paths (e.g. `/home/anubis/.ptah/agents/horus/settings.json`) and hands them to the host-side ptah-bridge, which spawns ptah with `--config <that path>`. The bind-mount in `docker-compose.yml` is identity-mapped:
+
+```yaml
+volumes:
+  - ${OPENCLAW_HOST_HOME:-${HOME}}/.ptah:${OPENCLAW_HOST_HOME:-${HOME}}/.ptah:rw
+```
+
+so the same path resolves on both sides. When `OPENCLAW_HOST_HOME` is wrong (e.g. set to `/home/agent` because someone copied the container user's home), the bind-mount silently maps the wrong host directory and the materialized files land somewhere ptah doesn't look.
+
+**Diagnose** — three signals, escalating in severity:
+
+```bash
+# 1. Bridge-side health surfaces dir existence:
+curl -fsS http://host.docker.internal:8744/health \
+  | jq '{ptahConfigDirExists, ptahPluginsDirExists, hostUser}'
+# Both booleans should be true on a healthy install.
+
+# 2. Container side: confirm the daemon resolves the same path:
+docker compose exec openclaw printenv OPENCLAW_HOST_HOME
+docker compose exec openclaw ls -la "${OPENCLAW_HOST_HOME:-/home/anubis}/.ptah/agents/" 2>&1
+
+# 3. Host side: confirm ptah-bridge sees the same dir:
+ls -la "${OPENCLAW_HOST_HOME:-$HOME}/.ptah/agents/"
+```
+
+If `(1)` is `false`, the bind-mount didn't take or the dir was never created. Re-run `entrypoint.sh`'s `mkdir -p` step manually:
+
+```bash
+docker compose exec openclaw bash -c \
+  'mkdir -p "${OPENCLAW_HOST_HOME:-$HOME}/.ptah/agents" \
+            "${OPENCLAW_HOST_HOME:-$HOME}/.ptah/plugins"'
+```
+
+If `(2)` and `(3)` show different content for the same path, the bind-mount is mapping the wrong host dir. Fix `.env` (`OPENCLAW_HOST_HOME=/home/<your-actual-host-user>`) and `docker compose up -d` (recreate, not just restart — bind-mounts are baked at create-time).
+
+This was R5 in `.ptah/specs/TASK_2026_002/spike-findings.md` and the bind-mount is its mitigation. The `/health` fields exist specifically so a future `/api/health` aggregator can fail fast on this mismatch instead of letting ptah spawn against a missing config.
+
+---
+
 ## Last resorts
 
 ### Nuclear reset (loses bot memory)

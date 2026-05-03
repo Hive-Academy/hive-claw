@@ -121,7 +121,15 @@ What this layer does is hard-assert the new writer cannot accidentally reach the
 
 All four invariants — DB never holds a private row, HTTP API responds 403 (write) and 404 (read) on a private filename, and the materializer refuses any path under local-memory — are continuously verified by `openclaw-control/daemon/test/persona-privacy.test.ts` and (for layer 4) by the materialize unit tests.
 
-Audit note (TASK_2026_002 forward-looking, not a fix for a known vulnerability): `safeFile`'s `.yaml` extension allowance in `daemon/src/memory.ts` was added in B3 to enable `harness.yaml` shared-memory storage. The privacy invariant is currently intact because `PRIVATE_AGENT_FILES` is a literal-set match — `persona.yaml` is NOT a member and would route to shared, which is documented behavior, not a leak. A future surface-area minimization would scope-narrow the regex to `harness.yaml` only, or extension-gate by scope. Tracked as a backlog audit item.
+**Audit note — `.yaml` extension allowance in `safeFile`** (TASK_2026_002 B9, forward-looking; not a fix for a known vulnerability):
+
+`safeFile` in `daemon/src/memory.ts` is the regex gate for filenames that are allowed to traverse the memory API. The current allow-list is `^[A-Za-z0-9_\-.]+\.(md|json|yaml)$`. The `.yaml` arm was added in B3 to permit `harness.yaml` storage in shared memory. Auditing it in B9:
+
+- **Privacy invariant intact.** `PRIVATE_AGENT_FILES = {persona.md, secrets.md, persona.json, secrets.json}` is a literal-set match in `resolveBackend` and in `MemoryRepo.assertNotPrivate`. A request for `persona.yaml` does not match the set, would route to the shared backend, and would be served exactly like any other public file. That is documented behavior — `persona.yaml` is not a private filename today.
+- **No known leak.** No code path inside the daemon, bot-bridge, or materialize tree writes a `.yaml` file containing persona-private content. The materializer's outputs are public-by-construction (skill names, MCP server specs, subagent system prompts) and are written to `~/.ptah/`, never to the memory API.
+- **Surface-area recommendation.** Keep the allowance as-is for now. If more YAML-shaped agent files are introduced later (e.g., `secrets.yaml`, an alternate persona format), `PRIVATE_AGENT_FILES` should grow at the same time, OR the allowance should be scope-gated — restricted to `harness.yaml` literally, or to non-`agents` scopes. Either narrowing is mechanical when the need appears; pre-narrowing today would just make adding a future public YAML file harder without closing any actual gap.
+
+Cross-reference: the `safeFile` regex and the `PRIVATE_AGENT_FILES` constant are co-located in `daemon/src/memory.ts` and `daemon/src/db/memory.ts` respectively, so any future change touches both files in one PR by construction.
 
 Things the system does **not** guarantee:
 
