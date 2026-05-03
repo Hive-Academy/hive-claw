@@ -2,6 +2,8 @@
 
 The canonical doc for everything sitting on top of the openclaw gateway. If you only have one machine and one bot and you're happy with `@<bot> hello` in Discord, you don't need this — read [SETUP.md](SETUP.md) and stop. If you want a fleet of bots, each running on its own machine, sharing one task tree, picking up work from each other, and reachable from a single dashboard, read on.
 
+> Operator workflows (register a new agent, add a skill, drive harness-authoring) live in [PLAYBOOKS.md](PLAYBOOKS.md).
+
 ---
 
 ## What it is

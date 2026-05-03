@@ -13,6 +13,9 @@ hero:
       text: Control Plane
       link: /OPENCLAW_CONTROL
     - theme: alt
+      text: Playbooks
+      link: /PLAYBOOKS
+    - theme: alt
       text: GitHub
       link: https://github.com/Hive-Academy/hive-claw
 
