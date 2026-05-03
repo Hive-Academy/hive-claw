@@ -5,8 +5,10 @@ import type { AgentDef } from './agentRegistry.js';
 import { config } from './config.js';
 import * as daemonTools from './tools/daemonTools.js';
 import * as mcpTools from './tools/mcpTools.js';
+import * as subagentTools from './tools/subagentTools.js';
 import { merge as mergeToolRegistries } from './tools/index.js';
 import { loadSkills, type LoadedSkill } from './skills/skillLoader.js';
+import { PARENT_TOOL_REGISTRY_STATE_KEY } from './subagents/subagentRunner.js';
 
 const TOOLBELT_DOC = `## Operational tools (emit at the END of your reply, one per line)
 
@@ -263,12 +265,17 @@ async function buildToolRegistry(
   agent: AgentDef,
   _ctx: ToolCallContext,
 ): Promise<ToolDef[]> {
-  // TASK_2026_002 B4 — merge in the per-agent MCP tool slice. mcpTools is a
-  // pure function over the manager's current open-server set: failed/backoff
-  // servers are filtered at the source, so their tools never appear here.
-  // Subagent tools (B5) and the harness-author surface (B7) plug in the
-  // same way.
-  return mergeToolRegistries(daemonTools.list(), mcpTools.listForAgent(agent.id));
+  // TASK_2026_002 B5 — merge in the per-agent subagent tool slice. The list is
+  // empty when the persona has no harness or no declared subagents, so the
+  // existing collision-policy behavior (impl-plan §"Tool registry & dispatch
+  // loop") stays intact for personas that never delegate. Subagent tool names
+  // are snake_case (`delegate_to_subagent`, `delegate_to_<n>`) so they don't
+  // collide with daemon CRUD tools or the `mcp__` namespace.
+  return mergeToolRegistries(
+    daemonTools.list(),
+    mcpTools.listForAgent(agent.id),
+    subagentTools.listForAgent(agent),
+  );
 }
 
 /**
@@ -338,6 +345,12 @@ export async function handleChat(agent: AgentDef, msg: Message): Promise<void> {
       },
     };
     const tools = await buildToolRegistry(agent, ctx);
+    // TASK_2026_002 B5 — stash the parent tool registry on the shared state
+    // map so `subagentRunner.run` can intersect against it without a circular
+    // import (chat.ts → subagentTools.ts → subagentRunner.ts → chat.ts would
+    // otherwise be the path). Any nested subagent inherits the SAME parent's
+    // registry via `buildChildContext` cloning the state map verbatim.
+    ctx.state.set(PARENT_TOOL_REGISTRY_STATE_KEY, tools);
     const systemPrompt = await buildSystemPrompt(agent, msg);
     const result = await chatCompleteWithTools(
       systemPrompt,

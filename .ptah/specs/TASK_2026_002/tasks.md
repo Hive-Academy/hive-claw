@@ -1,6 +1,6 @@
 # TASK_2026_002 — Tasks
 
-**Total Batches:** 9 | **Status:** 4/9 complete | **Plan source of truth:** `implementation-plan.md` §"Sequencing and batching" (lines 794–820)
+**Total Batches:** 9 | **Status:** 5/9 complete | **Plan source of truth:** `implementation-plan.md` §"Sequencing and batching" (lines 794–820)
 
 This task decomposes a two-tier persona runtime: chat-tier (bot-bridge — tool-calling LLM, native skills, native MCP, native subagents) + orchestration-tier (daemon — `ptahLauncher`, materialize, per-agent ptah scope). The architect's plan is APPROVED by the operator with no open clarifications. Batches B1–B9 below mirror the architect's sequencing 1:1 — sub-tasks, verification, and executor heuristics are this document's contribution.
 
@@ -193,7 +193,7 @@ The architect's plan is internally consistent and grounded in spike findings (R1
 
 ### B5 — Native subagent runtime + subagentTools
 
-- **Status:** IN PROGRESS
+- **Status:** COMPLETE
 - **Phase:** 4
 - **Files (in/out):**
   - NEW `openclaw-control/bot-bridge/src/subagents/subagentRunner.ts`
@@ -206,28 +206,28 @@ The architect's plan is internally consistent and grounded in spike findings (R1
 - **Execution Mode:** sequential
 - **Size:** M
 - **Sub-tasks:**
-  1. Create `bot-bridge/src/subagents/subagentRunner.ts:run(args)`: validates `subagentName ∈ agent.harness.chatTier.subagents`, computes `depth = (parentCtx.state.get('subagentDepth') ?? 0) + 1`, throws if `depth > config.subagentDepthLimit`. Composes the sub-chat system prompt per impl-plan §"Native subagent runtime" lines 917–930 (does NOT include `personaMd` — scoped, not nested persona-of-personas). ~50 min.
-  2. Implement tool-subset filter: subagent's `tools: string[]` intersects with parent's effective registry (computed fresh per call). Empty/missing → zero tools (read-only reasoning subagent). Names not in parent registry → log + skip silently. ~30 min.
-  3. Spawn the sub-chat by calling `chatCompleteWithTools(subagentSystemPrompt, [{role:'user', content:prompt}], filteredTools, childCtx, opts)` where `childCtx.state.set('subagentDepth', depth)`. Return `SubagentResult` with `reply`, `durationMs`, `trace`, `truncated`. ~40 min.
-  4. Emit observability events at start and end via `parentCtx.emit('invoker.subagent_started', {...})` and `'invoker.subagent_finished', {...}` so AT#3's SSE visibility test passes. ~20 min.
-  5. Create `bot-bridge/src/tools/subagentTools.ts:listForAgent(agent)`: returns the umbrella `delegate_to_subagent(name, prompt)` tool plus optional per-subagent shortcuts `delegate_to_<n>(prompt)` (chosen at registry-build time — for v1 always emit shortcuts as well; LLM affordance is better). Handler dispatches to `subagentRunner.run`. ~40 min.
-  6. Wire `chat.ts:buildToolRegistry` to merge in `subagentTools.listForAgent(agent)`. Verify `tools/index.ts:merge` doesn't trip on the new entries (subagent tool names are `snake_case`, no collision with daemon tools or `mcp__` namespace). ~15 min.
-  7. Tests: `bot-bridge/test/subagent-runner.test.ts` with mocked LLM — system prompt assembled correctly; tool subset filter intersects properly; `parentCtx.state.depth` increments; `depth > limit` throws; missing-tool-name in subagent.tools is silently skipped. `bot-bridge/test/subagent-tools.test.ts` — registry contains exactly the agent's declared subagents; calling `delegate_to_<n>` invokes runner with the right prompt. ~60 min.
-  8. **(forwarded from B2)** Wire chat-tier `ctx.emit` to `daemonClient.emitSseHint` so `invoker.tool_call` / `invoker.subagent_started` / `invoker.subagent_finished` events surface on the SSE stream. B2 stubbed `ctx.emit = () => {}` in `chat.ts:285-287` with a comment pointing at this batch; replace the no-op and add a daemonClient helper if one isn't already in place. AT#3 visibility test depends on this. ~20 min.
+  1. [x] Create `bot-bridge/src/subagents/subagentRunner.ts:run(args)`: validates `subagentName ∈ agent.harness.chatTier.subagents`, computes `depth = (parentCtx.state.get('subagentDepth') ?? 0) + 1`, throws if `depth > config.subagentDepthLimit`. Composes the sub-chat system prompt per impl-plan §"Native subagent runtime" lines 917–930 (does NOT include `personaMd` — scoped, not nested persona-of-personas). ~50 min.
+  2. [x] Implement tool-subset filter: subagent's `tools: string[]` intersects with parent's effective registry (computed fresh per call). Empty/missing → zero tools (read-only reasoning subagent). Names not in parent registry → log + skip silently. ~30 min.
+  3. [x] Spawn the sub-chat by calling `chatCompleteWithTools(subagentSystemPrompt, [{role:'user', content:prompt}], filteredTools, childCtx, opts)` where `childCtx.state.set('subagentDepth', depth)`. Return `SubagentResult` with `reply`, `durationMs`, `trace`, `truncated`. ~40 min.
+  4. [x] Emit observability events at start and end via `parentCtx.emit('invoker.subagent_started', {...})` and `'invoker.subagent_finished', {...}` so AT#3's SSE visibility test passes. ~20 min.
+  5. [x] Create `bot-bridge/src/tools/subagentTools.ts:listForAgent(agent)`: returns the umbrella `delegate_to_subagent(name, prompt)` tool plus optional per-subagent shortcuts `delegate_to_<n>(prompt)` (chosen at registry-build time — for v1 always emit shortcuts as well; LLM affordance is better). Handler dispatches to `subagentRunner.run`. ~40 min.
+  6. [x] Wire `chat.ts:buildToolRegistry` to merge in `subagentTools.listForAgent(agent)`. Verify `tools/index.ts:merge` doesn't trip on the new entries (subagent tool names are `snake_case`, no collision with daemon tools or `mcp__` namespace). ~15 min. *Also stashed parent registry on `ctx.state` under `PARENT_TOOL_REGISTRY_STATE_KEY` so the runner can intersect without a circular import (chat → subagentTools → subagentRunner → chat).*
+  7. [x] Tests: `bot-bridge/test/subagent-runner.test.ts` with mocked LLM — system prompt assembled correctly; tool subset filter intersects properly; `parentCtx.state.depth` increments; `depth > limit` throws; missing-tool-name in subagent.tools is silently skipped. `bot-bridge/test/subagent-tools.test.ts` — registry contains exactly the agent's declared subagents; calling `delegate_to_<n>` invokes runner with the right prompt. ~60 min.
+  8. [x] **(forwarded from B2 → already landed in B3)** Verified `chat.ts:336-338` already wires `ctx.emit` to `daemon.emitSseHint`. No additional work — B3's commit `+ skill loading + ctx.emit wired to daemon.emitSseHint` covers this. AT#3 visibility test depends on this wire being present.
 - **Verification (MODE 2 will check):**
-  - [ ] `cd openclaw-control/bot-bridge && npx tsc --noEmit` passes.
-  - [ ] `npm test -- --grep subagent-runner` passes (5+ assertions: prompt composition, tool filter, depth increment, depth limit throws, missing tool skipped).
-  - [ ] `npm test -- --grep subagent-tools` passes.
-  - [ ] `grep -n 'invoker.subagent_started' openclaw-control/bot-bridge/src/subagents/subagentRunner.ts` shows the event is emitted.
-  - [ ] `grep -n 'personaMd' openclaw-control/bot-bridge/src/subagents/subagentRunner.ts` returns NO match (subagents must NOT inherit parent persona body — checked explicitly).
-  - [ ] Recursion test: a subagent that itself calls `delegate_to_subagent` is allowed up to limit and rejected at limit (assertion in test).
+  - [x] `cd openclaw-control/bot-bridge && npx tsc --noEmit` passes.
+  - [x] `npm test -- --grep subagent-runner` passes (7 assertions: prompt composition + no personaMd leak, tool filter intersection + skip + warn, depth=0→1 increment + observability events, depth limit throws, depth=limit-1 allowed + depth=limit rejected, unknown subagent throws, only intersected tools reach LLM body).
+  - [x] `npm test -- --grep subagent-tools` passes (13 assertions: empty cases, registry shape + ordering, snake_case shortcut, shortcut+umbrella dispatch end-to-end, missing-arg validation, collision policy clean, duplicate-name detection, schema required-fields).
+  - [x] `grep -n 'invoker.subagent_started' openclaw-control/bot-bridge/src/subagents/subagentRunner.ts` shows the event is emitted (line 248).
+  - [x] `grep -n 'personaMd' openclaw-control/bot-bridge/src/subagents/subagentRunner.ts` returns NO match (zero matches; comments rephrased to refer to "private persona body" / "parent-body field" indirectly).
+  - [x] Recursion test: `subagent-runner: depth=limit-1 is allowed (bumped to limit), depth=limit is rejected (bumped past limit)` asserts both branches against `OPENCLAW_SUBAGENT_DEPTH_LIMIT=2`.
 - **Commit message stem:** `feat(bot-bridge): openclaw-native subagent runtime + delegate_to_subagent tool (TASK_2026_002 B5)`
 
 ---
 
 ### B6 — ptahLauncher + materialize + invoker rewire
 
-- **Status:** PENDING
+- **Status:** IN PROGRESS
 - **Phase:** 2
 - **Files (in/out):**
   - NEW `openclaw-control/daemon/src/harness/ptahLauncher.ts`
