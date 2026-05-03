@@ -9,7 +9,8 @@ import { listSessions, tailSession, newestSessionForProject } from './sessions.j
 import { attachSse, broadcast } from './sse.js';
 import { registerAuth, requireAuth } from './auth.js';
 import { MemoryError } from './memory.js';
-import { publishHandoff } from './bus.js';
+import { publishHandoff, publishHarnessSync } from './bus.js';
+import { harnessHash } from './harness/types.js';
 import {
   PRIVATE_AGENT_FILES,
   isTerminalState,
@@ -468,6 +469,35 @@ export function buildApp() {
   // --- agents -----------------------------------------------------------
   app.get('/api/agents', { preHandler: guard }, async () => storage.listAgentsList());
 
+  // POST /api/agents/:id/harness/sync — TASK_2026_002 B3.
+  //
+  // Re-reads the persona's harness.yaml from shared memory, computes the
+  // sha256 hash, and publishes a `harness/sync` event so the bot-bridge
+  // hot-reloads that agent. Leader-only: followers return 405 because the
+  // shared-memory read goes through `storage.readMemory`, which would relay
+  // back to the leader anyway — having the leader own the publish keeps
+  // the broadcast topology a single hop.
+  //
+  // Auth: `guard` (cookie-JWT or internal-token bearer). The bot-bridge,
+  // dispatched agents, or an operator-driven curl can all reach this.
+  app.post<{ Params: { id: string } }>(
+    '/api/agents/:id/harness/sync',
+    { preHandler: guard },
+    async (req, reply) => {
+      if (!config.leader) {
+        return reply
+          .code(405)
+          .send({ error: 'harness/sync is leader-only — POST to OPENCLAW_LEADER_URL instead' });
+      }
+      const agentId = req.params.id;
+      const r = await storage.readMemory('agents', agentId, 'harness.yaml');
+      if (!r) return reply.code(404).send({ error: 'harness.yaml not found' });
+      const hash = harnessHash(r.content);
+      await publishHarnessSync({ agentId, harnessHash: hash });
+      return { ok: true, agentId, harnessHash: hash };
+    },
+  );
+
   // --- sessions ---------------------------------------------------------
   app.get('/api/sessions', { preHandler: guard }, async () => listSessions());
 
@@ -556,6 +586,29 @@ export function buildApp() {
         const message = err instanceof Error ? err.message : 'delete failed';
         return reply.code(400).send({ error: message });
       }
+    },
+  );
+
+  // POST /api/sse/emit — TASK_2026_002 B3 placeholder.
+  //
+  // The bot-bridge's `daemonClient.emitSseHint` POSTs chat-tier observability
+  // hints (`invoker.tool_call`, `invoker.subagent_started`, …) here so they
+  // surface on `/api/stream`. **B6 owns the real implementation** — it will
+  // validate the `event` prefix, rate-limit the channel, and call
+  // `broadcast(event, data)`. Until B6 lands we accept and broadcast as-is
+  // so AT#3 (visibility) can be exercised end-to-end without a 404.
+  app.post<{ Body: { event: string; data: unknown } }>(
+    '/api/sse/emit',
+    { preHandler: guard },
+    async (req, reply) => {
+      const event =
+        typeof req.body?.event === 'string' && req.body.event.length > 0
+          ? req.body.event
+          : null;
+      if (!event) return reply.code(400).send({ error: 'body.event (string) required' });
+      // B6: tighten validation (allowed prefix list, rate limit, audit).
+      broadcast(event, req.body?.data ?? null);
+      return { ok: true };
     },
   );
 

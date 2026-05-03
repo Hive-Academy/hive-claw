@@ -58,7 +58,10 @@ function safeId(id: string): string {
 }
 
 function safeFile(name: string): string {
-  if (!/^[A-Za-z0-9_\-.]+\.(md|json)$/.test(name)) throw new MemoryError('invalid filename');
+  // .yaml is allowed for harness.yaml (TASK_2026_002 B3) — public, shared-tier
+  // memory. The persona-privacy invariant is unaffected because PRIVATE_AGENT_FILES
+  // is the gate for what stays local, not the extension allow-list.
+  if (!/^[A-Za-z0-9_\-.]+\.(md|json|yaml)$/.test(name)) throw new MemoryError('invalid filename');
   return name;
 }
 

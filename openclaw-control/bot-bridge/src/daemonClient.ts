@@ -142,4 +142,28 @@ export const daemon = {
   readAgentIdentity,
   readDiscordJson,
   readHarnessYaml,
+
+  /**
+   * Forward a chat-tier observability event to the daemon's SSE bus
+   * (TASK_2026_002 B3 — forwarded sub-task 8 from B2).
+   *
+   * The chat-tier `ctx.emit` callback in `chat.ts` routes through here so
+   * `invoker.tool_call` / `invoker.subagent_started` / `invoker.subagent_finished`
+   * surface on `/api/stream` for the dashboard. AT#3 (visibility) hangs on
+   * this wire being present.
+   *
+   * Posts to `POST /api/sse/emit` with `{ event, data }`. **B6 owns the
+   * daemon-side endpoint** — for the B3 cut a no-op route is registered so
+   * this helper does not 404 on every tool call. Errors are swallowed so a
+   * dead daemon (or a stricter rate limiter B6 might add) never breaks the
+   * Discord chat path.
+   */
+  emitSseHint: async (event: string, data: unknown): Promise<void> => {
+    try {
+      await call('POST', '/api/sse/emit', { event, data });
+    } catch {
+      // Observability hint must never break the chat path. The daemon's
+      // logger captures the failed call shape on its side if it cares.
+    }
+  },
 };

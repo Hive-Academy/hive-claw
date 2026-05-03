@@ -1,6 +1,6 @@
 # TASK_2026_002 — Tasks
 
-**Total Batches:** 9 | **Status:** 2/9 complete | **Plan source of truth:** `implementation-plan.md` §"Sequencing and batching" (lines 794–820)
+**Total Batches:** 9 | **Status:** 3/9 complete | **Plan source of truth:** `implementation-plan.md` §"Sequencing and batching" (lines 794–820)
 
 This task decomposes a two-tier persona runtime: chat-tier (bot-bridge — tool-calling LLM, native skills, native MCP, native subagents) + orchestration-tier (daemon — `ptahLauncher`, materialize, per-agent ptah scope). The architect's plan is APPROVED by the operator with no open clarifications. Batches B1–B9 below mirror the architect's sequencing 1:1 — sub-tasks, verification, and executor heuristics are this document's contribution.
 
@@ -120,7 +120,7 @@ The architect's plan is internally consistent and grounded in spike findings (R1
 
 ### B3 — Native skill loading + persona system-prompt assembly + harness/sync wiring
 
-- **Status:** IN PROGRESS
+- **Status:** COMPLETE
 - **Phase:** 4.5
 - **Files (in/out):**
   - NEW `openclaw-control/bot-bridge/src/skills/skillLoader.ts`
@@ -135,28 +135,29 @@ The architect's plan is internally consistent and grounded in spike findings (R1
 - **Execution Mode:** sequential
 - **Size:** M
 - **Sub-tasks:**
-  1. Create `bot-bridge/src/skills/skillLoader.ts` with `loadSkill(name, opts?)` and `loadSkills(names, opts?)`. Reads `<skillsRoot>/<name>/SKILL.md`, parses frontmatter via `gray-matter` (already in deps), returns `{ name, description?, body, source }`. Missing file → return `null`, log warning. Malformed frontmatter → return `null`, log warning. Default skillsRoot from `config.skillsRoot`. ~50 min.
-  2. Create `bot-bridge/src/skills/harnessSync.ts` with `startHarnessSync(handlers): Promise<() => void>`. Subscribes to Redis `harness/sync` topic via `ioredis` (already in deps); decodes `{ agentId }` payload; calls `handlers.onAgentChanged(agentId)`. Returns a `stop()` thunk. ~40 min.
-  3. Extend `chat.ts:buildSystemPrompt` (or its equivalent) to assemble the system prompt in the precise order from impl-plan §"Native skill loading" lines 964–982: bio → persona → loaded skills (one `### <name>` block per skill, body verbatim) → tool descriptions (placeholder until B4/B5 fill registry) → discord context. Skills are loaded once per call via `loadSkills(agent.harness?.chatTier?.skills ?? [])` — cheap because the file system is fast. ~50 min.
-  4. Wire `index.ts`: after `loadAgents`, call `startHarnessSync({ onAgentChanged: async (id) => { const next = await reloadAgent(id); if (next) running.get(id).def = next; } })`. Capture the returned `stop()` and call it in the SIGTERM handler before `client.destroy()`. ~30 min.
-  5. Add `daemon/src/bus.ts:publishHarnessSync({ agentId, harnessHash })` — publishes to `harness/sync` topic via the existing Redis publisher; payload is JSON-stringified. ~30 min.
-  6. Add `POST /api/agents/:id/harness/sync` to `daemon/src/api.ts`: re-reads the persona's harness.yaml from shared memory, computes `harnessHash`, calls `publishHarnessSync({ agentId, harnessHash })`. Auth via existing `guard` (internal-token). Leader-only; followers 405. ~30 min.
-  7. Tests: `bot-bridge/test/skill-loader.test.ts` (known good loads, missing returns null, malformed warns + returns null). `bot-bridge/test/harness-sync.test.ts` (mock Redis; publish for `id=horus`; assert handler fires once with `'horus'`). `daemon/test/api-harness-sync.test.ts` (POST endpoint fires bus publish — mocked). ~70 min.
+  1. [x] Create `bot-bridge/src/skills/skillLoader.ts` with `loadSkill(name, opts?)` and `loadSkills(names, opts?)`. Reads `<skillsRoot>/<name>/SKILL.md`, parses frontmatter via `gray-matter` (already in deps), returns `{ name, description?, body, source }`. Missing file → return `null`, log warning. Malformed frontmatter → return `null`, log warning. Default skillsRoot from `config.skillsRoot`. ~50 min.
+  2. [x] Create `bot-bridge/src/skills/harnessSync.ts` with `startHarnessSync(handlers): Promise<() => void>`. Subscribes to Redis `harness/sync` topic via `ioredis` (already in deps); decodes `{ agentId }` payload; calls `handlers.onAgentChanged(agentId)`. Returns a `stop()` thunk. ~40 min.
+  3. [x] Extend `chat.ts:buildSystemPrompt` (or its equivalent) to assemble the system prompt in the precise order from impl-plan §"Native skill loading" lines 964–982: bio → persona → loaded skills (one `### <name>` block per skill, body verbatim) → tool descriptions (placeholder until B4/B5 fill registry) → discord context. Skills are loaded once per call via `loadSkills(agent.harness?.chatTier?.skills ?? [])` — cheap because the file system is fast. ~50 min.
+  4. [x] Wire `index.ts`: after `loadAgents`, call `startHarnessSync({ onAgentChanged: async (id) => { const next = await reloadAgent(id); if (next) running.get(id).def = next; } })`. Capture the returned `stop()` and call it in the SIGTERM handler before `client.destroy()`. ~30 min.
+  5. [x] Add `daemon/src/bus.ts:publishHarnessSync({ agentId, harnessHash })` — publishes to `harness/sync` topic via the existing Redis publisher; payload is JSON-stringified. ~30 min.
+  6. [x] Add `POST /api/agents/:id/harness/sync` to `daemon/src/api.ts`: re-reads the persona's harness.yaml from shared memory, computes `harnessHash`, calls `publishHarnessSync({ agentId, harnessHash })`. Auth via existing `guard` (internal-token). Leader-only; followers 405. ~30 min.
+  7. [x] Tests: `bot-bridge/test/skill-loader.test.ts` (known good loads, missing returns null, malformed warns + returns null). `bot-bridge/test/harness-sync.test.ts` (mock Redis; publish for `id=horus`; assert handler fires once with `'horus'`). `daemon/test/api-harness-sync.test.ts` (POST endpoint fires bus publish — mocked). ~70 min.
+  8. [x] **(forwarded from B2)** Wire chat-tier `ctx.emit` to `daemonClient.emitSseHint` so `invoker.tool_call` / `invoker.subagent_started` / `invoker.subagent_finished` events surface on the SSE stream. New helper `daemon.emitSseHint(event, data)` POSTs to a placeholder `/api/sse/emit` route — B6 will replace the daemon endpoint with validation + rate limiting.
 - **Verification (MODE 2 will check):**
-  - [ ] `cd openclaw-control/bot-bridge && npx tsc --noEmit` passes; daemon side same.
-  - [ ] `npm test -- --grep skill-loader` passes (3+ assertions including missing-file path).
-  - [ ] `npm test -- --grep harness-sync` passes (mock-Redis end-to-end).
-  - [ ] `npm test -- --grep api-harness-sync` (daemon-side) passes.
-  - [ ] Manually inspect `chat.ts:buildSystemPrompt` output for a fixture persona with one skill (e.g., `simplify`): output contains the skill's body verbatim under a `### simplify` header.
-  - [ ] `grep -n 'mcpManager.reconcileForAgent' openclaw-control/bot-bridge/src/index.ts` returns nothing (the `reconcile` wiring is B4's job; this batch only stubs the `onAgentChanged` callback to swap the def).
-  - [ ] SIGTERM handler in `index.ts` calls `stop()` from `startHarnessSync` (grep for the captured stop ref).
+  - [x] `cd openclaw-control/bot-bridge && npx tsc --noEmit` passes; daemon side same.
+  - [x] `npm test -- --grep skill-loader` passes (5 assertions — known-good, missing, malformed, ordered survivors, dedup).
+  - [x] `npm test -- --grep harness-sync` passes (5 assertions — subscribe count, payload routing, stop, malformed JSON, missing agentId).
+  - [x] `npm test -- --grep api-harness-sync` (daemon-side) passes (3 assertions — publish, 404, auth gate).
+  - [x] Manually inspect `chat.ts:buildSystemPrompt` output for a fixture persona with one skill (e.g., `simplify`): output contains the skill's body verbatim under a `### simplify` header (smoke run captured during implementation; order bio<persona<skills<tools<discord verified).
+  - [x] `grep -n 'mcpManager.reconcileForAgent' openclaw-control/bot-bridge/src/index.ts` returns nothing (the `reconcile` wiring is B4's job; this batch only stubs the `onAgentChanged` callback to swap the def).
+  - [x] SIGTERM handler in `index.ts` calls `stop()` from `startHarnessSync` (captured as `stopHarnessSync`; awaited before `client.destroy()`).
 - **Commit message stem:** `feat(bot-bridge,daemon): native skill loading + harness/sync hot-reload (TASK_2026_002 B3)`
 
 ---
 
 ### B4 — Native MCP client (mcpManager) + mcpTools registry
 
-- **Status:** PENDING
+- **Status:** IN PROGRESS
 - **Phase:** 4.6
 - **Files (in/out):**
   - NEW `openclaw-control/bot-bridge/src/mcp/mcpManager.ts`
@@ -259,6 +260,7 @@ The architect's plan is internally consistent and grounded in spike findings (R1
   11. Add the missing `.env.example` entries `OPENCLAW_HOST_HOME`, `PTAH_MIN_VERSION`, `OPENCLAW_REQUIRE_COMMUNITY_TIER`, `OPENCLAW_HARNESS_AUTHOR_TIMEOUT_MS`, `OPENCLAW_MCP_MAX_CONCURRENT_SERVERS` (only the subset not already added in B1's TASK_2026_002 env block). ~10 min.
   12. Tests: `daemon/test/harness-launcher.test.ts` (`__setProbedVersionForTests` to fix branch; assert produced bridge body shape per branch). `daemon/test/harness-materialize.test.ts` (golden fixture → exact bytes of settings.json + plugin.json + agents/*.md; idempotent second run returns `changed:false`; privacy-invariant assertion fires on `local-memory/` path). `daemon/test/api-project-files.test.ts` (real-DB pattern from `daemon/test/persona-privacy.test.ts`: tempdir + Fastify `inject`; happy path POST/GET/DELETE; rejection of `..` and absolute paths; 1 MB cap). `daemon/test/api-harness-materialize.test.ts` (POST returns `MaterializeResult`; follower returns 405). ~150 min.
   13. **(forwarded from B2)** `POST /api/continuation/tick` currently returns counts only (`{dispatched, checkpoints, pending}`). The B2 `dispatch_orchestration_task` tool synthesizes a `dispatchId="dispatched:<n>"` string because no specific id is exposed. If orchestrator-persona consumers need to track the specific dispatch row created during a tool-driven dispatch, extend the tick endpoint to optionally return `dispatchedIds: string[]` (or a similar shape) and update `daemonClient.tickContinuation` + `dispatch_orchestration_task` to surface the real id. Decide here based on whether B7's harness-author dispatch flow needs it; otherwise keep the synthetic-string contract and document the limitation. ~30 min.
+  14. **(forwarded from B3)** Replace the placeholder `POST /api/sse/emit` route added in B3 with proper validation: event-name allowlist (`invoker.tool_call`, `invoker.subagent_started`, `invoker.subagent_finished`, `mcp.server_failed`, `harness.materialized`, `harness.synced`, plus any other taxonomy entries this batch introduces) + payload schema validation per event. Currently the placeholder forwards anything to `broadcast()` so any internal-token holder can broadcast any event. The header comment in `daemon/src/api.ts` flags B6 as the owner. ~30 min.
 - **Verification (MODE 2 will check):**
   - [ ] `cd openclaw-control/daemon && npx tsc --noEmit` passes.
   - [ ] `npm test -- --grep harness-launcher` passes (both branches assertable via `__setProbedVersionForTests`).
@@ -343,6 +345,8 @@ The architect's plan is internally consistent and grounded in spike findings (R1
   6. **(backend-developer)** Add startup assertion in `daemon/src/index.ts` (or a new `harness/licenseGuard.ts`): if `OPENCLAW_REQUIRE_COMMUNITY_TIER=1`, on boot probe `ptah --json license status` (via bridge `/health` extension; bridge already exposes `ptahVersion` per B6 — extend `/health` to include `ptahLicenseTier`). Refuse to boot when tier !== 'community'. Default off. ~40 min.
   7. **(backend-developer)** Write `daemon/test/community-tier-only.test.ts`: undici-mock test that fires every new daemon code path that COULD reach Pro RPCs and asserts none do; one explicit negative test attempts a `wizard:deep-analyze` POST and asserts the wrapper throws. ~40 min.
   8. **(backend-developer)** Write `bot-bridge/test/integration/horus-end-to-end.test.ts`: orchestrate AT#1–#6 in one suite using the fixtures from sub-tasks 1–3. AT#1 (mocked LLM emits `list_projects` tool call → assistant text contains project names). AT#2 (load Horus harness; assert `security-review` skill body present in system prompt). AT#3 (mocked LLM fires `delegate_to_subagent` → SSE events `invoker.subagent_started/finished` captured). AT#4 (mocked stdio MCP returns a tool result; assistant text includes it). AT#5 (drive harness-authoring dialog from B7's integration test fixture against a temp project; verify `.claude/harness.yaml` written + parses). AT#6 (`spawnPtahForAgent` produces a bridge body with `configFile=.../horus/settings.json`; `~/.ptah/plugins/openclaw-horus-harness/agents/security-review.md` exists on disk). ~120 min.
+  9. **(forwarded from B3)** Add a followers-405 test for `POST /api/agents/:id/harness/sync` (and any other leader-only endpoint introduced in B3–B7 — `harness/materialize`, project-files write, etc.). The B3 405 branch is a single `if (!config.leader)` guard but no automated test covers it; add one to the integration sweep. ~20 min.
+  10. **(forwarded from B3 — security audit note)** During the security-review sweep at acceptance test #7, audit whether `safeFile`'s `.yaml` extension allowance in `daemon/src/memory.ts` (added in B3 to enable `harness.yaml` shared-memory storage) should be scope-narrowed (e.g., regex restricted to `harness.yaml` only, or extension gated by scope). Persona-privacy invariant is currently intact because `PRIVATE_AGENT_FILES` is the gate (literal-set match — `persona.yaml` is NOT a member and would route to shared, which is documented behavior, not a leak). The audit is forward-looking surface-area minimization, not a fix for a known vulnerability. Document the finding in `docs/SECURITY.md` either way. ~15 min.
 - **Verification (MODE 2 will check):**
   - [ ] `local-memory/agents/horus/persona.md` exists; the daemon refuses to read it via `GET /api/memories/agents/horus/persona.md` (returns 404 — privacy invariant, layer 2 of the 3-layer enforcement; assertion in test).
   - [ ] `shared-specs/memory/agents/horus/identity.md` is reachable via daemon HTTP (manual curl against running daemon; or assertion in horus-end-to-end test).

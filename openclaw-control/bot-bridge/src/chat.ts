@@ -5,6 +5,7 @@ import type { AgentDef } from './agentRegistry.js';
 import { config } from './config.js';
 import * as daemonTools from './tools/daemonTools.js';
 import { merge as mergeToolRegistries } from './tools/index.js';
+import { loadSkills, type LoadedSkill } from './skills/skillLoader.js';
 
 const TOOLBELT_DOC = `## Operational tools (emit at the END of your reply, one per line)
 
@@ -123,13 +124,43 @@ async function tryReadMemory(
   }
 }
 
+/**
+ * Render the "Loaded skills" block per impl-plan §"Native skill loading"
+ * lines 964–982. One `### <skill.name>` header per skill followed by the
+ * skill body verbatim (frontmatter already stripped by the loader). Empty
+ * skill list returns null so the section disappears entirely from the prompt.
+ */
+function renderLoadedSkills(skills: readonly LoadedSkill[]): string | null {
+  if (!skills.length) return null;
+  const blocks = skills.map((s) => `### ${s.name}\n${s.body}`);
+  return `## Loaded skills\n\n${blocks.join('\n\n')}`;
+}
+
 async function buildSystemPrompt(agent: AgentDef, msg: Message): Promise<string> {
   const userId = msg.author.id;
   const channelId = msg.channel.id;
   const parts: string[] = [];
+
+  // Locked order per impl-plan lines 964-982: bio → persona → loaded skills
+  // → tool descriptions → discord context. Existing extra context sections
+  // (user profile / thread context / current projects / registered agents)
+  // sit between skills and tool descriptions — they're reference material,
+  // not behavior shaping, so they don't disturb the bio→persona→skills→tools
+  // flow the architect demanded.
   parts.push(`# You are ${agent.name} (id: ${agent.id})`);
   if (agent.identityMd) parts.push(`## Public bio\n${agent.identityMd}`);
   if (agent.personaMd) parts.push(`## Persona / system prompt\n${agent.personaMd}`);
+
+  // Native skill loading (TASK_2026_002 B3). Loaded fresh on every call —
+  // file system reads are cheap and the impl-plan §"Hot-reload via
+  // harness/sync" line 986 explicitly says "Next inbound message rebuilds
+  // the system prompt from the fresh def — no in-flight chat is interrupted."
+  const skillNames = agent.harness?.chatTier?.skills ?? [];
+  if (skillNames.length) {
+    const skills = await loadSkills(skillNames);
+    const block = renderLoadedSkills(skills);
+    if (block) parts.push(block);
+  }
 
   const userProfile = await tryReadMemory('users', userId, 'profile.md');
   if (userProfile) parts.push(`## User profile (Discord ${userId})\n${userProfile}`);
@@ -159,7 +190,13 @@ async function buildSystemPrompt(agent: AgentDef, msg: Message): Promise<string>
     }
   } catch {}
 
+  // ## Available tools — placeholder until B4 (mcpTools) and B5 (subagentTools)
+  // fill the registry. The current `TOOLBELT_DOC` is the legacy directive
+  // surface; when toolCallsEnabled is on, the OpenAI-compat tool definitions
+  // are passed via `tools=[...]` in the request body, NOT the system prompt,
+  // so a markdown table here is documentation only.
   parts.push(TOOLBELT_DOC);
+
   parts.push(`## Discord context
 user: ${msg.author.username} (${userId})
 channel: #${(msg.channel as any).name ?? channelId}
@@ -168,6 +205,10 @@ guild: ${msg.guild?.name ?? 'DM'}
 Reply concisely (Discord-friendly length). Use markdown sparingly.`);
   return parts.join('\n\n');
 }
+
+// Exported for tests — pinning the impl-plan lines 964-982 ordering and the
+// `### <name>` skill block shape is verification item 5 of B3.
+export { buildSystemPrompt as __buildSystemPromptForTests };
 
 function stripMentions(content: string): string {
   return content.replace(/<@!?\d+>/g, '').replace(/\s+/g, ' ').trim();
@@ -282,9 +323,15 @@ export async function handleChat(agent: AgentDef, msg: Message): Promise<void> {
       userId: msg.author.id,
       channelId: msg.channel.id,
       state: new Map(),
-      // B2 wires emit to a no-op; B5 will route this to daemonClient.emitSseHint
-      // so operators see invoker.tool_call events on the SSE stream.
-      emit: () => {},
+      // TASK_2026_002 B3 (forwarded from B2 sub-task 8): route observability
+      // hints through `daemonClient.emitSseHint` so `invoker.tool_call`,
+      // `invoker.subagent_started` and `invoker.subagent_finished` surface on
+      // `/api/stream`. Fire-and-forget — the helper swallows errors so a
+      // dead daemon never breaks Discord chat. AT#3 (visibility) hangs on
+      // this wire being present. **B6 owns the daemon endpoint.**
+      emit: (event, data) => {
+        void daemon.emitSseHint(event, data);
+      },
     };
     const tools = await buildToolRegistry(agent, ctx);
     const systemPrompt = await buildSystemPrompt(agent, msg);

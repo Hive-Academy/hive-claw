@@ -26,6 +26,20 @@ export interface NotifyPayload {
   text: string;
 }
 
+/**
+ * Hot-reload broadcast for a persona's harness (TASK_2026_002 B3). The
+ * bot-bridge's `skills/harnessSync.ts` subscriber decodes this and triggers
+ * `agentRegistry.reloadAgent(id)`. `harnessHash` is the sha256 of the new
+ * harness.yaml — subscribers may use it to dedupe redundant reloads.
+ */
+export interface HarnessSyncPayload {
+  agentId: string;
+  harnessHash: string;
+}
+
+/** Redis pub/sub channel for harness/sync events (mirrored in bot-bridge). */
+export const HARNESS_SYNC_TOPIC = 'harness/sync';
+
 let pub: Redis | null = null;
 let sub: Redis | null = null;
 
@@ -92,9 +106,33 @@ export async function publishAgentStatus(payload: AgentStatusPayload): Promise<v
   }
 }
 
+/**
+ * Publish a `harness/sync` hot-reload event so the bot-bridge re-loads the
+ * named persona's harness.yaml + skills (TASK_2026_002 B3). No-op when Redis
+ * is unconfigured — single-machine dev still works (the bot picks the new
+ * harness up on its next restart).
+ */
+export async function publishHarnessSync(payload: HarnessSyncPayload): Promise<void> {
+  if (!pub) return;
+  await pub.publish(HARNESS_SYNC_TOPIC, JSON.stringify(payload));
+}
+
 export async function stopBus(): Promise<void> {
   await pub?.quit();
   await sub?.quit();
   pub = null;
   sub = null;
+}
+
+/**
+ * Test seam — inject a mock publisher so unit tests can observe what
+ * `publishHarnessSync` would emit without standing up a Redis server.
+ * Returns a thunk that restores the previous publisher.
+ */
+export function __setPublisherForTests(client: Redis | null): () => void {
+  const prev = pub;
+  pub = client;
+  return () => {
+    pub = prev;
+  };
 }
