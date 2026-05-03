@@ -2,6 +2,7 @@ import Redis from 'ioredis';
 import { config } from './config.js';
 import { broadcast } from './sse.js';
 import { recordAgentStatus } from './agents.js';
+import { materializeAgent } from './harness/materialize.js';
 
 export interface HandoffPayload {
   taskId: string;
@@ -55,13 +56,45 @@ export async function startBus(onHandoff: (p: HandoffPayload) => void): Promise<
   pub = new Redis(config.redis.url);
   sub = new Redis(config.redis.url);
 
-  await sub.psubscribe('agent:*:inbox', 'agent:status:*');
+  // TASK_2026_002 B6: also subscribe to harness/sync so the LEADER
+  // re-runs materializeAgent(id) when a persona's harness.yaml is rotated.
+  // bot-bridge subscribes separately for its in-memory persona reload —
+  // this subscription is the daemon-side mirror, ensuring per-agent ptah
+  // scope on disk stays current for the next dispatch.
+  await sub.psubscribe('agent:*:inbox', 'agent:status:*', 'harness/sync');
   sub.on('pmessage', (_pattern, channel, message) => {
     try {
       if (channel.endsWith(':inbox')) {
         const payload = JSON.parse(message) as HandoffPayload;
         broadcast('agent.handoff', payload);
         onHandoff(payload);
+        return;
+      }
+      if (channel === 'harness/sync') {
+        const payload = JSON.parse(message) as HarnessSyncPayload;
+        if (config.leader) {
+          // Best-effort re-materialize. Errors are logged but never crash
+          // the bus — a misshapen harness.yaml shouldn't take the daemon
+          // offline. Async result reported via the harness.materialized
+          // SSE event.
+          void materializeAgent(payload.agentId)
+            .then((r) => {
+              broadcast('harness.materialized', {
+                agentId: r.agentId,
+                changed: r.changed,
+                settingsPath: r.settingsPath,
+                pluginDir: r.pluginDir,
+              });
+              broadcast('harness.synced', {
+                agentId: payload.agentId,
+                source: 'redis',
+              });
+            })
+            .catch((err) => {
+              const msg = err instanceof Error ? err.message : String(err);
+              console.warn(`[bus] harness/sync materialize failed agent="${payload.agentId}": ${msg}`);
+            });
+        }
         return;
       }
       const m = channel.match(/^agent:status:(.+)$/);

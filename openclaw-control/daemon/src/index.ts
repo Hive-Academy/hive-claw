@@ -7,6 +7,7 @@ import { startBus } from './bus.js';
 import { startDispatchWorker } from './dispatch.js';
 import { openOnce, runMigrations, getDb } from './db/index.js';
 import { initLeaderClient } from './leaderClient.js';
+import { materializeAll } from './harness/materialize.js';
 
 const STALE_ENV_VARS: readonly string[] = [
   'OPENCLAW_SPECS_REPO_URL',
@@ -43,6 +44,19 @@ async function main(): Promise<void> {
     openOnce(config.dbPath);
     runMigrations(getDb());
     console.log(`[boot] db=${config.dbPath} migrations applied`);
+    // TASK_2026_002 B6: catch up per-agent ptah scope after restart. Idempotent
+    // (read existing → byte-diff → rewrite only on change), so a clean run is
+    // a no-op. Best-effort across personas — a single misshapen harness.yaml
+    // won't keep the leader from booting (errors are logged per-agent).
+    try {
+      const results = await materializeAll();
+      const changed = results.filter((r) => r.changed).length;
+      console.log(
+        `[boot] materializeAll: ${results.length} agents, ${changed} changed`,
+      );
+    } catch (err) {
+      console.warn('[boot] materializeAll failed (non-fatal):', err);
+    }
   } else {
     // Followers talk to the leader over HTTP. The leader URL was already
     // validated as non-empty in config.ts; pass it through.

@@ -99,15 +99,26 @@ export async function tickOnce(): Promise<{
   pending: number;
   checkpoints: number;
   skipped: number;
+  /**
+   * Real dispatch row ids inserted during this tick (TASK_2026_002 B6
+   * forwarded sub-task #13). The B2 `dispatch_orchestration_task` tool
+   * surfaces this list so the calling LLM can track the specific row.
+   *
+   * Local-fast-path invocations (where the leader is the owner of the
+   * agent and `invokeClaudeForTask` runs synchronously without a dispatch
+   * row) do not produce ids; they are still counted in `dispatched`.
+   */
+  dispatchedIds: string[];
 }> {
   if (!config.leader) {
-    return { dispatched: 0, pending: 0, checkpoints: 0, skipped: 0 };
+    return { dispatched: 0, pending: 0, checkpoints: 0, skipped: 0, dispatchedIds: [] };
   }
   const projects = await discoverProjects();
   let dispatched = 0;
   let pending = 0;
   let checkpoints = 0;
   let skipped = 0;
+  const dispatchedIds: string[] = [];
   for (const project of projects) {
     const tasks = await listTasks(project);
     for (const task of tasks) {
@@ -166,6 +177,7 @@ export async function tickOnce(): Promise<{
         });
         if (inserted) {
           dispatched++;
+          dispatchedIds.push(inserted);
           broadcast('dispatch.pending', {
             dispatchId: inserted,
             agent: agentId,
@@ -186,7 +198,7 @@ export async function tickOnce(): Promise<{
   if (dispatched || checkpoints) {
     broadcast('continuation.tick', { dispatched, checkpoints, pending });
   }
-  return { dispatched, pending, checkpoints, skipped };
+  return { dispatched, pending, checkpoints, skipped, dispatchedIds };
 }
 
 function isApproved(task: TaskSummary): boolean {

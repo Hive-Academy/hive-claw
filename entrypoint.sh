@@ -156,6 +156,15 @@ PTAH_STAMP="${PTAH_DIR}/.openclaw-bootstrapped"
 if command -v ptah >/dev/null 2>&1; then
     mkdir -p "$PTAH_DIR"
 
+    # TASK_2026_002 B6: ensure the per-agent + plugin subdirs exist on first
+    # boot so the daemon's materializeAll() pass at startup can write into
+    # them without ENOENT. Both paths are bind-mount-backed identity-mapped
+    # (${OPENCLAW_HOST_HOME:-${HOME}}/.ptah on both sides — see
+    # docker-compose.yml). The daemon does its own defensive mkdir -p on
+    # write; this is belt-and-braces.
+    mkdir -p "${OPENCLAW_HOST_HOME:-${HOME}}/.ptah/agents" \
+             "${OPENCLAW_HOST_HOME:-${HOME}}/.ptah/plugins" 2>/dev/null || true
+
     if [ ! -f "$PTAH_STAMP" ]; then
         echo "[entrypoint] Ptah CLI: first-run bootstrap"
 

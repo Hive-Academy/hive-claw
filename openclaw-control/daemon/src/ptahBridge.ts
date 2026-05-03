@@ -20,6 +20,18 @@ export interface BridgeInvokeOptions {
   agentId: string;
   profile: string;
   autoApprove?: boolean;
+  /**
+   * Per-agent ptah settings file (TASK_2026_002 B6). When set, the bridge
+   * prepends `--config <translatePath(configFile)>` to the ptah argv so
+   * the spawn picks up the persona's materialized scope (see
+   * `daemon/src/harness/materialize.ts` and
+   * `daemon/src/harness/ptahLauncher.ts`).
+   *
+   * Path is host-side absolute. The bridge does identity translation for
+   * paths under `~/.ptah/...` because the bind-mount is identity-mapped
+   * (impl-plan §R5).
+   */
+  configFile?: string;
 }
 
 export interface BridgeInvokeResult {
@@ -54,7 +66,20 @@ export function isBridgeEnabled(): boolean {
   return Boolean(config.ptah.bridgeUrl);
 }
 
+/**
+ * Test seam — swap the live `invokeViaBridge` implementation for a stub.
+ * ESM module exports are read-only at runtime, so unit tests cannot
+ * monkey-patch the binding directly. Pass `null` to restore the real
+ * implementation. (Pattern mirrored on `__setPublisherForTests` in bus.ts.)
+ */
+type InvokeFn = (opts: BridgeInvokeOptions) => Promise<BridgeInvokeResult>;
+let invokeOverride: InvokeFn | null = null;
+export function __setInvokeViaBridgeForTests(fn: InvokeFn | null): void {
+  invokeOverride = fn;
+}
+
 export async function invokeViaBridge(opts: BridgeInvokeOptions): Promise<BridgeInvokeResult> {
+  if (invokeOverride) return invokeOverride(opts);
   const url = `${config.ptah.bridgeUrl.replace(/\/$/, '')}/invoke`;
   const started = Date.now();
 

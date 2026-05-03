@@ -37,6 +37,7 @@
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { existsSync } from 'node:fs';
 import { spawn, execSync } from 'node:child_process';
 
 const PORT = Number(process.env.PTAH_BRIDGE_PORT ?? 8744);
@@ -127,7 +128,7 @@ async function handleInvoke(req, res) {
   try { body = await readJsonBody(req); }
   catch (e) { return jsonResponse(res, 400, { error: 'invalid json', detail: String(e?.message ?? e) }); }
 
-  const { cwd, prompt, taskId, agentId, profile, autoApprove } = body ?? {};
+  const { cwd, prompt, taskId, agentId, profile, autoApprove, configFile } = body ?? {};
   if (typeof cwd !== 'string' || typeof prompt !== 'string') {
     return jsonResponse(res, 400, { error: 'cwd and prompt are required strings' });
   }
@@ -136,6 +137,15 @@ async function handleInvoke(req, res) {
   const { text: hostPrompt, count: translations } = translatePrompt(prompt);
 
   const args = ['--json', '--cwd', hostCwd];
+  // TASK_2026_002 B6: forward per-agent ptah scope (settings.json) to the
+  // ptah CLI as `--config <translated>`. configFile is host-side already
+  // (the daemon emits paths under ${OPENCLAW_HOST_HOME}/.ptah/...) and the
+  // bind-mount is identity-mapped, so translatePath is effectively a
+  // passthrough — but we still call it so a future config dir under the
+  // workspace tree (test paths, etc.) gets re-rooted correctly.
+  if (typeof configFile === 'string' && configFile.length > 0) {
+    args.push('--config', translatePath(configFile));
+  }
   if (autoApprove !== false) args.push('--auto-approve');
   args.push('session', 'start', '--profile', String(profile ?? 'claude_code'), '--task', hostPrompt);
 
@@ -198,11 +208,17 @@ async function handleInvoke(req, res) {
 
 const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
+    // TASK_2026_002 B6: surface ~/.ptah/{,plugins} existence so the daemon
+    // can sanity-check the bind-mount before spawning. Both should be true
+    // in a healthy install (entrypoint.sh mkdir -p's them).
+    const PTAH_HOME = path.join(HOME, '.ptah');
     return jsonResponse(res, 200, {
       ok: true,
       ptahVersion: getPtahVersion(),
       hostUser: os.userInfo().username,
       pathMap: { workspace: { container: WS_C, host: WS_H }, specs: { container: SP_C, host: SP_H } },
+      ptahConfigDirExists: existsSync(PTAH_HOME),
+      ptahPluginsDirExists: existsSync(path.join(PTAH_HOME, 'plugins')),
     });
   }
 

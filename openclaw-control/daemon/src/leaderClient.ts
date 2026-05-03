@@ -284,17 +284,20 @@ export async function continuationTick(): Promise<{
   pending: number;
   checkpoints: number;
   skipped: number;
+  dispatchedIds?: string[];
 }> {
   const c = require_();
   const res = await request(`${c.baseUrl}/api/continuation/tick`, {
     method: 'POST',
     headers: authHeader(),
   });
-  return readJson<{ dispatched: number; pending: number; checkpoints: number; skipped: number }>(
-    res.statusCode,
-    res.body,
-    'continuationTick',
-  );
+  return readJson<{
+    dispatched: number;
+    pending: number;
+    checkpoints: number;
+    skipped: number;
+    dispatchedIds?: string[];
+  }>(res.statusCode, res.body, 'continuationTick');
 }
 
 /**

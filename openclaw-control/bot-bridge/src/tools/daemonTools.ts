@@ -309,20 +309,35 @@ export function list(): ToolDef[] {
         // leader transiently), the task is still created — the continuation
         // loop will pick it up on its next cycle. We surface the tick error
         // alongside the taskId so the model can decide whether to retry.
+        //
+        // TASK_2026_002 B6 forwarded #13: the leader's tick endpoint now
+        // returns `dispatchedIds: string[]`. We surface the first id whose
+        // taskId matches the task we just created (preferred) or, failing
+        // that, the first id in the list. Falls back to null when nothing
+        // was dispatched in this tick (the continuation loop will pick it
+        // up on its next cycle).
         let dispatchId: string | null = null;
+        let dispatchedIds: string[] = [];
         let tickError: string | null = null;
         try {
           const tick = await daemon.tickContinuation();
-          // The tick endpoint returns counts, not specific dispatch ids.
-          // If anything was dispatched, at least one row exists; we surface
-          // the count via dispatchId-as-string so the model has signal.
-          dispatchId = tick.dispatched > 0 ? `dispatched:${tick.dispatched}` : null;
+          dispatchedIds = Array.isArray(tick.dispatchedIds) ? tick.dispatchedIds : [];
+          if (dispatchedIds.length > 0) {
+            dispatchId = dispatchedIds[0]!;
+          } else if (tick.dispatched > 0) {
+            // Older leader without `dispatchedIds` — preserve the synthetic
+            // string so the model still has a signal that something was
+            // dispatched (count, not row id). This branch is the
+            // back-compat path documented in B6 task #13.
+            dispatchId = `dispatched:${tick.dispatched}`;
+          }
         } catch (err) {
           tickError = (err as Error)?.message ?? String(err);
         }
         return JSON.stringify({
           taskId: created.taskId,
           dispatchId,
+          dispatchedIds,
           ...(tickError ? { tickError } : {}),
         });
       },

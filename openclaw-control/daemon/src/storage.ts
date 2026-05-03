@@ -389,11 +389,22 @@ export async function continuationTickThroughFacade(): Promise<{
   pending: number;
   checkpoints: number;
   skipped: number;
+  dispatchedIds: string[];
 }> {
   if (config.leader) {
     return tickOnce();
   }
-  return leaderClient.continuationTick();
+  // Followers relay to the leader. The leader's response shape matches
+  // tickOnce (B6 forwarded #13: includes `dispatchedIds`); we accept a
+  // missing field as `[]` for graceful degradation against an older leader.
+  const r = await leaderClient.continuationTick();
+  return {
+    ...r,
+    dispatchedIds: Array.isArray((r as { dispatchedIds?: unknown }).dispatchedIds)
+      ? ((r as { dispatchedIds: unknown[] }).dispatchedIds as string[])
+      : [],
+    skipped: (r as { skipped?: number }).skipped ?? 0,
+  };
 }
 
 /* -------------------------------------------------------------------------- */

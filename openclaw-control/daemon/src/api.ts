@@ -4,6 +4,8 @@ import cookie from '@fastify/cookie';
 import jwt from '@fastify/jwt';
 import staticPlugin from '@fastify/static';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
+import path from 'node:path';
 import { config } from './config.js';
 import { listSessions, tailSession, newestSessionForProject } from './sessions.js';
 import { attachSse, broadcast } from './sse.js';
@@ -11,6 +13,7 @@ import { registerAuth, requireAuth } from './auth.js';
 import { MemoryError } from './memory.js';
 import { publishHandoff, publishHarnessSync } from './bus.js';
 import { harnessHash } from './harness/types.js';
+import { materializeAgent, materializeAll } from './harness/materialize.js';
 import {
   PRIVATE_AGENT_FILES,
   isTerminalState,
@@ -25,6 +28,63 @@ import * as leaderClient from './leaderClient.js';
 import * as storage from './storage.js';
 
 const TASK_FILE_MAX_BYTES = 1 * 1024 * 1024; // 1 MB — matches TasksRepo.writeFile
+
+/**
+ * Project-files cluster (TASK_2026_002 B6 sub-task 8). Same 1 MB cap as
+ * task files. The harness-authoring chat (B7) uses these to write
+ * `<project>/.claude/harness.yaml`; the route is generic so any future
+ * caller writing into the project workspace tree picks up the same
+ * path-validation + size guard.
+ */
+const PROJECT_FILE_MAX_BYTES = 1 * 1024 * 1024;
+
+/**
+ * Validate a project-files relative path. Rejects:
+ *   - empty / non-string
+ *   - absolute paths (anything starting with `/` on POSIX)
+ *   - any segment equal to `..` (path traversal)
+ *   - resolved paths that fall outside `projectRoot`
+ *
+ * Returns the absolute path on success. The caller is responsible for the
+ * subsequent FS access; this helper is purely a validation gate so the
+ * 4xx mapping is consistent across GET/POST/DELETE.
+ */
+function safeProjectPath(projectRoot: string, rel: unknown): string | { error: string } {
+  if (typeof rel !== 'string' || rel.length === 0) {
+    return { error: 'path must be a non-empty string' };
+  }
+  if (rel.startsWith('/')) {
+    return { error: 'absolute paths are forbidden' };
+  }
+  // POSIX-only check — Windows separators are not in scope (the daemon
+  // runs in a Linux container and project paths are container-side).
+  const segments = rel.split('/');
+  for (const seg of segments) {
+    if (seg === '..') return { error: 'path traversal segment ".." is forbidden' };
+  }
+  const resolved = path.resolve(projectRoot, rel);
+  const root = path.resolve(projectRoot);
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+    return { error: 'resolved path escapes project root' };
+  }
+  return resolved;
+}
+
+/**
+ * SSE event-name allowlist (TASK_2026_002 B6 forwarded sub-task #14 — was
+ * a wide-open placeholder in B3). Any internal-token holder POSTing to
+ * `/api/sse/emit` must use one of these names. Adding a new name here is
+ * the explicit gate for "this is a public observability hint, not a
+ * potential broadcast-storm vector".
+ */
+const SSE_EMIT_ALLOWED_EVENTS: ReadonlySet<string> = new Set([
+  'invoker.tool_call',
+  'invoker.subagent_started',
+  'invoker.subagent_finished',
+  'mcp.server_failed',
+  'harness.materialized',
+  'harness.synced',
+]);
 
 function asString(v: unknown): string | null {
   return typeof v === 'string' && v.length > 0 ? v : null;
@@ -589,14 +649,19 @@ export function buildApp() {
     },
   );
 
-  // POST /api/sse/emit — TASK_2026_002 B3 placeholder.
+  // POST /api/sse/emit — TASK_2026_002 B6 forwarded sub-task #14.
   //
   // The bot-bridge's `daemonClient.emitSseHint` POSTs chat-tier observability
-  // hints (`invoker.tool_call`, `invoker.subagent_started`, …) here so they
-  // surface on `/api/stream`. **B6 owns the real implementation** — it will
-  // validate the `event` prefix, rate-limit the channel, and call
-  // `broadcast(event, data)`. Until B6 lands we accept and broadcast as-is
-  // so AT#3 (visibility) can be exercised end-to-end without a 404.
+  // hints here so they surface on `/api/stream`. The event name is gated by
+  // SSE_EMIT_ALLOWED_EVENTS — any name not on the allowlist is rejected
+  // with 400 (not silently dropped) so a typo or a misbehaving caller is
+  // easy to spot in operator logs.
+  //
+  // Per-event payload validation: every allowed event must carry a plain
+  // object payload. The schema-per-event is intentionally light — these
+  // are observability hints, not a control surface — but we DO require
+  // the canonical `taskId` / `agentId` / `name` fields when present so
+  // downstream SSE consumers (the dashboard) get a stable shape.
   app.post<{ Body: { event: string; data: unknown } }>(
     '/api/sse/emit',
     { preHandler: guard },
@@ -606,9 +671,294 @@ export function buildApp() {
           ? req.body.event
           : null;
       if (!event) return reply.code(400).send({ error: 'body.event (string) required' });
-      // B6: tighten validation (allowed prefix list, rate limit, audit).
-      broadcast(event, req.body?.data ?? null);
+      if (!SSE_EMIT_ALLOWED_EVENTS.has(event)) {
+        return reply.code(400).send({
+          error: `event "${event}" is not on the SSE_EMIT_ALLOWED_EVENTS allowlist`,
+          allowed: [...SSE_EMIT_ALLOWED_EVENTS].sort(),
+        });
+      }
+      const data = req.body?.data ?? null;
+      // Per-event payload schema. Light-touch — strings/numbers only,
+      // optional fields. Anything else is rejected so the dashboard's
+      // typed event consumers don't get surprises.
+      if (data !== null && (typeof data !== 'object' || Array.isArray(data))) {
+        return reply
+          .code(400)
+          .send({ error: 'data must be an object or null' });
+      }
+      const obj = (data ?? {}) as Record<string, unknown>;
+      const stringOpt = (k: string): boolean =>
+        obj[k] === undefined || typeof obj[k] === 'string';
+      const numberOpt = (k: string): boolean =>
+        obj[k] === undefined || typeof obj[k] === 'number';
+      const boolOpt = (k: string): boolean =>
+        obj[k] === undefined || typeof obj[k] === 'boolean';
+      switch (event) {
+        case 'invoker.tool_call':
+          // { taskId?, agentId?, name?, ok?, durationMs? }
+          if (!stringOpt('taskId') || !stringOpt('agentId') || !stringOpt('name')) {
+            return reply.code(400).send({ error: 'invoker.tool_call: taskId/agentId/name must be strings if set' });
+          }
+          if (!boolOpt('ok')) {
+            return reply.code(400).send({ error: 'invoker.tool_call: ok must be a boolean if set' });
+          }
+          if (!numberOpt('durationMs')) {
+            return reply.code(400).send({ error: 'invoker.tool_call: durationMs must be a number if set' });
+          }
+          break;
+        case 'invoker.subagent_started':
+        case 'invoker.subagent_finished':
+          if (!stringOpt('agentId') || !stringOpt('name') || !stringOpt('parent')) {
+            return reply.code(400).send({ error: `${event}: agentId/name/parent must be strings if set` });
+          }
+          if (!boolOpt('ok') || !numberOpt('durationMs')) {
+            return reply.code(400).send({ error: `${event}: ok/durationMs typecheck failed` });
+          }
+          break;
+        case 'mcp.server_failed':
+          if (!stringOpt('agentId') || !stringOpt('serverId') || !stringOpt('error')) {
+            return reply.code(400).send({ error: 'mcp.server_failed: agentId/serverId/error must be strings if set' });
+          }
+          break;
+        case 'harness.materialized':
+          if (!stringOpt('agentId') || !stringOpt('settingsPath') || !stringOpt('pluginDir')) {
+            return reply.code(400).send({ error: 'harness.materialized: path fields must be strings if set' });
+          }
+          if (!boolOpt('changed')) {
+            return reply.code(400).send({ error: 'harness.materialized: changed must be a boolean if set' });
+          }
+          break;
+        case 'harness.synced':
+          if (!stringOpt('agentId') || !stringOpt('source')) {
+            return reply.code(400).send({ error: 'harness.synced: agentId/source must be strings if set' });
+          }
+          break;
+      }
+      broadcast(event, data);
       return { ok: true };
+    },
+  );
+
+  // --- project files (TASK_2026_002 B6 sub-task 8) ----------------------
+  // Generic file IO inside a project's workspace tree. The harness-authoring
+  // chat (B7) writes `.claude/harness.yaml` through these endpoints; any
+  // future caller that needs to write inside the project workspace gets the
+  // same path-validation + 1 MB cap.
+  //
+  // Leader-only: the workspace path comes from `Project.path` resolved on
+  // the leader. Followers don't have access to the project FS so they 405.
+  // The harness-authoring chat runs in bot-bridge which talks to the
+  // LEADER (config.daemonUrl), not a follower, so this is the right shape.
+
+  app.get<{
+    Params: { slug: string };
+    Querystring: { path?: string; prefix?: string };
+  }>('/api/projects/:slug/files', { preHandler: guard }, async (req, reply) => {
+    if (!config.leader) {
+      return reply
+        .code(405)
+        .send({ error: 'project files are leader-only — POST to OPENCLAW_LEADER_URL instead' });
+    }
+    const project = await storage.readProject(req.params.slug);
+    if (!project) return reply.code(404).send({ error: 'project not found' });
+    if (!project.path.startsWith('/')) {
+      return reply
+        .code(409)
+        .send({ error: `project "${project.slug}" has no resolved workspace path` });
+    }
+
+    // Single-file read.
+    if (typeof req.query.path === 'string') {
+      const validated = safeProjectPath(project.path, req.query.path);
+      if (typeof validated !== 'string') {
+        return reply.code(400).send({ error: validated.error });
+      }
+      try {
+        const stat = await fsp.stat(validated);
+        if (!stat.isFile()) {
+          return reply.code(404).send({ error: 'not a regular file' });
+        }
+        if (stat.size > PROJECT_FILE_MAX_BYTES) {
+          return reply.code(413).send({
+            error: `file exceeds ${PROJECT_FILE_MAX_BYTES} byte cap`,
+            sizeBytes: stat.size,
+          });
+        }
+        const content = await fsp.readFile(validated, 'utf8');
+        return {
+          content,
+          sizeBytes: stat.size,
+          mtime: stat.mtime.toISOString(),
+        };
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+          return reply.code(404).send({ error: 'not found' });
+        }
+        throw err;
+      }
+    }
+
+    // Prefix listing.
+    const prefix = typeof req.query.prefix === 'string' ? req.query.prefix : '';
+    let prefixRoot: string;
+    if (prefix.length === 0) {
+      prefixRoot = path.resolve(project.path);
+    } else {
+      const validated = safeProjectPath(project.path, prefix);
+      if (typeof validated !== 'string') {
+        return reply.code(400).send({ error: validated.error });
+      }
+      prefixRoot = validated;
+    }
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = await fsp.readdir(prefixRoot, { withFileTypes: true });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+        return reply.code(404).send({ error: 'prefix not found' });
+      }
+      throw err;
+    }
+    const out: Array<{ path: string; size: number; mtime: string }> = [];
+    for (const e of entries) {
+      if (!e.isFile()) continue;
+      const abs = path.join(prefixRoot, e.name);
+      const stat = await fsp.stat(abs);
+      const rel = path.relative(project.path, abs);
+      out.push({
+        path: rel,
+        size: stat.size,
+        mtime: stat.mtime.toISOString(),
+      });
+    }
+    return out.sort((a, b) => a.path.localeCompare(b.path));
+  });
+
+  app.post<{
+    Params: { slug: string };
+    Body: { path: string; content: string };
+  }>('/api/projects/:slug/files', { preHandler: guard }, async (req, reply) => {
+    if (!config.leader) {
+      return reply
+        .code(405)
+        .send({ error: 'project files are leader-only — POST to OPENCLAW_LEADER_URL instead' });
+    }
+    const project = await storage.readProject(req.params.slug);
+    if (!project) return reply.code(404).send({ error: 'project not found' });
+    if (!project.path.startsWith('/')) {
+      return reply
+        .code(409)
+        .send({ error: `project "${project.slug}" has no resolved workspace path` });
+    }
+    const content = typeof req.body?.content === 'string' ? req.body.content : null;
+    if (content === null) {
+      return reply.code(400).send({ error: 'body.content (string) required' });
+    }
+    const sizeBytes = Buffer.byteLength(content, 'utf8');
+    if (sizeBytes > PROJECT_FILE_MAX_BYTES) {
+      return reply
+        .code(413)
+        .send({ error: `file exceeds ${PROJECT_FILE_MAX_BYTES} byte cap`, sizeBytes });
+    }
+    const validated = safeProjectPath(project.path, req.body?.path);
+    if (typeof validated !== 'string') {
+      return reply.code(400).send({ error: validated.error });
+    }
+    await fsp.mkdir(path.dirname(validated), { recursive: true });
+    await fsp.writeFile(validated, content, 'utf8');
+    broadcast('project.file_written', {
+      project: project.slug,
+      path: req.body!.path,
+      sizeBytes,
+    });
+    return { ok: true, sizeBytes };
+  });
+
+  app.delete<{
+    Params: { slug: string };
+    Querystring: { path?: string };
+  }>('/api/projects/:slug/files', { preHandler: guard }, async (req, reply) => {
+    if (!config.leader) {
+      return reply
+        .code(405)
+        .send({ error: 'project files are leader-only — POST to OPENCLAW_LEADER_URL instead' });
+    }
+    const project = await storage.readProject(req.params.slug);
+    if (!project) return reply.code(404).send({ error: 'project not found' });
+    if (!project.path.startsWith('/')) {
+      return reply
+        .code(409)
+        .send({ error: `project "${project.slug}" has no resolved workspace path` });
+    }
+    const validated = safeProjectPath(project.path, req.query.path);
+    if (typeof validated !== 'string') {
+      return reply.code(400).send({ error: validated.error });
+    }
+    try {
+      await fsp.unlink(validated);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+        return reply.code(404).send({ error: 'not found' });
+      }
+      throw err;
+    }
+    broadcast('project.file_deleted', {
+      project: project.slug,
+      path: req.query.path,
+    });
+    return { ok: true };
+  });
+
+  // --- harness materialize endpoints (TASK_2026_002 B6 sub-task 8) ------
+  // Operator/diagnostic surface for re-materializing per-agent ptah scope.
+  // Both leader-only — followers 405. The Redis `harness/sync` event is
+  // the preferred trigger; these endpoints exist for "I just edited the
+  // row, want it on disk RIGHT NOW" + tests.
+
+  app.post<{ Params: { id: string } }>(
+    '/api/agents/:id/harness/materialize',
+    { preHandler: guard },
+    async (req, reply) => {
+      if (!config.leader) {
+        return reply
+          .code(405)
+          .send({ error: 'harness/materialize is leader-only — POST to OPENCLAW_LEADER_URL instead' });
+      }
+      try {
+        const result = await materializeAgent(req.params.id);
+        broadcast('harness.materialized', {
+          agentId: result.agentId,
+          changed: result.changed,
+          settingsPath: result.settingsPath,
+          pluginDir: result.pluginDir,
+        });
+        return result;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'materialize failed';
+        return reply.code(400).send({ error: msg });
+      }
+    },
+  );
+
+  app.post(
+    '/api/harness/materialize',
+    { preHandler: guard },
+    async (req, reply) => {
+      if (!config.leader) {
+        return reply
+          .code(405)
+          .send({ error: 'harness/materialize is leader-only — POST to OPENCLAW_LEADER_URL instead' });
+      }
+      const results = await materializeAll();
+      for (const r of results) {
+        broadcast('harness.materialized', {
+          agentId: r.agentId,
+          changed: r.changed,
+          settingsPath: r.settingsPath,
+          pluginDir: r.pluginDir,
+        });
+      }
+      return results;
     },
   );
 

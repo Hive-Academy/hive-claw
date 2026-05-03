@@ -106,7 +106,7 @@ export const daemon = {
     call('POST', `/api/projects/${slug}/tasks/${id}/approve`, body),
   handoff: (slug: string, id: string, toAgent: string, reason?: string) =>
     call('POST', `/api/projects/${slug}/tasks/${id}/handoff`, { toAgent, reason }),
-  tick: () => call<{ dispatched: number; checkpoints: number; pending: number }>('POST', '/api/continuation/tick'),
+  tick: () => call<{ dispatched: number; checkpoints: number; pending: number; dispatchedIds?: string[] }>('POST', '/api/continuation/tick'),
 
   // -------------------------------------------------------------------------
   // TASK_2026_002 B2 — daemon-CRUD tool surface helpers.
@@ -125,11 +125,20 @@ export const daemon = {
   ) => call('POST', `/api/projects/${slug}/tasks/${id}/approve`, body),
   handoffTask: (slug: string, id: string, toAgent: string, reason?: string) =>
     call('POST', `/api/projects/${slug}/tasks/${id}/handoff`, { toAgent, reason }),
+  /**
+   * Tick the continuation loop. TASK_2026_002 B6 forwarded sub-task #13:
+   * the leader now returns `dispatchedIds: string[]` so callers can surface
+   * the real dispatch row id rather than synthesizing `dispatched:<n>`.
+   * The field is optional in the response shape for backwards-compat
+   * against an older leader (returns `[]` in that case).
+   */
   tickContinuation: () =>
-    call<{ dispatched: number; checkpoints: number; pending: number }>(
-      'POST',
-      '/api/continuation/tick',
-    ),
+    call<{
+      dispatched: number;
+      checkpoints: number;
+      pending: number;
+      dispatchedIds?: string[];
+    }>('POST', '/api/continuation/tick'),
   // NOTE: `appendInteraction` was removed in TASK_2026_001 Batch 8 — it was
   // a 4-arg stub that ignored 3 of its arguments, wrote a placeholder body,
   // and silently swallowed errors (`.catch(() => {})`). It had no callers.

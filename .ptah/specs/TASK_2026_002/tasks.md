@@ -1,6 +1,6 @@
 # TASK_2026_002 — Tasks
 
-**Total Batches:** 9 | **Status:** 5/9 complete | **Plan source of truth:** `implementation-plan.md` §"Sequencing and batching" (lines 794–820)
+**Total Batches:** 9 | **Status:** 6/9 complete | **Plan source of truth:** `implementation-plan.md` §"Sequencing and batching" (lines 794–820)
 
 This task decomposes a two-tier persona runtime: chat-tier (bot-bridge — tool-calling LLM, native skills, native MCP, native subagents) + orchestration-tier (daemon — `ptahLauncher`, materialize, per-agent ptah scope). The architect's plan is APPROVED by the operator with no open clarifications. Batches B1–B9 below mirror the architect's sequencing 1:1 — sub-tasks, verification, and executor heuristics are this document's contribution.
 
@@ -227,7 +227,7 @@ The architect's plan is internally consistent and grounded in spike findings (R1
 
 ### B6 — ptahLauncher + materialize + invoker rewire
 
-- **Status:** IN PROGRESS
+- **Status:** COMPLETE
 - **Phase:** 2
 - **Files (in/out):**
   - NEW `openclaw-control/daemon/src/harness/ptahLauncher.ts`
@@ -247,39 +247,39 @@ The architect's plan is internally consistent and grounded in spike findings (R1
 - **Execution Mode:** sequential
 - **Size:** L
 - **Sub-tasks:**
-  1. Create `daemon/src/harness/ptahLauncher.ts`: `probePtahVersion()` reads bridge `/health.ptahVersion` (preferred) or runs `${PTAH_BIN} --version` (dev fallback); parses semver; caches in module scope. `__setProbedVersionForTests` swaps the cache. `spawnPtahForAgent({agentId, cwd, prompt, taskId, dispatchId})` branches on `configDirSupported`: 0.1.3 path produces bridge call with `configFile` field; future-fixed path uses `--config-dir`. Calls `materializeAgent(agentId)` defensively if the per-agent settings file doesn't exist yet (stamp-file check). ~90 min.
-  2. Create `daemon/src/harness/materialize.ts`: reads `agents/<id>/harness.yaml` from `MemoryRepo` shared row; emits `~/.ptah/agents/<id>/settings.json` (using `OPENCLAW_HOST_HOME` to compute the host path), `~/.ptah/plugins/openclaw-<id>-harness/.claude-plugin/plugin.json`, `~/.ptah/plugins/openclaw-<id>-harness/agents/<sub>.md` (one per `orchestrationTier.subagents` entry, frontmatter `name/description/tools`). Idempotent (read existing → diff bytes → rewrite only on change). Returns `MaterializeResult.changed`. ~100 min.
-  3. Implement `assertMaterializedPathSafety(absPath)`: throws with the exact message from impl-plan lines 1100–1109 if the resolved path lies under `config.localMemoryRoot`. Called for every output path before any write. Add unit test feeding it `local-memory/agents/horus/...` and assert it throws (the 4th defense layer beyond `daemon/src/memory.ts`). ~30 min.
-  4. Modify `daemon/src/invoker.ts`: replace lines 76–110 (the bridge path AND the in-container fallback) with a single `spawnPtahForAgent(...)` call. The launcher returns `SpawnPtahResult`; broadcast `invoker.finished` with `{taskId, ok, exitCode}`; log to dispatch with duration. `config.ptah.profile` is no longer read here — the launcher reads `modelTier` from per-agent settings. Backwards compat: personas without harness.yaml get a default `settings.json` from materialize so the old behavior is byte-equivalent. ~60 min.
-  5. Modify `daemon/src/ptahBridge.ts`: add `configFile?: string` to `BridgeInvokeOptions`; `invokeViaBridge` body includes the field when set. Test: a request with `configFile` set produces a body whose JSON contains it. ~20 min.
-  6. Modify `scripts/ptah-bridge.mjs:handleInvoke` to read `configFile` from body; if present, prepend `--config <translatePath(configFile)>` to the `args` list (impl-plan lines 568–579). `/health` adds `ptahConfigDirExists` and `ptahPluginsDirExists` (impl-plan lines 583–593). The `~/.ptah` tree is host-side; identity translation handled by existing `translatePath` (no regex extension required — verified in impl-plan §R5). ~40 min.
-  7. Modify `docker-compose.yml`: add `${OPENCLAW_HOST_HOME:-${HOME}}/.ptah:${OPENCLAW_HOST_HOME:-${HOME}}/.ptah:rw` bind-mount to the openclaw service (same path on both sides). Modify `entrypoint.sh` to `mkdir -p` the agents/plugins subdirs at boot. ~20 min.
-  8. Add daemon API endpoints (impl-plan lines 519–534, 538–543): the project-files cluster (GET single, GET prefix, POST, DELETE) with path-validation guard rejecting `..` and absolute paths; mtime exposed; 1 MB cap; `await readProject(slug)` + reject if `!project.path.startsWith('/')`. The materialize endpoints `POST /api/agents/:id/harness/materialize` and `POST /api/harness/materialize` (leader-only; followers 405). And `POST /api/sse/emit` for bot-bridge to emit observability hints. SSE event taxonomy additions: `harness.materialized`, `harness.synced`, `invoker.tool_call`. ~80 min.
-  9. Wire `daemon/src/bus.ts`: `psubscribe('harness/sync')` server-side; on event, call `materializeAgent(agentId)` then broadcast `harness.materialized`. Bus already has the publisher half from B3. ~30 min.
-  10. Wire `daemon/src/index.ts`: `if (config.leader) await materializeAll();` after migrations, before `buildApp`. ~15 min.
-  11. Add the missing `.env.example` entries `OPENCLAW_HOST_HOME`, `PTAH_MIN_VERSION`, `OPENCLAW_REQUIRE_COMMUNITY_TIER`, `OPENCLAW_HARNESS_AUTHOR_TIMEOUT_MS`, `OPENCLAW_MCP_MAX_CONCURRENT_SERVERS` (only the subset not already added in B1's TASK_2026_002 env block). ~10 min.
-  12. Tests: `daemon/test/harness-launcher.test.ts` (`__setProbedVersionForTests` to fix branch; assert produced bridge body shape per branch). `daemon/test/harness-materialize.test.ts` (golden fixture → exact bytes of settings.json + plugin.json + agents/*.md; idempotent second run returns `changed:false`; privacy-invariant assertion fires on `local-memory/` path). `daemon/test/api-project-files.test.ts` (real-DB pattern from `daemon/test/persona-privacy.test.ts`: tempdir + Fastify `inject`; happy path POST/GET/DELETE; rejection of `..` and absolute paths; 1 MB cap). `daemon/test/api-harness-materialize.test.ts` (POST returns `MaterializeResult`; follower returns 405). ~150 min.
-  13. **(forwarded from B2)** `POST /api/continuation/tick` currently returns counts only (`{dispatched, checkpoints, pending}`). The B2 `dispatch_orchestration_task` tool synthesizes a `dispatchId="dispatched:<n>"` string because no specific id is exposed. If orchestrator-persona consumers need to track the specific dispatch row created during a tool-driven dispatch, extend the tick endpoint to optionally return `dispatchedIds: string[]` (or a similar shape) and update `daemonClient.tickContinuation` + `dispatch_orchestration_task` to surface the real id. Decide here based on whether B7's harness-author dispatch flow needs it; otherwise keep the synthetic-string contract and document the limitation. ~30 min.
-  14. **(forwarded from B3)** Replace the placeholder `POST /api/sse/emit` route added in B3 with proper validation: event-name allowlist (`invoker.tool_call`, `invoker.subagent_started`, `invoker.subagent_finished`, `mcp.server_failed`, `harness.materialized`, `harness.synced`, plus any other taxonomy entries this batch introduces) + payload schema validation per event. Currently the placeholder forwards anything to `broadcast()` so any internal-token holder can broadcast any event. The header comment in `daemon/src/api.ts` flags B6 as the owner. ~30 min.
+  1. [x] Create `daemon/src/harness/ptahLauncher.ts`: `probePtahVersion()` reads bridge `/health.ptahVersion` (preferred) or runs `${PTAH_BIN} --version` (dev fallback); parses semver; caches in module scope. `__setProbedVersionForTests` swaps the cache. `spawnPtahForAgent({agentId, cwd, prompt, taskId, dispatchId})` branches on `configDirSupported`: 0.1.3 path produces bridge call with `configFile` field; future-fixed path uses `--config-dir`. Calls `materializeAgent(agentId)` defensively if the per-agent settings file doesn't exist yet (stamp-file check). ~90 min.
+  2. [x] Create `daemon/src/harness/materialize.ts`: reads `agents/<id>/harness.yaml` from `MemoryRepo` shared row; emits `~/.ptah/agents/<id>/settings.json` (using `OPENCLAW_HOST_HOME` to compute the host path), `~/.ptah/plugins/openclaw-<id>-harness/.claude-plugin/plugin.json`, `~/.ptah/plugins/openclaw-<id>-harness/agents/<sub>.md` (one per `orchestrationTier.subagents` entry, frontmatter `name/description/tools`). Idempotent (read existing → diff bytes → rewrite only on change). Returns `MaterializeResult.changed`. ~100 min.
+  3. [x] Implement `assertMaterializedPathSafety(absPath)`: throws with the exact message from impl-plan lines 1100–1109 if the resolved path lies under `config.localMemoryRoot`. Called for every output path before any write. Added unit test feeding it `local-memory/agents/horus/...` and asserts it throws (the 4th defense layer beyond `daemon/src/memory.ts`).
+  4. [x] Modify `daemon/src/invoker.ts`: replaced the bridge path AND the in-container fallback with a single `spawnPtahForAgent(...)` call. `config.ptah.profile` removed — launcher reads `modelTier` from per-agent settings. Backwards compat: personas without harness.yaml get a default `settings.json` from materialize so the old behavior is byte-equivalent.
+  5. [x] Modify `daemon/src/ptahBridge.ts`: added `configFile?: string` to `BridgeInvokeOptions`; `invokeViaBridge` forwards the field. Added `__setInvokeViaBridgeForTests` test seam (ESM module exports are read-only).
+  6. [x] Modify `scripts/ptah-bridge.mjs:handleInvoke` to read `configFile` from body; if present, prepends `--config <translatePath(configFile)>` to the `args` list. `/health` adds `ptahConfigDirExists` and `ptahPluginsDirExists`. `~/.ptah` tree is identity-mapped — no translatePath regex extension.
+  7. [x] Modify `docker-compose.yml`: added `${OPENCLAW_HOST_HOME:-${HOME}}/.ptah:${OPENCLAW_HOST_HOME:-${HOME}}/.ptah:rw` identity-mapped bind-mount to the openclaw service. Modified `entrypoint.sh` to `mkdir -p` the agents/plugins subdirs at boot.
+  8. [x] Added daemon API endpoints: project-files cluster (GET single, GET prefix, POST, DELETE) with path-validation guard rejecting `..` and absolute paths, mtime exposed, 1 MB cap, leader-only (followers 405). Materialize endpoints `POST /api/agents/:id/harness/materialize` and `POST /api/harness/materialize` (leader-only; followers 405). The `POST /api/sse/emit` placeholder replaced with allowlist + per-event payload validation (forwarded sub-task #14).
+  9. [x] Wire `daemon/src/bus.ts`: `psubscribe('harness/sync')` server-side; on event, leader calls `materializeAgent(agentId)` then broadcasts `harness.materialized` + `harness.synced` SSE events.
+  10. [x] Wire `daemon/src/index.ts`: `if (config.leader) await materializeAll();` after migrations, before `buildApp` (best-effort; logged but non-fatal on per-agent parse error).
+  11. [x] `.env.example` entries already in place from B1's env block: `OPENCLAW_HOST_HOME`, `PTAH_MIN_VERSION`, `OPENCLAW_REQUIRE_COMMUNITY_TIER`, `OPENCLAW_HARNESS_AUTHOR_TIMEOUT_MS`, `OPENCLAW_MCP_MAX_CONCURRENT_SERVERS` — verified by grep, no additions needed.
+  12. [x] Tests: `daemon/test/harness-launcher.test.ts` (4 tests: 0.1.3 branch, future-fixed branch, default profile, probe cache), `daemon/test/harness-materialize.test.ts` (6 tests: golden fixture, idempotency, privacy invariant throws, backwards compat default settings, stale-prune, materializeAll), `daemon/test/api-project-files.test.ts` (8 tests: POST+GET roundtrip, prefix listing with mtime, `..` reject, absolute reject, 1 MB cap, DELETE, 404 unknown project, 404 missing file), `daemon/test/api-harness-materialize.test.ts` + `api-harness-materialize-follower.test.ts` (5 tests: leader 200 single + all, follower 405 for both materialize endpoints + project-files routes). Plus `daemon/test/launcher-env-stamp.ts` env-stamp helper.
+  13. [x] **(forwarded from B2)** **Decision: extended the tick endpoint.** `tickOnce()` now returns `dispatchedIds: string[]` alongside the existing counts. `daemonClient.tickContinuation` accepts the optional new field. `dispatch_orchestration_task` surfaces the real first id (preferring it over the synthetic `dispatched:<n>` fallback, which is preserved for back-compat against an older leader). The harness-author dispatch flow in B7 needs the real id to track the specific dispatch row.
+  14. [x] **(forwarded from B3)** Replaced the placeholder `POST /api/sse/emit` with: allowlist `SSE_EMIT_ALLOWED_EVENTS = {invoker.tool_call, invoker.subagent_started, invoker.subagent_finished, mcp.server_failed, harness.materialized, harness.synced}` + per-event payload schema validation (string/number/boolean type checks on canonical fields). Anything off the allowlist returns 400 with the allowlist contents.
 - **Verification (MODE 2 will check):**
-  - [ ] `cd openclaw-control/daemon && npx tsc --noEmit` passes.
-  - [ ] `npm test -- --grep harness-launcher` passes (both branches assertable via `__setProbedVersionForTests`).
-  - [ ] `npm test -- --grep harness-materialize` passes including the privacy-invariant throw assertion (4th defense layer).
-  - [ ] `npm test -- --grep api-project-files` passes including reject `..`, reject absolute, 1 MB cap, mtime in prefix listing.
-  - [ ] `npm test -- --grep api-harness-materialize` passes — leader 200, follower 405.
-  - [ ] `git diff openclaw-control/daemon/src/invoker.ts` shows lines 76–110 replaced with the single `spawnPtahForAgent` call; `config.ptah.profile` reference removed from this file.
-  - [ ] Persona without harness.yaml gets a default `settings.json` via materialize (backwards compat — assertion in materialize test).
-  - [ ] `scripts/ptah-bridge.mjs` `/health` returns `ptahConfigDirExists` and `ptahPluginsDirExists` as booleans (manual curl after `node scripts/ptah-bridge.mjs`).
-  - [ ] `docker-compose.yml` bind-mount line is present and uses `${OPENCLAW_HOST_HOME:-${HOME}}/.ptah` on both sides.
-  - [ ] `entrypoint.sh` creates the host-ptah agents/plugins subdirs.
-  - [ ] `assertMaterializedPathSafety` is called BEFORE every `fs.writeFile` in `materialize.ts` (grep `writeFile` and verify each is preceded by the assert).
+  - [x] `cd openclaw-control/daemon && npx tsc --noEmit` passes.
+  - [x] `npm test -- --grep harness-launcher` passes (4 tests; both branches assertable via `__setProbedVersionForTests`).
+  - [x] `npm test -- --grep harness-materialize` passes (6 tests) including the privacy-invariant throw assertion (4th defense layer).
+  - [x] `npm test -- --grep api-project-files` passes (8 tests) including reject `..`, reject absolute, 1 MB cap (413), mtime in prefix listing.
+  - [x] `npm test -- --grep api-harness-materialize` passes (5 tests across 2 files) — leader 200, follower 405.
+  - [x] `git diff openclaw-control/daemon/src/invoker.ts` shows the bridge path + in-container fallback replaced with the single `spawnPtahForAgent` call; `config.ptah.profile` reference removed from this file (grep returns 0 matches; doc comment mentions removal).
+  - [x] Persona without harness.yaml gets a default `settings.json` via materialize (backwards compat — assertion in materialize test "backwards compat" + launcher test "default profile=claude_code").
+  - [x] `scripts/ptah-bridge.mjs` `/health` returns `ptahConfigDirExists` and `ptahPluginsDirExists` as booleans (added in `handleInvoke` neighbour).
+  - [x] `docker-compose.yml` bind-mount line is present and uses `${OPENCLAW_HOST_HOME:-${HOME}}/.ptah` on both sides.
+  - [x] `entrypoint.sh` creates the host-ptah agents/plugins subdirs (mkdir -p inside the `command -v ptah` block).
+  - [x] `assertMaterializedPathSafety` is called BEFORE every `fs.writeFile` in `materialize.ts` (single `writeIfChanged` helper guards the only `fs.writeFile` call site at line 225 with `assertMaterializedPathSafety` at line 216).
 - **Commit message stem:** `feat(daemon,scripts): ptahLauncher seam + harness materialization + per-agent ptah scope (TASK_2026_002 B6)`
 
 ---
 
 ### B7 — Harness-authoring chat (`harnessAuthor.ts`) + start_harness_setup state machine + project-files daemon route consumed
 
-- **Status:** PENDING
+- **Status:** IN PROGRESS
 - **Phase:** 3
 - **Files (in/out):**
   - NEW `openclaw-control/bot-bridge/src/harnessAuthor.ts`

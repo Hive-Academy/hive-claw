@@ -60,6 +60,14 @@ services:
       # container lacks the Claude CLI binary. The orchestration loop runs ptah
       # on the host via the ptah-bridge service; see scripts/ptah-bridge.mjs.
       - ${PTAH_CONFIG_DIR:-${HOME}/.ptah}:/home/agent/.ptah:rw
+      # TASK_2026_002 B6: identity-mapped bind-mount of ~/.ptah so the daemon
+      # writes per-agent settings.json + the per-persona plugin tree at the
+      # same path the bridge sees. The daemon emits host paths (computed via
+      # OPENCLAW_HOST_HOME); the bridge identity-translates `~/.ptah/...`.
+      # Same path on both sides — the ${PTAH_CONFIG_DIR} mount above maps to
+      # /home/agent/.ptah for backwards compat with ptah's container-side
+      # auth state; this entry maps the host path identity-style.
+      - ${OPENCLAW_HOST_HOME:-${HOME}}/.ptah:${OPENCLAW_HOST_HOME:-${HOME}}/.ptah:rw
       # Share `gh` CLI auth with the host so a single `gh auth login` on the
       # host gives the agent access to private repos / PR creation / etc.
       - ${GH_CONFIG_DIR:-${HOME}/.config/gh}:/home/agent/.config/gh:rw
