@@ -1,6 +1,7 @@
 import { request } from 'undici';
 import { config } from './config.js';
 import { broadcast } from './sse.js';
+import { assertNotForbiddenJsonRpc } from './harness/outboundGuard.js';
 
 /**
  * Client for scripts/ptah-bridge.mjs — the host-side process that spawns ptah
@@ -60,6 +61,14 @@ interface BridgeDoneEnvelope {
 
 interface BridgeHealthResponse {
   ptahVersion?: string | null;
+  /**
+   * TASK_2026_002 B8 — surfaced by `scripts/ptah-bridge.mjs` `/health` so the
+   * daemon's `licenseGuard.assertCommunityTier()` can refuse to boot when the
+   * host's ptah is on a Pro tier. `null` means the bridge could not probe
+   * (`ptah --json license status` not implemented or threw); the guard treats
+   * `null` as "unknown" and refuses the boot when the env var demands community.
+   */
+  ptahLicenseTier?: string | null;
 }
 
 export function isBridgeEnabled(): boolean {
@@ -83,6 +92,14 @@ export async function invokeViaBridge(opts: BridgeInvokeOptions): Promise<Bridge
   const url = `${config.ptah.bridgeUrl.replace(/\/$/, '')}/invoke`;
   const started = Date.now();
 
+  // TASK_2026_002 B8 — outbound JSON-RPC guard. The bridge body is not itself
+  // JSON-RPC shaped (no `method` field at the top level), so this assertion
+  // is a no-op for the canonical /invoke shape. Routed through the same
+  // chokepoint as `leaderClient` so a future refactor that nests an RPC
+  // payload into the bridge body still has the gate.
+  const bodyText = JSON.stringify(opts);
+  assertNotForbiddenJsonRpc(bodyText);
+
   let res;
   try {
     res = await request(url, {
@@ -91,7 +108,7 @@ export async function invokeViaBridge(opts: BridgeInvokeOptions): Promise<Bridge
         'content-type': 'application/json',
         authorization: `Bearer ${config.internalToken}`,
       },
-      body: JSON.stringify(opts),
+      body: bodyText,
       bodyTimeout: 0, // disable body timeout — runs can be long
       headersTimeout: 30_000,
     });
@@ -179,7 +196,12 @@ export async function invokeViaBridge(opts: BridgeInvokeOptions): Promise<Bridge
   };
 }
 
-export async function pingBridge(): Promise<{ ok: boolean; ptahVersion?: string | null; error?: string }> {
+export async function pingBridge(): Promise<{
+  ok: boolean;
+  ptahVersion?: string | null;
+  ptahLicenseTier?: string | null;
+  error?: string;
+}> {
   if (!isBridgeEnabled()) return { ok: false, error: 'OPENCLAW_PTAH_BRIDGE_URL unset' };
   try {
     const res = await request(`${config.ptah.bridgeUrl.replace(/\/$/, '')}/health`, {
@@ -188,7 +210,11 @@ export async function pingBridge(): Promise<{ ok: boolean; ptahVersion?: string 
     });
     if (res.statusCode !== 200) return { ok: false, error: `health returned ${res.statusCode}` };
     const data = (await res.body.json()) as BridgeHealthResponse;
-    return { ok: true, ptahVersion: data?.ptahVersion ?? null };
+    return {
+      ok: true,
+      ptahVersion: data?.ptahVersion ?? null,
+      ptahLicenseTier: data?.ptahLicenseTier ?? null,
+    };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return { ok: false, error: message };

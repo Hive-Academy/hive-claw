@@ -123,6 +123,30 @@ function getPtahVersion() {
   catch { return null; }
 }
 
+/**
+ * TASK_2026_002 B8 — surface the host ptah's license tier so the daemon's
+ * `harness/licenseGuard.ts:assertCommunityTier()` can fail boot when an
+ * operator sets `OPENCLAW_REQUIRE_COMMUNITY_TIER=1` against a Pro-tier host.
+ *
+ * Probes `ptah --json license status` and parses the JSON envelope's `tier`
+ * field. On any failure (binary missing, non-zero exit, malformed JSON,
+ * tier field absent) returns `null`; the daemon-side guard treats `null`
+ * as "unknown — fail closed" when the env var demands community.
+ */
+function getPtahLicenseTier() {
+  try {
+    const stdout = execSync(`${PTAH_BIN} --json license status`, {
+      encoding: 'utf8',
+      timeout: 3000,
+    });
+    const parsed = JSON.parse(stdout);
+    const tier = parsed?.tier;
+    return typeof tier === 'string' ? tier : null;
+  } catch {
+    return null;
+  }
+}
+
 async function handleInvoke(req, res) {
   let body;
   try { body = await readJsonBody(req); }
@@ -215,6 +239,7 @@ const server = http.createServer(async (req, res) => {
     return jsonResponse(res, 200, {
       ok: true,
       ptahVersion: getPtahVersion(),
+      ptahLicenseTier: getPtahLicenseTier(),
       hostUser: os.userInfo().username,
       pathMap: { workspace: { container: WS_C, host: WS_H }, specs: { container: SP_C, host: SP_H } },
       ptahConfigDirExists: existsSync(PTAH_HOME),

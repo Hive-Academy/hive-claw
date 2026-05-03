@@ -8,6 +8,7 @@ import { startDispatchWorker } from './dispatch.js';
 import { openOnce, runMigrations, getDb } from './db/index.js';
 import { initLeaderClient } from './leaderClient.js';
 import { materializeAll } from './harness/materialize.js';
+import { assertCommunityTier } from './harness/licenseGuard.js';
 
 const STALE_ENV_VARS: readonly string[] = [
   'OPENCLAW_SPECS_REPO_URL',
@@ -38,6 +39,15 @@ async function main(): Promise<void> {
     `[boot] mode=${config.leader ? 'LEADER' : 'follower'} agents=[${config.localAgentIds.join(',') || 'none'}]`,
   );
   warnOnStaleEnv();
+
+  // TASK_2026_002 B8 — community-tier license assertion. Runs on BOTH leader
+  // and follower (the env var, when set, applies to every host in the
+  // cluster). The probe goes through `pingBridge()` so a host without the
+  // bridge configured can't satisfy the assertion at all — that is the
+  // intended fail-closed posture. No-op when the env var is unset (default).
+  // Throwing here propagates to `main().catch` and exits non-zero before
+  // HTTP listen, matching the existing fatal-boot pattern.
+  await assertCommunityTier();
 
   if (config.leader) {
     // Leader owns the SQLite DB. openOnce is idempotent; runMigrations is too.

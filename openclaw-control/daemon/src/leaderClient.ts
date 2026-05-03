@@ -17,12 +17,33 @@
  * dispatch worker depends on).
  */
 
-import { request } from 'undici';
+import { request as undiciRequest, type Dispatcher } from 'undici';
 import type { Dispatch, DispatchState, MemoryScope } from './db/index.js';
 import type { Project } from './projects.js';
 import type { TaskSummary } from './phase.js';
 import type { Agent } from './agents.js';
 import type { MemoryEntry } from './memory.js';
+import { assertNotForbiddenJsonRpc } from './harness/outboundGuard.js';
+
+/**
+ * Single chokepoint wrapper around `undici.request` so the
+ * `assertNotForbiddenJsonRpc` guard runs on EVERY outbound POST/PUT body the
+ * follower → leader relay constructs. The guard is a no-op in
+ * production-default mode (env unset); when active it inspects the body and
+ * throws on `wizard:*` / `harness:analyze-intent` BEFORE the request is
+ * dispatched. See `daemon/src/harness/outboundGuard.ts` for the contract.
+ */
+function request(
+  url: string,
+  opts: Parameters<typeof undiciRequest>[1],
+): ReturnType<typeof undiciRequest> {
+  if (opts && typeof opts === 'object' && 'body' in opts) {
+    assertNotForbiddenJsonRpc(opts.body as string | Buffer | Uint8Array | null | undefined);
+  }
+  return undiciRequest(url, opts);
+}
+// Re-export the dispatcher type so existing call signatures elsewhere don't shift.
+export type { Dispatcher };
 
 export class LeaderError extends Error {
   readonly statusCode: number;
