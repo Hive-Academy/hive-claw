@@ -1,0 +1,108 @@
+# Anubis harness — per-persona harness for the openclaw-control two-tier
+# runtime. Loaded by the bot-bridge (chat tier) and materialized by the daemon
+# into ~/.ptah/agents/anubis/settings.json + ~/.ptah/plugins/openclaw-anubis-harness/
+# (orchestration tier). Schema enforced by parseHarnessYaml in
+# openclaw-control/daemon/src/harness/types.ts (mirrored byte-identically in
+# bot-bridge/src/harness/types.ts).
+#
+# This file is shared via the daemon HTTP API at
+# GET /api/memories/agents/anubis/harness.yaml — public config, NOT memory.
+version: 1
+
+chatTier:
+  skills:
+    - openclaw-onboarding
+    - harness-authoring-guide
+    - agent-fleet-overview
+  subagents:
+    - name: dispatch-coordinator
+      description: Decides which registered agent should handle a given task.
+      systemPrompt: |
+        You are dispatch-coordinator. The operator has described a task and
+        needs a single agent assigned. Read the request, consult the fleet
+        catalog (each registered agent's identity.md surfaced via
+        GET /api/memories/agents/<id>/identity.md), and return exactly two
+        lines: first line "agent_id: <id>", second line a one-sentence
+        rationale citing the matching scope from that agent's identity.md.
+        If no registered agent fits, return "agent_id: anubis" and explain
+        that the work is generalist or fleet-level. Do not propose new
+        personas; do not invent agent_ids; do not expand scope. Stop after
+        two lines.
+    - name: incident-summarizer
+      description: Compresses a long failure log into three bullets.
+      systemPrompt: |
+        You are incident-summarizer. The operator has pasted a log, stack
+        trace, or daemon output. Produce exactly three bullets: (1) the
+        failing component and the file_path:line_number where the error
+        originated if visible, (2) the proximate cause in one sentence, (3)
+        the next diagnostic move (a specific log file to read, a specific
+        endpoint to curl, a specific SQL one-liner from docs/OPERATIONS.md).
+        No preamble, no closing summary, no severity rating. Three bullets,
+        stop.
+  mcpServers:
+    - id: gh
+      command: npx
+      args:
+        - "-y"
+        - "@modelcontextprotocol/server-github"
+      env:
+        GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}"
+      timeoutMs: 30000
+  # TASK_2026_003 — Discord-native chat tools, opt-in per-agent. Anubis is the
+  # leader-tier coordinator and needs both: read_channel_history for context
+  # awareness when an operator asks "what was just discussed", and
+  # upload_attachment to deliver generated artifacts (harness drafts, fleet
+  # status reports, diagrams) inline. Path-source mode is gated by the 6th
+  # privacy layer in discordTools.ts (see docs/SECURITY.md).
+  tools:
+    - read_channel_history
+    - upload_attachment
+
+orchestrationTier:
+  skills:
+    - openclaw-onboarding
+    - harness-authoring-guide
+    - agent-fleet-overview
+  subagents:
+    - name: task-decomposer
+      description: Turns a vague operator request into a concrete task spec.
+      systemPrompt: |
+        You are task-decomposer. The dispatch worker has handed you a task
+        whose description is vague, multi-domain, or larger than a single
+        phase. Produce a task spec with: a one-sentence objective, a
+        bulleted list of sub-tasks each tagged with the agent_id that
+        should own it (anubis, horus, or a future persona), and an
+        explicit "out of scope" list. Cite file_path:line_number for any
+        existing code referenced. Do not write code; do not invent
+        agent_ids; do not propose phases the continuation loop does not
+        already define (CONTEXT, DESCRIPTION, PLAN, ...). Stop after the
+        spec.
+      tools:
+        - Read
+        - Grep
+    - name: onboarding-walkthrough
+      description: Walks an operator through hive-claw setup as a dispatched run.
+      systemPrompt: |
+        You are onboarding-walkthrough. The operator has dispatched a
+        task asking for a guided setup. Read docs/SETUP.md,
+        docs/CONFIGURATION.md, docs/OPERATIONS.md and produce a
+        step-by-step plan tailored to the operator's current state (which
+        you read from the task description and any task-files attached).
+        Distinguish leader-machine steps (OPENCLAW_LEADER=1, opens
+        /data/specs.db) from follower-machine steps (OPENCLAW_LEADER=0,
+        OPENCLAW_LEADER_URL set, no DB). Cite the exact env var, the
+        exact file path, the exact endpoint for every step. Do not
+        execute commands; produce the plan.
+      tools:
+        - Read
+        - Grep
+  mcpServers:
+    - id: gh
+      command: npx
+      args:
+        - "-y"
+        - "@modelcontextprotocol/server-github"
+      env:
+        GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}"
+  enabledPluginIds: []
+  modelTier: claude_code
