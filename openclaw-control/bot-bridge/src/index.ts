@@ -11,6 +11,7 @@ import {
 } from './agentRegistry.js';
 import { route } from './commandRouter.js';
 import { startHarnessSync } from './skills/harnessSync.js';
+import * as mcpManager from './mcp/mcpManager.js';
 
 interface RunningAgent {
   def: AgentDef;
@@ -74,6 +75,20 @@ async function main() {
     if (r) running.set(def.id, r);
   }
 
+  // TASK_2026_002 B4 — start native MCP servers for every persona that has
+  // declared them in `harness.chatTier.mcpServers`. Runs after the Discord
+  // clients are up so an MCP server failure can't keep a persona offline:
+  // mcpManager logs + skips on failure, chat continues.
+  for (const def of agents) {
+    try {
+      await mcpManager.startServersForAgent(def);
+    } catch (err) {
+      console.warn(
+        `[bot-bridge] mcpManager.startServersForAgent(${def.id}) failed: ${(err as Error)?.message ?? err}`,
+      );
+    }
+  }
+
   // TASK_2026_002 B3 — harness/sync hot-reload subscriber.
   //
   // Daemon's `POST /api/agents/:id/harness/sync` publishes on the Redis
@@ -83,9 +98,9 @@ async function main() {
   // line 986: "Next inbound message rebuilds the system prompt from the
   // fresh def — no in-flight chat is interrupted").
   //
-  // The MCP reconcile call is B4's job — we deliberately do NOT call it
-  // here. B3 only stubs the def-swap; the MCP lifecycle wiring arrives in
-  // B4 along with the manager itself.
+  // The MCP reconcile call lands here in B4: AFTER the def swap so the
+  // reconciler reads the new harness, but BEFORE we return so the operator
+  // sees an end-to-end "harness pushed → MCP servers updated" cycle.
   const stopHarnessSync = await startHarnessSync({
     onAgentChanged: async (id) => {
       try {
@@ -94,6 +109,18 @@ async function main() {
         if (next && target) {
           target.def = next;
           console.log(`[bot-bridge] hot-reloaded harness for "${id}"`);
+          // TASK_2026_002 B4 — reconcile MCP servers against the fresh
+          // harness. Errors are non-fatal; mcpManager logs + skips. Order:
+          // def swap FIRST so chat.ts already sees the new tools, MCP
+          // reconcile SECOND so the registry next turn has the right open
+          // server set.
+          try {
+            await mcpManager.reconcileForAgent(next);
+          } catch (err) {
+            console.warn(
+              `[bot-bridge] mcpManager.reconcileForAgent(${id}) failed: ${(err as Error)?.message ?? err}`,
+            );
+          }
         } else if (!next) {
           console.warn(`[bot-bridge] harness/sync for "${id}" but persona is no longer runnable here — ignored`);
         } else {
@@ -151,6 +178,16 @@ async function main() {
         await stopHarnessSync();
       } catch (err) {
         console.warn('[bot-bridge] harness-sync stop failed:', (err as Error)?.message ?? err);
+      }
+      // TASK_2026_002 B4 — tear down every MCP server BEFORE destroying the
+      // Discord clients. Order matters: shutdownAll() runs `client.close()`
+      // → `transport.close()` → SIGKILL after 5s for each child, and we want
+      // those children gone before the process exits. Verification 5 greps
+      // for `shutdownAll` ABOVE `client.destroy()` in this file.
+      try {
+        await mcpManager.shutdownAll();
+      } catch (err) {
+        console.warn('[bot-bridge] mcpManager.shutdownAll failed:', (err as Error)?.message ?? err);
       }
       for (const [id, a] of running) {
         await publishStatus(id, { status: 'offline' });

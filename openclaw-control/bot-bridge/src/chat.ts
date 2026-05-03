@@ -4,6 +4,7 @@ import { chatComplete, chatCompleteWithTools, type ToolDef, type ToolCallContext
 import type { AgentDef } from './agentRegistry.js';
 import { config } from './config.js';
 import * as daemonTools from './tools/daemonTools.js';
+import * as mcpTools from './tools/mcpTools.js';
 import { merge as mergeToolRegistries } from './tools/index.js';
 import { loadSkills, type LoadedSkill } from './skills/skillLoader.js';
 
@@ -259,12 +260,15 @@ async function postReply(msg: Message, text: string): Promise<void> {
  * churn.
  */
 async function buildToolRegistry(
-  _agent: AgentDef,
+  agent: AgentDef,
   _ctx: ToolCallContext,
 ): Promise<ToolDef[]> {
-  // Future batches will append registries here. Keep the merge call so
-  // collision policy is exercised even with a single registry.
-  return mergeToolRegistries(daemonTools.list());
+  // TASK_2026_002 B4 — merge in the per-agent MCP tool slice. mcpTools is a
+  // pure function over the manager's current open-server set: failed/backoff
+  // servers are filtered at the source, so their tools never appear here.
+  // Subagent tools (B5) and the harness-author surface (B7) plug in the
+  // same way.
+  return mergeToolRegistries(daemonTools.list(), mcpTools.listForAgent(agent.id));
 }
 
 /**

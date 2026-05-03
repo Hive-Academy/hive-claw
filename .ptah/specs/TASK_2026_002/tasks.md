@@ -1,6 +1,6 @@
 # TASK_2026_002 — Tasks
 
-**Total Batches:** 9 | **Status:** 3/9 complete | **Plan source of truth:** `implementation-plan.md` §"Sequencing and batching" (lines 794–820)
+**Total Batches:** 9 | **Status:** 4/9 complete | **Plan source of truth:** `implementation-plan.md` §"Sequencing and batching" (lines 794–820)
 
 This task decomposes a two-tier persona runtime: chat-tier (bot-bridge — tool-calling LLM, native skills, native MCP, native subagents) + orchestration-tier (daemon — `ptahLauncher`, materialize, per-agent ptah scope). The architect's plan is APPROVED by the operator with no open clarifications. Batches B1–B9 below mirror the architect's sequencing 1:1 — sub-tasks, verification, and executor heuristics are this document's contribution.
 
@@ -157,7 +157,7 @@ The architect's plan is internally consistent and grounded in spike findings (R1
 
 ### B4 — Native MCP client (mcpManager) + mcpTools registry
 
-- **Status:** IN PROGRESS
+- **Status:** COMPLETE
 - **Phase:** 4.6
 - **Files (in/out):**
   - NEW `openclaw-control/bot-bridge/src/mcp/mcpManager.ts`
@@ -171,29 +171,29 @@ The architect's plan is internally consistent and grounded in spike findings (R1
 - **Execution Mode:** sequential
 - **Size:** L
 - **Sub-tasks:**
-  1. Create `bot-bridge/src/mcp/mcpManager.ts` with `McpServerHandle`, `McpTool` types and the five exports from impl-plan lines 239–245. Lifecycle per impl-plan §"MCP client architecture" lines 889–893: start spawns `StdioClientTransport`, `client.initialize()`, `client.listTools()`. Stop calls `client.close()` then `transport.close()` then SIGKILL after 5s. ~120 min.
-  2. Implement reconcile diff (`reconcileForAgent`): compute added/removed/changed by id. Equality of changed → deep-equal of `{command, args, env, timeoutMs}`. Removed → stop. Added → start. Changed → stop+start. ~60 min.
-  3. Implement crash recovery: on transport `close` event when not initiated by us, increment `errorCount`, schedule respawn with backoff curve `[1s, 2s, 4s, 8s, 16s, 30s]`, max 6 attempts. On exhaustion, emit SSE `mcp.server_failed` via `daemonClient.emitSseHint` (helper introduced here — see also B8) and leave handle in failed state until next reconcile. ~70 min.
-  4. Implement concurrency budget (`OPENCLAW_MCP_MAX_CONCURRENT_SERVERS=8`): on `startServersForAgent`, if total open across all agents would exceed budget, log warn + skip excess. ~30 min.
-  5. Create `bot-bridge/src/tools/mcpTools.ts:listForAgent(agentId)`: returns one `ToolDef` per `(server, tool)` pair from `mcpManager.getOpenServers(agentId)`, name-prefixed `mcp__<server-id>__<tool-name>`. Handler calls `mcpManager.callTool(agentId, serverId, toolName, args)`. Failed/backoff servers filtered out (their tools don't appear). Per-tool timeout from spec or default 30 s. ~50 min.
-  6. Wire `index.ts`: after `loadAgents`, `for (const def of agents) await mcpManager.startServersForAgent(def);`. In the `harness/sync` handler from B3, add `await mcpManager.reconcileForAgent(next)`. SIGTERM: call `mcpManager.shutdownAll()` BEFORE `client.destroy()`. ~30 min.
-  7. Update `chat.ts:buildToolRegistry` to merge in `mcpTools.listForAgent(agent.id)`. Update `tools/index.ts:merge` to recognize the `mcp__` prefix as the namespacing escape hatch (already in B2's policy — verify). ~20 min.
-  8. Tests: `bot-bridge/test/mcp-manager.test.ts` mocking `StdioClientTransport`: lifecycle (start, list, call, stop); reconcile diff (add+remove+change); flapping recovery (transport close → backoff → respawn). `bot-bridge/test/integration/mcp-everything.test.ts` (gated on `OPENCLAW_TEST_REAL_MCP=1`): spawn `@modelcontextprotocol/server-everything` (bundled in SDK) and round-trip a tool call. ~120 min.
+  1. [x] Create `bot-bridge/src/mcp/mcpManager.ts` with `McpServerHandle`, `McpTool` types and the five exports from impl-plan lines 239–245. Lifecycle per impl-plan §"MCP client architecture" lines 889–893: start spawns `StdioClientTransport`, `client.initialize()`, `client.listTools()`. Stop calls `client.close()` then `transport.close()` then SIGKILL after 5s. ~120 min.
+  2. [x] Implement reconcile diff (`reconcileForAgent`): compute added/removed/changed by id. Equality of changed → deep-equal of `{command, args, env, timeoutMs}`. Removed → stop. Added → start. Changed → stop+start. ~60 min.
+  3. [x] Implement crash recovery: on transport `close` event when not initiated by us, increment `errorCount`, schedule respawn with backoff curve `[1s, 2s, 4s, 8s, 16s, 30s]`, max 6 attempts. On exhaustion, emit SSE `mcp.server_failed` via `daemonClient.emitSseHint` (helper introduced here — see also B8) and leave handle in failed state until next reconcile. ~70 min.
+  4. [x] Implement concurrency budget (`OPENCLAW_MCP_MAX_CONCURRENT_SERVERS=8`): on `startServersForAgent`, if total open across all agents would exceed budget, log warn + skip excess. ~30 min.
+  5. [x] Create `bot-bridge/src/tools/mcpTools.ts:listForAgent(agentId)`: returns one `ToolDef` per `(server, tool)` pair from `mcpManager.getOpenServers(agentId)`, name-prefixed `mcp__<server-id>__<tool-name>`. Handler calls `mcpManager.callTool(agentId, serverId, toolName, args)`. Failed/backoff servers filtered out (their tools don't appear). Per-tool timeout from spec or default 30 s. ~50 min.
+  6. [x] Wire `index.ts`: after `loadAgents`, `for (const def of agents) await mcpManager.startServersForAgent(def);`. In the `harness/sync` handler from B3, add `await mcpManager.reconcileForAgent(next)`. SIGTERM: call `mcpManager.shutdownAll()` BEFORE `client.destroy()`. ~30 min.
+  7. [x] Update `chat.ts:buildToolRegistry` to merge in `mcpTools.listForAgent(agent.id)`. Update `tools/index.ts:merge` to recognize the `mcp__` prefix as the namespacing escape hatch (already in B2's policy — verify). ~20 min.
+  8. [x] Tests: `bot-bridge/test/mcp-manager.test.ts` mocking `StdioClientTransport`: lifecycle (start, list, call, stop); reconcile diff (add+remove+change); flapping recovery (transport close → backoff → respawn). `bot-bridge/test/integration/mcp-everything.test.ts` (gated on `OPENCLAW_TEST_REAL_MCP=1`): spawn `@modelcontextprotocol/server-everything` (bundled in SDK) and round-trip a tool call. ~120 min.
 - **Verification (MODE 2 will check):**
-  - [ ] `cd openclaw-control/bot-bridge && npx tsc --noEmit` passes.
-  - [ ] `npm test -- --grep mcp-manager` passes — at minimum: lifecycle start/list/call/stop, reconcile diff add+remove+change, flapping recovery hits exponential backoff, exhaustion emits `mcp.server_failed`.
+  - [x] `cd openclaw-control/bot-bridge && npx tsc --noEmit` passes.
+  - [x] `npm test -- --grep mcp-manager` passes — at minimum: lifecycle start/list/call/stop, reconcile diff add+remove+change, flapping recovery hits exponential backoff, exhaustion emits `mcp.server_failed`.
   - [ ] (Local-only, gated) `OPENCLAW_TEST_REAL_MCP=1 npm test -- --grep mcp-everything` round-trips a real `add(a:1,b:2)→3` against the bundled server.
-  - [ ] `grep -n 'mcp__' openclaw-control/bot-bridge/src/tools/mcpTools.ts` shows the prefix is the namespacing convention.
-  - [ ] `grep -n 'shutdownAll' openclaw-control/bot-bridge/src/index.ts` shows it's called in the SIGTERM handler BEFORE `client.destroy()`.
-  - [ ] Concurrency budget enforced: a unit test starts a 9th server with budget=8 and asserts the 9th is skipped + warning logged.
-  - [ ] Backoff curve is `[1000, 2000, 4000, 8000, 16000, 30000]` (assert in test against the constants).
+  - [x] `grep -n 'mcp__' openclaw-control/bot-bridge/src/tools/mcpTools.ts` shows the prefix is the namespacing convention.
+  - [x] `grep -n 'shutdownAll' openclaw-control/bot-bridge/src/index.ts` shows it's called in the SIGTERM handler BEFORE `client.destroy()`.
+  - [x] Concurrency budget enforced: a unit test starts a 9th server with budget=8 and asserts the 9th is skipped + warning logged.
+  - [x] Backoff curve is `[1000, 2000, 4000, 8000, 16000, 30000]` (assert in test against the constants).
 - **Commit message stem:** `feat(bot-bridge): native MCP client manager + chat tool registry integration (TASK_2026_002 B4)`
 
 ---
 
 ### B5 — Native subagent runtime + subagentTools
 
-- **Status:** PENDING
+- **Status:** IN PROGRESS
 - **Phase:** 4
 - **Files (in/out):**
   - NEW `openclaw-control/bot-bridge/src/subagents/subagentRunner.ts`
@@ -347,6 +347,7 @@ The architect's plan is internally consistent and grounded in spike findings (R1
   8. **(backend-developer)** Write `bot-bridge/test/integration/horus-end-to-end.test.ts`: orchestrate AT#1–#6 in one suite using the fixtures from sub-tasks 1–3. AT#1 (mocked LLM emits `list_projects` tool call → assistant text contains project names). AT#2 (load Horus harness; assert `security-review` skill body present in system prompt). AT#3 (mocked LLM fires `delegate_to_subagent` → SSE events `invoker.subagent_started/finished` captured). AT#4 (mocked stdio MCP returns a tool result; assistant text includes it). AT#5 (drive harness-authoring dialog from B7's integration test fixture against a temp project; verify `.claude/harness.yaml` written + parses). AT#6 (`spawnPtahForAgent` produces a bridge body with `configFile=.../horus/settings.json`; `~/.ptah/plugins/openclaw-horus-harness/agents/security-review.md` exists on disk). ~120 min.
   9. **(forwarded from B3)** Add a followers-405 test for `POST /api/agents/:id/harness/sync` (and any other leader-only endpoint introduced in B3–B7 — `harness/materialize`, project-files write, etc.). The B3 405 branch is a single `if (!config.leader)` guard but no automated test covers it; add one to the integration sweep. ~20 min.
   10. **(forwarded from B3 — security audit note)** During the security-review sweep at acceptance test #7, audit whether `safeFile`'s `.yaml` extension allowance in `daemon/src/memory.ts` (added in B3 to enable `harness.yaml` shared-memory storage) should be scope-narrowed (e.g., regex restricted to `harness.yaml` only, or extension gated by scope). Persona-privacy invariant is currently intact because `PRIVATE_AGENT_FILES` is the gate (literal-set match — `persona.yaml` is NOT a member and would route to shared, which is documented behavior, not a leak). The audit is forward-looking surface-area minimization, not a fix for a known vulnerability. Document the finding in `docs/SECURITY.md` either way. ~15 min.
+  11. **(forwarded from B4)** Document in operator runbook: AT sweep with real MCP requires `npm i -D @modelcontextprotocol/server-everything` in bot-bridge before running `OPENCLAW_TEST_REAL_MCP=1 npm test -- --grep mcp-everything`. The package is intentionally NOT in `package.json` deps (local-only diagnostic; CI never runs the gated test). Add to `docs/TROUBLESHOOTING.md` or `docs/OPERATIONS.md` under an "MCP integration smoke test" subsection. ~10 min.
 - **Verification (MODE 2 will check):**
   - [ ] `local-memory/agents/horus/persona.md` exists; the daemon refuses to read it via `GET /api/memories/agents/horus/persona.md` (returns 404 — privacy invariant, layer 2 of the 3-layer enforcement; assertion in test).
   - [ ] `shared-specs/memory/agents/horus/identity.md` is reachable via daemon HTTP (manual curl against running daemon; or assertion in horus-end-to-end test).
