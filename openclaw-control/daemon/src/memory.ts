@@ -108,7 +108,12 @@ function resolveBackend(scope: MemoryScope, id: string, filename: string): Resol
  * Non-owners may read but not modify any file under `agents/<id>/`.
  *
  * If `OPENCLAW_LOCAL_AGENT_IDS` is empty, ownership checks are bypassed
- * (single-machine / dev setup).
+ * (single-machine / dev setup). Internal-token callers (follower→leader
+ * forwards, bot-bridge, dispatched agents) bypass via opts.skipOwnership
+ * at the storage facade — the internal token is the fleet trust boundary,
+ * so the receiving leader cannot enforce ownership against its own local
+ * list when the writer is a different host. PRIVATE_AGENT_FILES routing
+ * is unaffected (still enforced by resolveBackend + the 403 HTTP gate).
  */
 function assertAgentOwnership(id: string): void {
   if (config.localAgentIds.length === 0) return;
@@ -202,10 +207,11 @@ export async function writeMemoryFile(
   file: string,
   content: string,
   updatedBy?: string | null,
+  opts?: { skipOwnership?: boolean },
 ): Promise<{ private: boolean }> {
   const id_ = safeId(id);
   const file_ = safeFile(file);
-  if (scope === 'agents') assertAgentOwnership(id_);
+  if (scope === 'agents' && !opts?.skipOwnership) assertAgentOwnership(id_);
   const backend = resolveBackend(scope, id_, file_);
 
   if (backend.kind === 'local') {
@@ -221,10 +227,11 @@ export async function deleteMemoryFile(
   scope: MemoryScope,
   id: string,
   file: string,
+  opts?: { skipOwnership?: boolean },
 ): Promise<void> {
   const id_ = safeId(id);
   const file_ = safeFile(file);
-  if (scope === 'agents') assertAgentOwnership(id_);
+  if (scope === 'agents' && !opts?.skipOwnership) assertAgentOwnership(id_);
   const backend = resolveBackend(scope, id_, file_);
   if (backend.kind === 'local') {
     try {
