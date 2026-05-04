@@ -156,11 +156,45 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 
 type SpawnFn = (agentId: string, spec: McpServerSpec) => Promise<InternalEntry>;
 
+/**
+ * Expand `${VAR}` references in spec env values against `process.env`.
+ * Unknown vars expand to '' and log a warning so the operator sees the cause
+ * before the MCP server hits its upstream API with empty credentials.
+ *
+ * Returned env merges PATH/HOME/LANG/LC_ALL from `process.env` so the child
+ * has a usable shell environment — the MCP SDK's StdioClientTransport
+ * REPLACES (not merges) the child env when given an explicit `env`.
+ */
+function resolveSpawnEnv(
+  agentId: string,
+  spec: McpServerSpec,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of ['PATH', 'HOME', 'LANG', 'LC_ALL'] as const) {
+    const v = process.env[k];
+    if (typeof v === 'string') out[k] = v;
+  }
+  const specEnv = spec.env ?? {};
+  for (const [key, raw] of Object.entries(specEnv)) {
+    out[key] = raw.replace(/\$\{([A-Z_][A-Z0-9_]*)\}/gi, (_, name: string) => {
+      const v = process.env[name];
+      if (v === undefined || v === '') {
+        console.warn(
+          `[mcp] ${agentId}/${spec.id} env "${key}" references \${${name}} which is unset in process.env — expanding to empty string`,
+        );
+        return '';
+      }
+      return v;
+    });
+  }
+  return out;
+}
+
 const realSpawn: SpawnFn = async (agentId, spec) => {
   const transport = new StdioClientTransport({
     command: spec.command,
     args: spec.args,
-    env: spec.env,
+    env: resolveSpawnEnv(agentId, spec),
     // stderr defaults to "inherit" — operators see why an MCP server crashed.
   });
 
