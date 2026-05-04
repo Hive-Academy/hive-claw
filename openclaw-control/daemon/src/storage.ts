@@ -239,9 +239,10 @@ export async function writeMemory(
   filename: string,
   content: string,
   updatedBy: string | null,
+  opts?: { skipOwnership?: boolean },
 ): Promise<{ private: boolean }> {
   if (config.leader) {
-    return writeMemoryFile(scope, id, filename, content, updatedBy);
+    return writeMemoryFile(scope, id, filename, content, updatedBy, opts);
   }
   const r = await leaderClient.writeMemory(scope, id, filename, content);
   return { private: r.private };
@@ -251,9 +252,10 @@ export async function deleteMemory(
   scope: MemoryScope,
   id: string,
   filename: string,
+  opts?: { skipOwnership?: boolean },
 ): Promise<void> {
   if (config.leader) {
-    await deleteMemoryFile(scope, id, filename);
+    await deleteMemoryFile(scope, id, filename, opts);
     return;
   }
   await leaderClient.deleteMemory(scope, id, filename);

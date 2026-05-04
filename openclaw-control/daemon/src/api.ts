@@ -612,7 +612,13 @@ export function buildApp() {
     }
     try {
       const updatedBy = req.user?.username ?? null;
-      const r = await storage.writeMemory(scope, id, file, req.body.content, updatedBy);
+      // Internal-token callers (follower→leader forwards, bot-bridge,
+      // dispatched agents) bypass per-machine ownership: the token IS the
+      // fleet trust boundary. JWT browser users still get the check.
+      const skipOwnership = req.user?.username === 'service:internal';
+      const r = await storage.writeMemory(scope, id, file, req.body.content, updatedBy, {
+        skipOwnership,
+      });
       broadcast('memory.updated', { scope, id, file, private: r.private });
       return { ok: true, private: r.private };
     } catch (err) {
@@ -636,7 +642,8 @@ export function buildApp() {
           .send({ error: 'private agent files cannot be sent over the network' });
       }
       try {
-        await storage.deleteMemory(scope, id, file);
+        const skipOwnership = req.user?.username === 'service:internal';
+        await storage.deleteMemory(scope, id, file, { skipOwnership });
         broadcast('memory.updated', { scope, id, file, deleted: true });
         return { ok: true };
       } catch (err) {
