@@ -299,14 +299,16 @@ When the flag is `0`, the legacy `<<oc:>>` directive path is byte-equivalent to 
 
 The `harness.yaml` lives in shared memory at `agents/<id>/harness.yaml`. Edits do NOT auto-apply — the bot-bridge caches a parsed harness per agent at boot and at every Redis `harness/sync` event. To push a change cleanly:
 
-1. PUT the new YAML body to shared memory. The internal-token bearer is the only credential the daemon accepts on this path. The body is the literal YAML; `Content-Type` must be `application/yaml` (or `text/yaml`):
+1. PUT the new YAML body to shared memory. The internal-token bearer is the only credential the daemon accepts on this path. The route is the same JSON envelope as every other `/api/memories/...` PUT — wrap the YAML in `{"content": "..."}`. Sending raw YAML with `Content-Type: application/yaml` returns 415:
 
    ```bash
-   curl -fsS -X PUT \
-     -H "Authorization: Bearer $OPENCLAW_INTERNAL_TOKEN" \
-     -H 'Content-Type: application/yaml' \
-     --data-binary @./harness.yaml \
-     "http://localhost:7878/api/memories/agents/<id>/harness.yaml"
+   python3 -c 'import json,sys; sys.stdout.write(json.dumps({"content":open(sys.argv[1]).read()}))' \
+     ./harness.yaml \
+     | curl -fsS -X PUT \
+         -H "Authorization: Bearer $OPENCLAW_INTERNAL_TOKEN" \
+         -H 'Content-Type: application/json' \
+         --data-binary @- \
+         "http://localhost:7878/api/memories/agents/<id>/harness.yaml"
    ```
 
 2. Trigger the resync. This publishes `harness/sync` on Redis (which the bot-bridge consumes to invalidate its cache) AND on the leader runs `materializeAgent` to write the per-agent ptah config tree under `~/.ptah/agents/<id>/`:
