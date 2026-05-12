@@ -24,7 +24,11 @@ esac
 
 CONTROL_DIR=/opt/openclaw-control
 DAEMON_LOG=/tmp/openclaw-control-daemon.log
-BOT_LOG=/tmp/openclaw-control-bot.log
+# TASK_2026_006 Batch 7: bot-bridge spawn removed. The Discord chat tier now
+# lives in-process inside the openclaw gateway container as an openclaw plugin
+# (see /usr/lib/node_modules/openclaw/dist/extensions/openclaw-control-plugin).
+# Bot-bridge package source still lives at openclaw-control/bot-bridge/ until
+# Batch 11 deletes it; nothing in this container starts it any more.
 
 # Defensive default — also set in the Dockerfile, but reasserting so `set -u`
 # doesn't blow up if someone overrides only one env var.
@@ -32,8 +36,9 @@ BOT_LOG=/tmp/openclaw-control-bot.log
 mkdir -p "$OPENCLAW_LOCAL_MEMORY" 2>/dev/null || true
 
 # Auto-generate the internal service token if the user hasn't set one.
-# Daemon and bot-bridge both read OPENCLAW_INTERNAL_TOKEN — we export it here
-# so both children of this shell inherit it.
+# Daemon and the in-gateway openclaw-control plugin both read
+# OPENCLAW_INTERNAL_TOKEN — we export it so children of this shell (and the
+# sibling gateway container, when sharing an env_file) inherit it.
 if [ -z "${OPENCLAW_INTERNAL_TOKEN:-}" ]; then
     OPENCLAW_INTERNAL_TOKEN="$(head -c 48 /dev/urandom | base64 | tr -d '\n=' | tr '+/' '-_')"
     echo "[control] generated OPENCLAW_INTERNAL_TOKEN (first run; add to .env to pin)"
@@ -83,23 +88,10 @@ node "$CONTROL_DIR/daemon/dist/index.js" >"$DAEMON_LOG" 2>&1 &
 DAEMON_PID=$!
 echo "[control] daemon pid=$DAEMON_PID (log: $DAEMON_LOG)"
 
-# Bot-bridge is opt-in: only starts when at least one DISCORD_TOKEN_* env var is set
-START_BOT=0
-while IFS='=' read -r name _; do
-    case "$name" in
-        DISCORD_TOKEN_*) START_BOT=1; break ;;
-    esac
-done < <(env)
+# TASK_2026_006 Batch 7: bot-bridge process is gone — the Discord chat tier
+# runs in-process inside the gateway container as the openclaw-control plugin.
+# Any DISCORD_TOKEN_* env vars in this container's environment are now inert
+# from the daemon side; the gateway container is what reads them.
 
-if [ "$START_BOT" = "1" ]; then
-    echo "[control] starting bot-bridge"
-    sleep 2
-    node "$CONTROL_DIR/bot-bridge/dist/index.js" >"$BOT_LOG" 2>&1 &
-    BOT_PID=$!
-    echo "[control] bot-bridge pid=$BOT_PID (log: $BOT_LOG)"
-else
-    echo "[control] no DISCORD_TOKEN_* env vars present — bot-bridge disabled"
-fi
-
-# Returns immediately; PIDs are children of the parent shell so they
-# inherit tini's signal handling on container shutdown.
+# Returns immediately; daemon PID is a child of the parent shell so it
+# inherits tini's signal handling on container shutdown.

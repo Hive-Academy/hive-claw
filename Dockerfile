@@ -22,13 +22,19 @@ RUN npm ci --include=dev || npm install
 COPY openclaw-control/daemon/ ./
 RUN npm run build
 
-# ---------- stage 3: plugin builder (TASK_2026_006 Batch 7 — DO NOT REMOVE) ----------
-# Batch 7 wires in the openclaw plugin that replaces the deleted bot-bridge.
-# Until that batch lands the runtime image has no plugin to load and the
-# stage is intentionally absent. When Batch 7 adds it, the stage shape will
-# mirror daemon-builder above (COPY plugin pkg, npm ci, build) and emit a
-# `/build/plugin/dist` tree that the runtime stage COPYs to
-# `/opt/openclaw-control/plugin/dist`.
+# ---------- stage 3: plugin builder (TASK_2026_006 Batch 7) ----------
+# Compiles openclaw-control/plugin/ → /build/plugin/dist. The runtime stage
+# then drops the artifact into openclaw's bundled-extension auto-discovery
+# path (/usr/lib/node_modules/openclaw/dist/extensions/openclaw-control-plugin/).
+# The plugin's tsconfig path aliases for the `openclaw/plugin-sdk/*` shims
+# erase at emit time, so the dist artifact imports the real bare specifiers
+# verbatim — they resolve against openclaw's own package tree at runtime.
+FROM node:22-bookworm-slim AS plugin-builder
+WORKDIR /build/plugin
+COPY openclaw-control/plugin/package.json openclaw-control/plugin/package-lock.json* ./
+RUN npm ci --include=dev || npm install
+COPY openclaw-control/plugin/ ./
+RUN npm run build
 
 # ---------- stage 4: runtime image ----------
 FROM debian:trixie-slim@sha256:cedb1ef40439206b673ee8b33a46a03a0c9fa90bf3732f54704f99cb061d2c5a
@@ -72,11 +78,18 @@ RUN cd /opt/openclaw-control/daemon \
         || { echo "[build] FATAL: better-sqlite3 native binary failed to load — check prebuilt support for the runtime base image" >&2; exit 1; }
 COPY --from=daemon-builder --chown=agent:agent /build/daemon/dist /opt/openclaw-control/daemon/dist
 
-# TASK_2026_006 Batch 7: plugin runtime install. When the plugin builder stage
-# lands, add the COPY here:
-#     COPY --from=plugin-builder --chown=agent:agent /build/plugin/dist /opt/openclaw-control/plugin/dist
-# Until then the runtime image carries no plugin artifact — the gateway runs
-# stock plugins only and the daemon's chat tier is non-functional.
+# TASK_2026_006 Batch 7: plugin runtime install.
+# Bundled-extension layout (research §B5 Option A) — openclaw auto-discovers
+# any directory under its own dist/extensions/ that has an index.js + the
+# plugin manifest. We drop the compiled plugin alongside its package.json
+# (loader reads `openclaw.extensions` + `peerDependencies`) and the
+# openclaw.plugin.json manifest. The plugin's only runtime dep (undici) is
+# already present in openclaw's own node_modules, so no second `npm install`
+# step is needed here. Batch 10 is the cutover that restarts the gateway and
+# makes openclaw actually discover this directory.
+COPY --from=plugin-builder /build/plugin/dist /usr/lib/node_modules/openclaw/dist/extensions/openclaw-control-plugin
+COPY --from=plugin-builder /build/plugin/package.json /usr/lib/node_modules/openclaw/dist/extensions/openclaw-control-plugin/package.json
+COPY --from=plugin-builder /build/plugin/openclaw.plugin.json /usr/lib/node_modules/openclaw/dist/extensions/openclaw-control-plugin/openclaw.plugin.json
 
 # Static dashboard (served by daemon when role=daemon, by gateway-side static
 # server otherwise).
