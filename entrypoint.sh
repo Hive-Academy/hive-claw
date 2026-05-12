@@ -158,6 +158,37 @@ render_template() {
     envsubst '${LLM_PROVIDER} ${LLM_MODEL} ${LLM_PROVIDERS_JSON} ${DISCORD_GUILD_ID} ${DISCORD_BOT_TOKEN} ${DISCORD_TOKEN_ANUBIS} ${DISCORD_TOKEN_HORUS} ${GITHUB_TOKEN} ${OPENCLAW_AUTH_TOKEN} ${OPENCLAW_VERSION} ${OPENCLAW_NOW}' \
         < "$TEMPLATE" > "$out"
 
+    # ---------- Scope to OPENCLAW_LOCAL_AGENT_IDS ----------
+    # Each machine's openclaw config should contain only the personas it
+    # actually hosts. The template is the same on every machine (one git
+    # source); per-machine differentiation is the env var.
+    #
+    # OPENCLAW_LOCAL_AGENT_IDS is a comma-separated list (e.g. "anubis" or
+    # "anubis,horus"). We filter agents.list[], channels.discord.accounts,
+    # and bindings[] down to just the listed IDs.
+    #
+    # Empty/unset OPENCLAW_LOCAL_AGENT_IDS = no filtering (legacy / dev mode
+    # where the template ships unchanged).
+    if [ -n "${OPENCLAW_LOCAL_AGENT_IDS:-}" ]; then
+        local local_ids_json local_ids_count
+        local_ids_json=$(printf '%s' "$OPENCLAW_LOCAL_AGENT_IDS" \
+            | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
+        local_ids_count=$(printf '%s' "$local_ids_json" | jq 'length')
+        if [ "$local_ids_count" = "0" ]; then
+            echo "[entrypoint] OPENCLAW_LOCAL_AGENT_IDS=\"$OPENCLAW_LOCAL_AGENT_IDS\" parses to empty after trim — skipping scope filter (template preserved)."
+        else
+            echo "[entrypoint] Scoping openclaw config to OPENCLAW_LOCAL_AGENT_IDS=$OPENCLAW_LOCAL_AGENT_IDS (${local_ids_json})"
+            jq --argjson local_ids "$local_ids_json" '
+                  .agents.list = ((.agents.list // [])
+                    | map(select(.id as $id | $local_ids | any(. == $id))))
+                | .channels.discord.accounts = ((.channels.discord.accounts // {})
+                    | with_entries(select(.key as $id | $local_ids | any(. == $id))))
+                | .bindings = ((.bindings // [])
+                    | map(select(.agentId as $id | $local_ids | any(. == $id))))
+            ' "$out" > "${out}.tmp" && mv "${out}.tmp" "$out"
+        fi
+    fi
+
     # Mirror the historical "discord disabled when tokens missing" behavior
     # on the rendered output. Detect which shape we rendered (old: default
     # account; new: anubis/horus accounts) and disable accordingly.
