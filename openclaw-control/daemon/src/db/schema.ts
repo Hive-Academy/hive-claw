@@ -25,7 +25,42 @@
  *        runaway-loop CD2 from code-logic-review.md.
  */
 
-export const CURRENT_VERSION = 2;
+export const CURRENT_VERSION = 3;
+
+/**
+ * v3 statements — additive migration introducing the `extension_install_requests`
+ * table and its two supporting indexes. Backs TASK_2026_006 Batch 8b
+ * (plugin/MCP self-extension feature, per amendment-1 §16.2).
+ *
+ * Reversibility (operator backout):
+ *   DROP INDEX IF EXISTS idx_install_requests_agent;
+ *   DROP INDEX IF EXISTS idx_install_requests_pending;
+ *   DROP TABLE IF EXISTS extension_install_requests;
+ *   DELETE FROM schema_version WHERE version = 3;
+ */
+export const SCHEMA_V3: readonly string[] = [
+  `CREATE TABLE extension_install_requests (
+     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+     kind                TEXT NOT NULL CHECK (kind IN ('plugin', 'mcp_skill')),
+     slug                TEXT NOT NULL,
+     requesting_agent_id TEXT NOT NULL,
+     reason              TEXT,
+     status              TEXT NOT NULL DEFAULT 'pending'
+                          CHECK (status IN ('pending','approved','rejected','applied','failed')),
+     operator_note       TEXT,
+     install_output      TEXT,
+     created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+     decided_at          TEXT,
+     applied_at          TEXT
+   )`,
+
+  `CREATE INDEX idx_install_requests_pending
+     ON extension_install_requests(status, created_at)
+     WHERE status = 'pending'`,
+
+  `CREATE INDEX idx_install_requests_agent
+     ON extension_install_requests(requesting_agent_id, created_at DESC)`,
+];
 
 export const SCHEMA_V1: readonly string[] = [
   // 1. projects

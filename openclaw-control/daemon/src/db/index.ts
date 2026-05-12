@@ -34,3 +34,14 @@ export type {
 } from './dispatches.js';
 export { MemoryRepo, PRIVATE_AGENT_FILES } from './memory.js';
 export type { MemoryScope, MemoryFile, MemoryFileMeta } from './memory.js';
+export {
+  InstallRequestsRepo,
+  UnknownInstallRequestError,
+  InstallRequestStateError,
+} from './installRequests.js';
+export type {
+  InstallRequest,
+  InstallKind,
+  InstallStatus,
+  CreateRequestInput,
+} from './installRequests.js';

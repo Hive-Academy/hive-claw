@@ -9,7 +9,7 @@ import path from 'node:path';
 import { config } from './config.js';
 import { listSessions, tailSession, newestSessionForProject } from './sessions.js';
 import { attachSse, broadcast } from './sse.js';
-import { registerAuth, requireAuth } from './auth.js';
+import { registerAuth, requireAuth, currentUser, isOAuthConfigured } from './auth.js';
 import { MemoryError } from './memory.js';
 import { publishHandoff, publishHarnessSync } from './bus.js';
 import { harnessHash } from './harness/types.js';
@@ -21,9 +21,14 @@ import {
   getReadOnlyDb,
   UnknownDispatchError,
   DispatchStateError,
+  InstallRequestsRepo,
+  UnknownInstallRequestError,
+  InstallRequestStateError,
   type DispatchState,
   type MemoryScope,
+  type InstallKind,
 } from './db/index.js';
+import { enqueueApproved, listInstalled } from './installWorker.js';
 import type { Phase } from './phase.js';
 import * as leaderClient from './leaderClient.js';
 import * as storage from './storage.js';
@@ -1106,6 +1111,203 @@ export function buildApp() {
         });
       }
       return results;
+    },
+  );
+
+  // --- extension install requests (TASK_2026_006 Batch 8b) --------------
+  //
+  // Routes per amendment-1 §16.3. Auth split:
+  //   POST  /api/extensions/install-requests           Bearer (plugin)
+  //   GET   /api/extensions/install-requests/pending   Cookie OR Bearer
+  //   GET   /api/extensions/install-requests/:id       Cookie OR Bearer
+  //   POST  /api/extensions/install-requests/:id/approve  COOKIE ONLY
+  //   POST  /api/extensions/install-requests/:id/reject   COOKIE ONLY
+  //   GET   /api/extensions/installed                  Cookie OR Bearer
+  //
+  // The approve/reject routes are cookie-only by design — the plugin (which
+  // holds the Bearer token) must NOT be able to self-approve. We share the
+  // `guard` preHandler for the Bearer/Cookie-or-Bearer routes and use a
+  // dedicated `cookieOnlyGuard` for the operator-decision pair.
+  const cookieOnlyGuard: preHandlerHookHandler = async (req, reply) => {
+    // When OAuth is unconfigured we permit the daemon's `local-dev` user
+    // (loopback dev). Anything else must present a valid Discord JWT cookie.
+    if (!isOAuthConfigured()) {
+      req.user = { discordId: 'local', username: 'local-dev' };
+      return;
+    }
+    const user = await currentUser(req);
+    if (!user) {
+      reply.code(401).send({ error: 'operator cookie required' });
+      return reply;
+    }
+    req.user = user;
+  };
+
+  app.post<{
+    Body: {
+      kind?: unknown;
+      slug?: unknown;
+      requestingAgentId?: unknown;
+      reason?: unknown;
+    };
+  }>('/api/extensions/install-requests', { preHandler: guard }, async (req, reply) => {
+    const body = req.body ?? {};
+    const kind = typeof body.kind === 'string' ? body.kind : '';
+    if (kind !== 'plugin' && kind !== 'mcp_skill') {
+      return reply.code(400).send({ error: 'body.kind must be "plugin" or "mcp_skill"' });
+    }
+    const slug = typeof body.slug === 'string' ? body.slug.trim() : '';
+    if (slug.length === 0) {
+      return reply.code(400).send({ error: 'body.slug (non-empty string) required' });
+    }
+    if (slug.length > 256 || slug.includes('\n') || slug.includes('\r')) {
+      return reply.code(400).send({ error: 'body.slug is malformed' });
+    }
+    const requestingAgentId =
+      typeof body.requestingAgentId === 'string' ? body.requestingAgentId.trim() : '';
+    if (requestingAgentId.length === 0) {
+      return reply
+        .code(400)
+        .send({ error: 'body.requestingAgentId (non-empty string) required' });
+    }
+    const reason =
+      typeof body.reason === 'string' && body.reason.length > 0 ? body.reason.slice(0, 4096) : null;
+
+    const row = InstallRequestsRepo.create({
+      kind: kind as InstallKind,
+      slug,
+      requestingAgentId,
+      reason,
+    });
+    broadcast('installs.requested', {
+      requestId: row.id,
+      kind: row.kind,
+      slug: row.slug,
+      requestingAgentId: row.requestingAgentId,
+      reason: row.reason,
+      createdAt: row.createdAt,
+    });
+    return reply
+      .code(201)
+      .send({ requestId: row.id, status: row.status, createdAt: row.createdAt });
+  });
+
+  app.get(
+    '/api/extensions/install-requests/pending',
+    { preHandler: guard },
+    async () => ({ requests: InstallRequestsRepo.listPending() }),
+  );
+
+  app.get<{ Params: { id: string } }>(
+    '/api/extensions/install-requests/:id',
+    { preHandler: guard },
+    async (req, reply) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return reply.code(400).send({ error: 'id must be a positive integer' });
+      }
+      const row = InstallRequestsRepo.get(id);
+      if (!row) return reply.code(404).send({ error: 'install request not found' });
+      return row;
+    },
+  );
+
+  app.post<{
+    Params: { id: string };
+    Body: { note?: unknown; deferApply?: unknown };
+  }>(
+    '/api/extensions/install-requests/:id/approve',
+    { preHandler: cookieOnlyGuard },
+    async (req, reply) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return reply.code(400).send({ error: 'id must be a positive integer' });
+      }
+      const body = req.body ?? {};
+      const note = typeof body.note === 'string' ? body.note.slice(0, 4096) : null;
+      const deferApply = body.deferApply === true;
+      try {
+        const row = InstallRequestsRepo.markApproved(id, note);
+        broadcast('installs.approved', {
+          requestId: row.id,
+          kind: row.kind,
+          slug: row.slug,
+          deferApply,
+          decidedAt: row.decidedAt,
+        });
+        if (!deferApply) {
+          // Fire-and-forget; the worker emits installs.applied / installs.failed
+          // via SSE when it finishes. Errors inside the chain are swallowed by
+          // installWorker (see comment there).
+          void enqueueApproved(row.id);
+        }
+        return reply.send({
+          status: row.status,
+          deferApply,
+          estimatedRestartSeconds: deferApply ? null : 10,
+        });
+      } catch (err) {
+        if (err instanceof UnknownInstallRequestError) {
+          return reply.code(404).send({ error: 'install request not found' });
+        }
+        if (err instanceof InstallRequestStateError) {
+          return reply.code(409).send({
+            error: `cannot approve from state=${err.state}`,
+            state: err.state,
+          });
+        }
+        throw err;
+      }
+    },
+  );
+
+  app.post<{
+    Params: { id: string };
+    Body: { note?: unknown };
+  }>(
+    '/api/extensions/install-requests/:id/reject',
+    { preHandler: cookieOnlyGuard },
+    async (req, reply) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return reply.code(400).send({ error: 'id must be a positive integer' });
+      }
+      const body = req.body ?? {};
+      const note = typeof body.note === 'string' ? body.note.slice(0, 4096) : null;
+      try {
+        const row = InstallRequestsRepo.markRejected(id, note);
+        broadcast('installs.rejected', {
+          requestId: row.id,
+          kind: row.kind,
+          slug: row.slug,
+          decidedAt: row.decidedAt,
+        });
+        return reply.send({ status: row.status });
+      } catch (err) {
+        if (err instanceof UnknownInstallRequestError) {
+          return reply.code(404).send({ error: 'install request not found' });
+        }
+        if (err instanceof InstallRequestStateError) {
+          return reply.code(409).send({
+            error: `cannot reject from state=${err.state}`,
+            state: err.state,
+          });
+        }
+        throw err;
+      }
+    },
+  );
+
+  app.get(
+    '/api/extensions/installed',
+    { preHandler: guard },
+    async (_req, reply) => {
+      try {
+        return await listInstalled();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return reply.code(503).send({ error: `installed inventory unavailable: ${msg}` });
+      }
     },
   );
 
