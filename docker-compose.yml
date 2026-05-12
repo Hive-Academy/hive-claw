@@ -103,6 +103,12 @@ services:
       OPENCLAW_GATEWAY_CONTAINER: openclaw-gateway
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # The daemon needs to read/write /var/run/docker.sock (bind-mounted below)
+    # to drive the install pipeline (Batch 8b). The socket is owned by
+    # root:docker (gid varies by host — common values: 985 Debian/Ubuntu,
+    # 999 some distros). Configure DOCKER_GID in .env to match.
+    group_add:
+      - "${DOCKER_GID:-985}"
     security_opt:
       - no-new-privileges:true
     mem_limit: 1g

@@ -60,9 +60,15 @@ export function validateTaskId(taskId: string): string | null {
  * Rejects empty-after-trim and anything over MAX_TEXT_LENGTH (50_000 chars).
  */
 export function validateText(
-  raw: string,
+  raw: unknown,
   field: string,
 ): { value: string; error: string | null } {
+  // Defense-in-depth: openclaw doesn't enforce the typebox schema before
+  // calling the handler; tools that receive undefined for an optional or
+  // skipped field would otherwise crash with an opaque TypeError on .trim().
+  if (typeof raw !== "string") {
+    return { value: "", error: `${field} must be a string` };
+  }
   const trimmed = raw.trim();
   if (trimmed.length === 0) {
     return { value: "", error: `${field} must not be empty` };

@@ -55,7 +55,15 @@ import { validateText, MAX_TEXT_LENGTH } from "../validators.js";
 
 const MAX_SLUG_LENGTH = 200;
 
-function validateSlug(raw: string): { value: string; error: string | null } {
+function validateSlug(raw: unknown): { value: string; error: string | null } {
+  // Defense-in-depth: openclaw doesn't enforce the typebox schema before
+  // calling the handler — if the caller (e.g. /tools/invoke with a JSON
+  // body missing the field) passes undefined, the original `raw.trim()`
+  // crashes the tool with an opaque "Cannot read properties of undefined"
+  // TypeError. Guard against non-string inputs explicitly.
+  if (typeof raw !== "string") {
+    return { value: "", error: "slug must be a non-empty string" };
+  }
   const trimmed = raw.trim();
   if (trimmed.length === 0) {
     return { value: "", error: "slug must not be empty" };

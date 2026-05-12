@@ -299,7 +299,10 @@ export async function listInstalled(): Promise<InstalledInventory> {
 
 async function listOne(cmd: readonly string[]): Promise<Array<{ slug: string; raw?: unknown }>> {
   if (!docker) throw new Error('docker handle missing');
-  const r = await docker.exec(GATEWAY_CONTAINER, cmd, 15_000);
+  // Empirically `openclaw plugins list --json` takes 25-30s on the
+  // currently-installed v2026.4.24 (~107 stock plugins to enumerate).
+  // 60s gives headroom; tests override via setTimingsForTests.
+  const r = await docker.exec(GATEWAY_CONTAINER, cmd, 60_000);
   if (r.exitCode !== 0) return [];
   // openclaw --json shape is not contractually frozen in v1; accept either
   // an array of strings or an array of objects with a `slug`/`name` field.
