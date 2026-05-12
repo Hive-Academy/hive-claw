@@ -14,6 +14,7 @@ import { MemoryError } from './memory.js';
 import { publishHandoff, publishHarnessSync } from './bus.js';
 import { harnessHash } from './harness/types.js';
 import { materializeAgent, materializeAll } from './harness/materialize.js';
+import { spawnPtahForAgent } from './harness/ptahLauncher.js';
 import {
   PRIVATE_AGENT_FILES,
   isTerminalState,
@@ -261,6 +262,145 @@ export function buildApp() {
   app.post('/api/continuation/tick', { preHandler: guard }, async () =>
     storage.continuationTickThroughFacade(),
   );
+
+  // --- POST /api/ptah/invoke -------------------------------------------
+  //
+  // Thin wrapper around `harness/ptahLauncher.ts:spawnPtahForAgent`. Called
+  // by the future openclaw-control plugin's `invoke_ptah` tool (TASK_2026_006
+  // batch 4). The plugin runs in-process with openclaw on the host; this
+  // route is the trust-boundary crossing into the daemon.
+  //
+  // Body:
+  //   { project, prompt, agentId?, sessionKey?, timeoutMs? }
+  // Response on success:
+  //   { ok: true, exitCode: 0, durationMs, output }
+  // Response on failure:
+  //   { ok: false, exitCode, durationMs, output, stderr? }
+  //
+  // Leader-only: the project workspace path comes from `storage.readProject`
+  // which is local-FS on the leader. Followers 405.
+  // Auth: `guard` (internal-token bearer is the canonical caller).
+  // `timeoutMs` is bounded by `config.ptah.invokerTimeoutMs`; caller cannot
+  // exceed it. Route-side timeout is enforced via `Promise.race`; the bridge
+  // call itself does not yet honor the value (Phase 2 plumbing).
+  app.post<{
+    Body: {
+      project?: unknown;
+      prompt?: unknown;
+      agentId?: unknown;
+      sessionKey?: unknown;
+      timeoutMs?: unknown;
+    };
+  }>('/api/ptah/invoke', { preHandler: guard }, async (req, reply) => {
+    if (!config.leader) {
+      return reply
+        .code(405)
+        .send({ error: 'ptah/invoke is leader-only — POST to OPENCLAW_LEADER_URL instead' });
+    }
+
+    // --- body validation ----------------------------------------------
+    const body = req.body ?? {};
+    const project = typeof body.project === 'string' ? body.project.trim() : '';
+    const prompt = typeof body.prompt === 'string' ? body.prompt : '';
+    if (project.length === 0) {
+      return reply.code(400).send({ error: 'body.project (non-empty string) required' });
+    }
+    if (prompt.length === 0) {
+      return reply.code(400).send({ error: 'body.prompt (non-empty string) required' });
+    }
+    // Defense-in-depth path-traversal rejection at the trust boundary;
+    // belt-and-braces on top of `safeProjectPath` (which the plugin code
+    // also enforces client-side per arch §7.1 layer 6).
+    if (project.includes('..') || project.includes('/') || project.includes('\\')) {
+      return reply.code(400).send({ error: 'project slug must not contain "..", "/" or "\\"' });
+    }
+
+    const agentId =
+      typeof body.agentId === 'string' && body.agentId.length > 0 ? body.agentId : null;
+    const sessionKey =
+      typeof body.sessionKey === 'string' && body.sessionKey.length > 0
+        ? body.sessionKey
+        : null;
+
+    const maxTimeoutMs = config.ptah.invokerTimeoutMs;
+    let timeoutMs: number = maxTimeoutMs;
+    if (body.timeoutMs !== undefined && body.timeoutMs !== null) {
+      if (typeof body.timeoutMs !== 'number' || !Number.isFinite(body.timeoutMs) || body.timeoutMs < 1) {
+        return reply
+          .code(400)
+          .send({ error: 'body.timeoutMs (positive number, ms) is invalid' });
+      }
+      if (body.timeoutMs > maxTimeoutMs) {
+        return reply.code(400).send({
+          error: `body.timeoutMs ${body.timeoutMs} exceeds PTAH_INVOKER_TIMEOUT_MS=${maxTimeoutMs}`,
+        });
+      }
+      timeoutMs = body.timeoutMs;
+    }
+
+    // --- project lookup -----------------------------------------------
+    const proj = await storage.readProject(project);
+    if (!proj) return reply.code(404).send({ error: 'project not found' });
+
+    // --- agent resolution ---------------------------------------------
+    // If caller omitted `agentId`, fall back to the x-openclaw-agent-id
+    // header (the openclaw runtime forwards the current agent's id in this
+    // header — see arch §6.1). If neither is present, pick the first
+    // configured local agent. The fallback chain is intentionally
+    // permissive — callers that care should set agentId explicitly.
+    const headerAgent = req.headers['x-openclaw-agent-id'];
+    const resolvedAgentId =
+      agentId ??
+      (typeof headerAgent === 'string' && headerAgent.length > 0 ? headerAgent : null) ??
+      config.localAgentIds[0] ??
+      'unknown';
+
+    // --- spawn (with route-side timeout) ------------------------------
+    const taskId = sessionKey ?? `ptah-invoke-${Date.now()}`;
+    const started = Date.now();
+    let timer: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<{ timedOut: true }>((resolve) => {
+      timer = setTimeout(() => resolve({ timedOut: true }), timeoutMs);
+    });
+    try {
+      const spawnPromise = spawnPtahForAgent({
+        agentId: resolvedAgentId,
+        cwd: proj.path,
+        prompt,
+        taskId,
+      });
+      const winner = await Promise.race([spawnPromise, timeoutPromise]);
+      if ('timedOut' in winner) {
+        return {
+          ok: false,
+          exitCode: null,
+          durationMs: Date.now() - started,
+          output: '',
+          stderr: `[ptah/invoke] timed out after ${timeoutMs}ms`,
+        };
+      }
+      // Spawn completed first. Cancel the timer.
+      const r = winner;
+      const durationMs = r.durationMs ?? Date.now() - started;
+      if (r.ok) {
+        return {
+          ok: true,
+          exitCode: r.exitCode ?? 0,
+          durationMs,
+          output: r.stdout,
+        };
+      }
+      return {
+        ok: false,
+        exitCode: r.exitCode,
+        durationMs,
+        output: r.stdout,
+        stderr: r.stderr,
+      };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  });
 
   // --- task files (T3.2) ------------------------------------------------
   // List files for a task. Returns metadata only — no body.
