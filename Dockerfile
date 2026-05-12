@@ -1,5 +1,8 @@
-# OpenClaw agent — runs the long-lived gateway daemon on :18789
-# AND the openclaw-control daemon + dashboard + multi-agent bot bridge on :7878.
+# OpenClaw image — runs EITHER the gateway daemon on :18789 OR the
+# openclaw-control daemon (+ dashboard static files) on :7878. The compose
+# file selects which one via the OPENCLAW_CONTAINER_ROLE env var read by
+# /usr/local/bin/entrypoint.sh.
+#
 # Talks to host Ollama via host.docker.internal (host-gateway add-host).
 # Base image pinned by digest for reproducible builds.
 
@@ -19,13 +22,13 @@ RUN npm ci --include=dev || npm install
 COPY openclaw-control/daemon/ ./
 RUN npm run build
 
-# ---------- stage 3: compile the bot bridge ----------
-FROM node:22-bookworm-slim AS bot-builder
-WORKDIR /build/bot-bridge
-COPY openclaw-control/bot-bridge/package.json openclaw-control/bot-bridge/package-lock.json* ./
-RUN npm ci --include=dev || npm install
-COPY openclaw-control/bot-bridge/ ./
-RUN npm run build
+# ---------- stage 3: plugin builder (TASK_2026_006 Batch 7 — DO NOT REMOVE) ----------
+# Batch 7 wires in the openclaw plugin that replaces the deleted bot-bridge.
+# Until that batch lands the runtime image has no plugin to load and the
+# stage is intentionally absent. When Batch 7 adds it, the stage shape will
+# mirror daemon-builder above (COPY plugin pkg, npm ci, build) and emit a
+# `/build/plugin/dist` tree that the runtime stage COPYs to
+# `/opt/openclaw-control/plugin/dist`.
 
 # ---------- stage 4: runtime image ----------
 FROM debian:trixie-slim@sha256:cedb1ef40439206b673ee8b33a46a03a0c9fa90bf3732f54704f99cb061d2c5a
@@ -53,8 +56,9 @@ RUN npm install -g @hive-academy/ptah-cli@^0.1.5 \
 # via `ptah --json session start --task ...` — same harness as interactive use.
 
 RUN useradd --create-home --shell /bin/bash --uid 1000 agent \
-    && mkdir -p /workspace /home/agent/.openclaw /home/agent/.ptah /home/agent/.claude \
-                /opt/openclaw-control/daemon /opt/openclaw-control/bot-bridge /opt/openclaw-control/dashboard \
+    && mkdir -p /workspace /home/agent/.openclaw /home/agent/.openclaw/extensions \
+                /home/agent/.openclaw/skills /home/agent/.ptah /home/agent/.claude \
+                /opt/openclaw-control/daemon /opt/openclaw-control/dashboard \
                 /data \
     && chown -R agent:agent /workspace /home/agent/.openclaw /home/agent/.ptah /home/agent/.claude /data
 
@@ -68,14 +72,14 @@ RUN cd /opt/openclaw-control/daemon \
         || { echo "[build] FATAL: better-sqlite3 native binary failed to load — check prebuilt support for the runtime base image" >&2; exit 1; }
 COPY --from=daemon-builder --chown=agent:agent /build/daemon/dist /opt/openclaw-control/daemon/dist
 
-# Bot-bridge — production deps + compiled JS
-COPY --chown=agent:agent openclaw-control/bot-bridge/package.json openclaw-control/bot-bridge/package-lock.json* /opt/openclaw-control/bot-bridge/
-RUN cd /opt/openclaw-control/bot-bridge \
-    && (npm ci --omit=dev || npm install --omit=dev) \
-    && chown -R agent:agent /opt/openclaw-control/bot-bridge
-COPY --from=bot-builder --chown=agent:agent /build/bot-bridge/dist /opt/openclaw-control/bot-bridge/dist
+# TASK_2026_006 Batch 7: plugin runtime install. When the plugin builder stage
+# lands, add the COPY here:
+#     COPY --from=plugin-builder --chown=agent:agent /build/plugin/dist /opt/openclaw-control/plugin/dist
+# Until then the runtime image carries no plugin artifact — the gateway runs
+# stock plugins only and the daemon's chat tier is non-functional.
 
-# Static dashboard
+# Static dashboard (served by daemon when role=daemon, by gateway-side static
+# server otherwise).
 COPY --from=dashboard-builder --chown=agent:agent /build/dashboard/dist/dashboard /opt/openclaw-control/dashboard
 
 # ---------- gateway templates + entrypoints ----------
@@ -102,4 +106,8 @@ ENV OPENCLAW_HOST=0.0.0.0 \
 
 EXPOSE 18789 7878
 
+# OPENCLAW_CONTAINER_ROLE selects the boot path:
+#   gateway → exec openclaw gateway
+#   daemon  → exec node /opt/openclaw-control/daemon/dist/index.js
+#   <unset> → legacy single-container (run both, gateway in foreground)
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

@@ -401,3 +401,127 @@ OPENCLAW_TEST_REAL_MCP=1 npm test -- --test-name-pattern mcp-everything
 Expected: `mcp-everything: …` test passes; without the env var the same test shows as `skipped` in `npm test` output (this is normal — the gated test is `t.skip()`-ing itself, not failing).
 
 When to run it: after any change to `bot-bridge/src/mcp/mcpManager.ts`, before flipping `OPENCLAW_BOT_TOOL_CALLS_ENABLED=1` in production for the first time, or when diagnosing "tools missing from chat" against a real MCP server.
+
+---
+
+## Three-container deployment (TASK_2026_006 Batch 5b)
+
+The openclaw stack runs as **three independent compose services**:
+
+| Service | Image | Port | Role |
+|---|---|---|---|
+| `openclaw-gateway` | `openclaw-local:latest` | `127.0.0.1:18789` | `openclaw gateway --bind lan` |
+| `openclaw-daemon`  | `openclaw-local:latest` | `127.0.0.1:7878`  | `node /opt/openclaw-control/daemon/dist/index.js` |
+| `openclaw-redis`   | `redis:7-alpine`        | (internal only)   | inter-agent handoff bus |
+
+Both `openclaw-*` services run the SAME image. The split is selected at boot
+by `OPENCLAW_CONTAINER_ROLE` (`gateway` or `daemon`) which `entrypoint.sh`
+reads. There is no separate entrypoint script for the daemon container —
+`entrypoint-control.sh foreground` is exec'd from the role-aware
+`entrypoint.sh`.
+
+### Why split?
+
+A single container made plugin installs surgically impossible. The install
+pipeline (see §16 of `migration-architecture-amendment-1.md`) needs to
+restart the openclaw gateway after `openclaw plugins install <slug>`, and
+restarting the whole container takes the dashboard's approval UI down
+mid-flow — the operator sees the page go blank between clicking "approve"
+and seeing "applied". With two containers, the gateway can bounce while
+the daemon (and its SSE stream feeding the dashboard) stays up.
+
+### Docker socket bind-mount — security implication
+
+`openclaw-daemon` mounts `/var/run/docker.sock:/var/run/docker.sock` so it
+can `docker restart openclaw-gateway` after plugin installs. **This grants
+the daemon container full control of the host's Docker daemon** — equivalent
+to root on the host. The daemon's installed binary is trusted code we
+build; the bind is acceptable so long as the daemon image is not extended
+to run untrusted plugin code inside its own container (which it does not —
+plugins run inside `openclaw-gateway`, not `openclaw-daemon`).
+
+Mitigations in place:
+
+- `security_opt: no-new-privileges:true` on both `openclaw-*` services.
+- The daemon binds to `127.0.0.1:7878` by default; no LAN exposure unless
+  the operator overrides `OPENCLAW_CONTROL_BIND=0.0.0.0` in `.env`.
+- Plugin install requests require a JWT-authenticated user with admin
+  scope; the path from "remote operator clicks approve" to "daemon talks
+  to docker.sock" is single-signed and audited via the dashboard's
+  `extension_install_requests` table.
+
+If your threat model requires hardening this further, the alternative
+(documented in amendment §9.3) is to add an HTTP `POST /__openclaw__/restart`
+endpoint inside the gateway itself and drop the socket bind. Not yet
+verified that openclaw exposes such an endpoint.
+
+### Restart mechanism
+
+After approving a plugin install, the daemon picks the safer of two
+recipes:
+
+```bash
+# Preferred — graceful drain. Lets openclaw finish in-flight tool calls.
+# Timeout: 30s. If it returns nonzero OR hangs, fall through.
+docker exec openclaw-gateway openclaw gateway restart
+
+# Fallback — SIGKILL after the docker engine's stop grace period (~10s).
+docker restart openclaw-gateway
+```
+
+The CLI restart drains; the docker restart does not. Real-world timing
+observed on the test stack:
+
+| Command | Typical duration | Behavior |
+|---|---|---|
+| `openclaw gateway restart` | varies by openclaw version — verify per release | graceful: finishes tool calls before exit |
+| `docker restart openclaw-gateway` | ~5-10s | abrupt: SIGTERM → SIGKILL after grace |
+
+Operator commands:
+
+```bash
+# Stop everything except volumes (volumes survive)
+docker compose down
+
+# Bring it all back up
+docker compose up -d
+
+# WARNING: -v wipes the four named volumes. Only run with operator confirmation.
+docker compose down -v
+```
+
+### Acceptance test (alternate ports)
+
+The non-destructive smoke test runs against `docker-compose.test.yml`
+(`:18790` / `:7879`). This is the right surface for local validation
+without touching a running production stack on `:18789` / `:7878`:
+
+```bash
+docker compose -f docker-compose.test.yml build
+docker compose -f docker-compose.test.yml up -d
+
+# Wait up to 60s for health
+docker compose -f docker-compose.test.yml ps
+
+# Three checks
+curl -fsS http://127.0.0.1:18790/health      # gateway
+curl -fsS http://127.0.0.1:7879/api/health   # daemon
+docker exec openclaw-daemon-test docker ps   # socket bind
+
+# Tear down + wipe TEST volumes (does NOT touch production)
+docker compose -f docker-compose.test.yml down -v
+```
+
+### Volume layout
+
+| Volume | Container path | Holds | Backup priority |
+|---|---|---|---|
+| `openclaw-state` | `/home/agent/.openclaw/` | `openclaw.json`, logs, `plugin-runtime-deps` cache | HIGH |
+| `openclaw-extensions` | `/home/agent/.openclaw/extensions/` | user-installed plugins | HIGH |
+| `openclaw-skills` | `/home/agent/.openclaw/skills/` | user-installed skills (incl. MCP bundles) | HIGH |
+| `openclaw-data` | `/data/` | daemon's `specs.db` SQLite (incl. `extension_install_requests`) | CRITICAL |
+
+Probe results that justify this layout live at
+`.ptah/specs/TASK_2026_006/plugin-install-paths-probe.md`. Re-run
+`scripts/probe-plugin-install-paths.sh` whenever the pinned `openclaw@…`
+version in the Dockerfile bumps a major.

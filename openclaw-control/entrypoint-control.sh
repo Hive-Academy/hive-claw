@@ -1,8 +1,26 @@
 #!/usr/bin/env bash
-# openclaw-control launcher — runs the daemon and (if any DISCORD_TOKEN_* is set)
-# the multi-agent bot bridge as siblings to the openclaw gateway.
-# Sourced/exec'd by the main entrypoint.sh after the gateway is up.
+# openclaw-control launcher.
+#
+# Two modes:
+#   background  — historical single-container behavior. Spawns daemon + (opt.)
+#                 bot-bridge as backgrounded children of this shell, then exits.
+#                 The caller (entrypoint.sh) goes on to exec the openclaw
+#                 gateway in the foreground; tini reaps everything together.
+#   foreground  — new dual-container behavior. Used when this is the only
+#                 process the container runs. `exec`s the daemon as PID 1's
+#                 only child so it gets the SIGTERM from `docker stop`
+#                 cleanly. Bot-bridge is intentionally NOT started in this
+#                 mode — Batch 11 removes it; pre-Batch-11 deployments that
+#                 want both must keep using legacy single-container mode.
+#
+# Mode defaults to `background` when no arg is given.
 set -euo pipefail
+
+MODE="${1:-background}"
+case "$MODE" in
+    background|foreground) ;;
+    *) echo "[control] FATAL: unknown mode '$MODE' (expected: background|foreground)" >&2; exit 2 ;;
+esac
 
 CONTROL_DIR=/opt/openclaw-control
 DAEMON_LOG=/tmp/openclaw-control-daemon.log
@@ -51,6 +69,16 @@ if [ "${OPENCLAW_LEADER:-0}" = "1" ]; then
 fi
 
 echo "[control] starting daemon on ${OPENCLAW_HOST:-0.0.0.0}:${OPENCLAW_PORT:-7878}"
+
+if [ "$MODE" = "foreground" ]; then
+    # Dual-container deployment: daemon IS the container. Replace this shell
+    # with the daemon so tini sees PID 2 = node and forwards signals directly.
+    # No bot-bridge in this mode (see header).
+    echo "[control] foreground mode — exec node daemon (logs go to stdout/stderr)"
+    exec node "$CONTROL_DIR/daemon/dist/index.js"
+fi
+
+# background mode (legacy single-container)
 node "$CONTROL_DIR/daemon/dist/index.js" >"$DAEMON_LOG" 2>&1 &
 DAEMON_PID=$!
 echo "[control] daemon pid=$DAEMON_PID (log: $DAEMON_LOG)"

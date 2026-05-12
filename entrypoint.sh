@@ -1,5 +1,35 @@
 #!/usr/bin/env bash
+# Role-aware entrypoint. Both compose services (openclaw-gateway and
+# openclaw-daemon) run the SAME image; they differ only in
+# OPENCLAW_CONTAINER_ROLE which selects the boot path here.
+#
+#   OPENCLAW_CONTAINER_ROLE=gateway → render openclaw.json, probe provider, exec
+#                                     `openclaw gateway` (the original behavior).
+#   OPENCLAW_CONTAINER_ROLE=daemon  → skip openclaw setup; hand off to
+#                                     /usr/local/bin/entrypoint-control.sh in
+#                                     foreground mode.
+#
+# Legacy single-container deployments (no OPENCLAW_CONTAINER_ROLE set) fall back
+# to the historical behavior: render config, then exec
+# /usr/local/bin/entrypoint-control.sh in background mode and finally exec the
+# gateway. Honors OPENCLAW_CONTROL_DISABLE=1 for gateway-only runs.
+
 set -euo pipefail
+
+ROLE="${OPENCLAW_CONTAINER_ROLE:-legacy}"
+
+# ---------- DAEMON-ONLY ROLE ----------
+# When the daemon runs in its own container, no openclaw.json rendering, no
+# provider probe, no gh/ptah bootstrap. The daemon doesn't speak to an LLM
+# directly; the gateway does that. Hand off to the control launcher in
+# foreground mode (it'll exec the daemon process so tini sees PID 2 = daemon).
+if [ "$ROLE" = "daemon" ]; then
+    if [ ! -x /usr/local/bin/entrypoint-control.sh ]; then
+        echo "[entrypoint] FATAL: role=daemon but entrypoint-control.sh missing or not executable" >&2
+        exit 1
+    fi
+    exec /usr/local/bin/entrypoint-control.sh foreground
+fi
 
 CONFIG_DIR="${HOME}/.openclaw"
 CONFIG_FILE="${CONFIG_DIR}/openclaw.json"
@@ -158,17 +188,13 @@ if command -v ptah >/dev/null 2>&1; then
 
     # TASK_2026_002 B6: ensure the per-agent + plugin subdirs exist on first
     # boot so the daemon's materializeAll() pass at startup can write into
-    # them without ENOENT. Both paths are bind-mount-backed identity-mapped
-    # (${OPENCLAW_HOST_HOME:-${HOME}}/.ptah on both sides — see
-    # docker-compose.yml). The daemon does its own defensive mkdir -p on
-    # write; this is belt-and-braces.
+    # them without ENOENT.
     mkdir -p "${OPENCLAW_HOST_HOME:-${HOME}}/.ptah/agents" \
              "${OPENCLAW_HOST_HOME:-${HOME}}/.ptah/plugins" 2>/dev/null || true
 
     if [ ! -f "$PTAH_STAMP" ]; then
         echo "[entrypoint] Ptah CLI: first-run bootstrap"
 
-        # Register the shared workspace so `ptah harness scan` finds projects here.
         WS_NAME="${PTAH_WORKSPACE_NAME:-$(basename "$(readlink -f /home/agent/.openclaw/workspace 2>/dev/null || echo workspace)")}"
         ptah workspace add --path /home/agent/.openclaw/workspace --name "$WS_NAME" >/dev/null 2>&1 \
             && echo "  ✓ workspace registered: $WS_NAME" \
@@ -183,10 +209,6 @@ else
 fi
 
 # ---------- gh CLI auth probe ----------
-# ~/.config/gh is bind-mounted from the host (see docker-compose.yml).
-# A single `gh auth login` on the host authenticates the agent too.
-# IMPORTANT: GH_CONFIG_DIR / PTAH_CONFIG_DIR carry HOST paths from .env which
-# don't exist inside the container — unset them so gh falls back to $HOME/.config/gh.
 unset GH_CONFIG_DIR PTAH_CONFIG_DIR
 if command -v gh >/dev/null 2>&1; then
     if gh auth status >/dev/null 2>&1; then
@@ -202,11 +224,20 @@ fi
 
 echo "[entrypoint] Dashboard:  http://127.0.0.1:18789/?token=${OPENCLAW_AUTH_TOKEN}"
 
-# ---------- openclaw-control: daemon + multi-agent bot bridge ----------
-# Boots in background so all agents share the same workspace and shared-memory tree.
-# Disable with OPENCLAW_CONTROL_DISABLE=1.
+# ---------- GATEWAY-ONLY ROLE ----------
+# Multi-container deployment: gateway is its own service; the daemon runs in a
+# sibling container. Do NOT start the control launcher here.
+if [ "$ROLE" = "gateway" ]; then
+    echo "[entrypoint] role=gateway — starting openclaw gateway only (daemon runs in sibling container)"
+    echo "[entrypoint] Starting openclaw gateway on :18789 (bind=lan, log=debug)"
+    exec openclaw --log-level debug gateway --port 18789 --bind lan --verbose
+fi
+
+# ---------- LEGACY SINGLE-CONTAINER ROLE ----------
+# Boots the control launcher in background mode, then execs the gateway. This
+# is the historical pre-Batch-5b behavior, preserved for one-container deploys.
 if [ "${OPENCLAW_CONTROL_DISABLE:-0}" != "1" ] && [ -x /usr/local/bin/entrypoint-control.sh ]; then
-    /usr/local/bin/entrypoint-control.sh || echo "[entrypoint] WARNING: openclaw-control launcher returned non-zero"
+    /usr/local/bin/entrypoint-control.sh background || echo "[entrypoint] WARNING: openclaw-control launcher returned non-zero"
 fi
 
 echo "[entrypoint] Starting openclaw gateway on :18789 (bind=lan, log=debug)"
