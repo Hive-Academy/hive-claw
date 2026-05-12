@@ -3,6 +3,7 @@ import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { ApiService } from '../services/api.service';
 import { SseService } from '../services/sse.service';
 import { ToastService } from '../services/toast.service';
+import { ExtensionsService } from '../services/extensions.service';
 import { BreadcrumbsComponent } from './breadcrumbs.component';
 import { interval, Subscription } from 'rxjs';
 import type { HealthStatus } from '../models/index';
@@ -108,6 +109,15 @@ import type { HealthStatus } from '../models/index';
                 Memories
               </a>
             </li>
+            <li>
+              <a routerLink="/extensions" routerLinkActive="active">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14-4H5m14 8H5m14 4H5"/></svg>
+                Extensions
+                @if (extensions.pendingCount() > 0) {
+                  <span class="badge badge-warning badge-sm ml-auto">{{ extensions.pendingCount() }}</span>
+                }
+              </a>
+            </li>
           </nav>
           <div class="p-4 border-t border-base-300 text-xs text-base-content/60 space-y-1">
             @if (health(); as h) {
@@ -136,6 +146,7 @@ export class ShellComponent implements OnInit, OnDestroy {
   private healthSub: Subscription | null = null;
   sse = inject(SseService);
   toast = inject(ToastService);
+  extensions = inject(ExtensionsService);
   user = signal<{ username: string; avatar?: string } | null>(null);
   health = signal<HealthStatus | null>(null);
   localAgents = signal<string[]>([]);
@@ -148,6 +159,10 @@ export class ShellComponent implements OnInit, OnDestroy {
     });
     this.refreshHealth();
     this.healthSub = interval(30_000).subscribe(() => this.refreshHealth());
+    // Prime the pending-installs badge so it's accurate the moment the
+    // operator lands on any page. After this, SSE-driven refreshes in the
+    // ExtensionsService keep it live (installs.* events).
+    this.extensions.refreshPending();
   }
 
   ngOnDestroy() {

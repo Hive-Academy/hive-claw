@@ -30,6 +30,14 @@ export class SseService {
       'continuation.tick',
       'checkpoint.pending',
       'checkpoint.approved',
+      // TASK_2026_006 Batch 8d: extension install lifecycle (amendment §16.3).
+      // Driven by the installWorker + approve/reject routes; consumed by the
+      // Extensions page service (`ExtensionsService`).
+      'installs.requested',
+      'installs.approved',
+      'installs.rejected',
+      'installs.applied',
+      'installs.failed',
     ];
     es.onopen = () => this.zone.run(() => this.connected.set(true));
     es.onerror = () => this.zone.run(() => this.connected.set(false));

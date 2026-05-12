@@ -16,6 +16,7 @@ export const routes: Routes = [
       { path: 'dispatches', loadComponent: () => import('./pages/dispatches.component').then((m) => m.DispatchesComponent) },
       { path: 'sessions', loadComponent: () => import('./pages/sessions.component').then((m) => m.SessionsComponent) },
       { path: 'memories', loadComponent: () => import('./pages/memories.component').then((m) => m.MemoriesComponent) },
+      { path: 'extensions', loadComponent: () => import('./pages/extensions/extensions-page.component').then((m) => m.ExtensionsPageComponent) },
     ],
   },
   { path: '**', redirectTo: '' },
