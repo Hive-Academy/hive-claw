@@ -57,6 +57,11 @@ chatTier:
   tools:
     - read_channel_history
     - upload_attachment
+  # Operator can drop screenshots / logs / JSON into a @mention; the chat tier
+  # base64-inlines them and routes the turn to LLM_VISION_MODEL when the payload
+  # contains an image. Locked-down personas (e.g. horus when scoped to security
+  # incidents only) should leave this off.
+  acceptAttachments: true
 
 orchestrationTier:
   skills:

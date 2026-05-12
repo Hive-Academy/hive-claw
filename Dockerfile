@@ -46,7 +46,7 @@ RUN npm install -g openclaw@2026.4.24 \
 
 # Ptah CLI — first-class project orchestration (discover, scaffold, GitHub auth).
 # Shares ~/.ptah with the host so a single `ptah auth login` works for both sides.
-RUN npm install -g @hive-academy/ptah-cli \
+RUN npm install -g @hive-academy/ptah-cli@^0.1.5 \
     && ptah --version || true
 
 # Note: the openclaw-control headless invoker uses ptah-cli (installed above)

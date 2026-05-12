@@ -338,7 +338,50 @@ If `harness.materialized` does not fire, see [TROUBLESHOOTING.md](TROUBLESHOOTIN
 
 ---
 
-## 9. MCP integration smoke test
+## 9. No-progress streak runbook (TASK_2026_005)
+
+When a dispatch completes with `exitCode=0` but no file was added/modified/deleted and the phase did not advance, the daemon marks it as a **no-progress soft-failure** (state = `failed`, `stderr_snippet` contains `"no progress detected"`). The existing K-recent-failed poison window catches streaks: three consecutive no-progress dispatches poison the lane.
+
+### Symptoms
+
+- Dashboard task-detail page shows a "no-progress streak: N" warning badge
+- Advance button is disabled when streak ≥ 2
+- Recent dispatches in the dispatch table show `state=failed`, `exitCode=0`, stderr includes `"no progress detected"`
+
+### Diagnosis
+
+1. **Check the dispatch stderr.** Click the latest failed dispatch in the task-detail page — look for `"exit 0 but no progress detected"` in the stderr snippet.
+2. **Check the ptah session JSONL.** The dispatch log entry has the session path. Look for empty or near-empty `agent.message` events — this indicates the LLM returned nothing (provider hiccup, rate-limit window, auth refresh race, or model guardrail trip).
+3. **Check LLM provider status.** Rate limits, auth token refreshes, or model outages can produce empty responses. Check the provider dashboard / status page.
+4. **Check if the agent legitimately had no work.** Some phases (e.g. QA on already-passing code) can exit 0 with no file change. The soft-failure is recoverable — err on the side of pausing.
+
+### Remediation
+
+- **Transient cause (provider blip):** Click "Acknowledge and force advance" on the dashboard. This tops up the dispatch budget by 1 and immediately dispatches the next attempt.
+- **Budget exhausted:** The dashboard shows `E_BUDGET_EXHAUSTED`. Click "Top up budget (+5)" or call `POST /api/projects/:slug/tasks/:taskId/budget` with `{ delta: N }` or `{ set: N }`.
+- **Persistent cause (broken agent, misconfigured model):** Cancel the task or reconfigure the agent. Use `DELETE FROM dispatches WHERE state='poisoned' AND project_slug=? AND task_id=? AND phase=?` to clear the poisoned lane if you want to re-dispatch after fixing the agent.
+
+### SQL: inspect no-progress streak
+
+```sql
+-- Recent dispatches for a task, showing no-progress markers
+SELECT id, state, exit_code, stderr_snippet, created_at
+  FROM dispatches
+ WHERE project_slug = 'my-project' AND task_id = 'TASK_2026_010'
+ ORDER BY created_at DESC LIMIT 10;
+```
+
+### SQL: check dispatch budget
+
+```sql
+SELECT id, dispatch_count, dispatch_budget
+  FROM tasks
+ WHERE project_slug = 'my-project' AND id = 'TASK_2026_010';
+```
+
+---
+
+## 10. MCP integration smoke test
 
 The MCP path has an integration test that spawns a real `@modelcontextprotocol/server-everything` stdio server and exercises start/list/call/stop end-to-end. The package is intentionally NOT in `bot-bridge/package.json` deps — it's a local-only diagnostic, never run in CI — so the test is gated behind `OPENCLAW_TEST_REAL_MCP=1` and otherwise skips silently.
 

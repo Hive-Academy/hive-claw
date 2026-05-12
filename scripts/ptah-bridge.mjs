@@ -140,7 +140,8 @@ function getPtahLicenseTier() {
       timeout: 3000,
     });
     const parsed = JSON.parse(stdout);
-    const tier = parsed?.tier;
+    // 0.1.5+ wraps output in a JSON-RPC 2.0 envelope; older releases emitted bare JSON.
+    const tier = parsed?.params?.tier ?? parsed?.tier;
     return typeof tier === 'string' ? tier : null;
   } catch {
     return null;

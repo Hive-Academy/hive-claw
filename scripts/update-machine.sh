@@ -49,11 +49,11 @@ done
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR"
 
-# Minimum ptah-cli version (must match setup.sh phase 13). 0.1.3 is the first
-# release where headless `session start --task` actually drives a turn — older
-# versions silently no-op, which makes the dispatch worker look healthy while
-# nothing happens. See docs/HANDOFF-ptah-cli.md.
-PTAH_MIN_VERSION="0.1.3"
+# Minimum ptah-cli version (must match setup.sh phase 13). 0.1.5 adds
+# `ptah doctor` and `auth use`/`auth set-anthropic-route`. 0.1.3 was the
+# first release where headless `session start --task` actually drove a turn
+# — older versions silently no-op. See docs/HANDOFF-ptah-cli.md.
+PTAH_MIN_VERSION="0.1.5"
 
 bold "[1/3] git pull"
 if [ "$PULL" = "1" ]; then

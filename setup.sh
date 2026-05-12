@@ -390,11 +390,11 @@ else
         [ -z "$PTAH_BIN_PATH" ] && PTAH_BIN_PATH="$(command -v ptah || true)"
         [ -z "$NODE_BIN_PATH" ] && NODE_BIN_PATH="$(command -v node || true)"
     fi
-    # Minimum ptah-cli version. 0.1.3 is the first release where headless
-    # `session start --task` actually drives a turn end-to-end (0.1.1 emitted
-    # session.created and exited 0 without ever spawning the underlying claude
-    # subprocess — see docs/HANDOFF-ptah-cli.md for the original investigation).
-    PTAH_MIN_VERSION="0.1.3"
+    # Minimum ptah-cli version. 0.1.5 adds `ptah doctor` for health checks
+    # and `auth use`/`auth set-anthropic-route` for provider switching.
+    # 0.1.3 was the first release where headless `session start --task`
+    # actually drove a turn end-to-end — see docs/HANDOFF-ptah-cli.md.
+    PTAH_MIN_VERSION="0.1.5"
 
     # Auto-install ptah if we have npm but not ptah.
     if [ -z "$PTAH_BIN_PATH" ] && command -v npm >/dev/null 2>&1; then
