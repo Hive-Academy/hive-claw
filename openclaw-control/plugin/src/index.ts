@@ -1,7 +1,7 @@
 // openclaw-control-plugin — entry point.
 //
-// Batch 4 wired `invoke_ptah`. Batch 5 adds the six daemon-CRUD tools below.
-// The 5 install/clawhub tools land in Batch 8c.
+// Batch 4 wired `invoke_ptah`. Batch 5 added the six daemon-CRUD tools.
+// Batch 8c adds the 5 extension-install / clawhub tools per amendment §16.4.
 //
 // SDK imports resolve through tsconfig path aliases in the dev tree (see
 // `src/sdk/README.md`). Batch 7's Dockerfile drops the aliases and the
@@ -18,11 +18,19 @@ import {
   approveTaskFactory,
   handoffTaskFactory,
 } from "./tools/daemonCrud.js";
+import {
+  requestPluginInstallFactory,
+  requestMcpSkillInstallFactory,
+  listInstalledPluginsFactory,
+  listInstalledMcpSkillsFactory,
+  searchClawhubFactory,
+} from "./tools/extensions.js";
 
 export default definePluginEntry({
   id: "openclaw-control-plugin",
   name: "OpenClaw Control Plugin",
-  description: "Daemon CRUD tools + invoke_ptah for openclaw-control.",
+  description:
+    "Daemon CRUD tools + invoke_ptah + extension install/ClawHub tools for openclaw-control.",
   register(api) {
     api.registerTool(invokePtahFactory, { name: "invoke_ptah" });
     api.registerTool(listProjectsFactory, { name: "list_projects" });
@@ -32,8 +40,22 @@ export default definePluginEntry({
     api.registerTool(approveTaskFactory, { name: "approve_task" });
     api.registerTool(handoffTaskFactory, { name: "handoff_task" });
 
+    api.registerTool(requestPluginInstallFactory, {
+      name: "request_plugin_install",
+    });
+    api.registerTool(requestMcpSkillInstallFactory, {
+      name: "request_mcp_skill_install",
+    });
+    api.registerTool(listInstalledPluginsFactory, {
+      name: "list_installed_plugins",
+    });
+    api.registerTool(listInstalledMcpSkillsFactory, {
+      name: "list_installed_mcp_skills",
+    });
+    api.registerTool(searchClawhubFactory, { name: "search_clawhub" });
+
     api.logger.info(
-      "[openclaw-control-plugin] registered 7 tools (invoke_ptah + 6 daemon CRUD)",
+      "[openclaw-control-plugin] registered 12 tools (invoke_ptah + 6 daemon CRUD + 5 install/clawhub)",
     );
   },
 });

@@ -233,6 +233,109 @@ export interface ApproveTaskBody {
   feedback?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Extension install / clawhub types (Batch 8c).
+//
+// `/api/extensions/install-requests` (POST) — agent files an install request.
+// `/api/extensions/installed`         (GET)  — read-only inventory of installed
+//                                              plugins + skills (the daemon
+//                                              shells out to openclaw inside
+//                                              the gateway container).
+// `/api/extensions/clawhub/search`    (GET)  — NOT YET IMPLEMENTED in Batch 8b.
+//                                              The plugin tool returns a
+//                                              "not yet available" failure
+//                                              until that route lands.
+// ---------------------------------------------------------------------------
+
+export type ExtensionKind = "plugin" | "mcp_skill";
+
+export interface RequestExtensionInstallBody {
+  kind: ExtensionKind;
+  slug: string;
+  requestingAgentId: string;
+  reason?: string | null;
+}
+
+export interface RequestExtensionInstallResponse {
+  requestId: number;
+  status: "pending" | "approved" | "rejected" | "applied" | "failed";
+  createdAt?: string;
+}
+
+export interface InstalledItem {
+  slug: string;
+  raw?: unknown;
+}
+
+export interface InstalledInventory {
+  plugins: ReadonlyArray<InstalledItem>;
+  mcpSkills: ReadonlyArray<InstalledItem>;
+}
+
+export interface ClawhubSearchResult {
+  slug: string;
+  kind?: ExtensionKind;
+  description?: string;
+  verified?: boolean;
+  raw?: unknown;
+}
+
+/**
+ * POST /api/extensions/install-requests.
+ *
+ * Creates a pending install request for an openclaw plugin or skill. The
+ * daemon does NOT install; an operator must approve via the dashboard.
+ */
+async function requestExtensionInstall(
+  body: RequestExtensionInstallBody,
+): Promise<RequestExtensionInstallResponse> {
+  return call<RequestExtensionInstallResponse>(
+    "POST",
+    "/api/extensions/install-requests",
+    body,
+  );
+}
+
+/**
+ * GET /api/extensions/installed.
+ *
+ * Returns the inventory filtered to a single kind. The daemon route returns
+ * both plugins + mcpSkills in one shot; we slice client-side for the two
+ * separate tools.
+ */
+async function listInstalled(
+  kind: ExtensionKind,
+): Promise<InstalledItem[]> {
+  const inv = await call<InstalledInventory>(
+    "GET",
+    "/api/extensions/installed",
+  );
+  if (kind === "plugin") return [...(inv.plugins ?? [])];
+  return [...(inv.mcpSkills ?? [])];
+}
+
+/**
+ * GET /api/extensions/clawhub/search?q=…&kind=…
+ *
+ * TODO(batch-8c-followup): Daemon route NOT IMPLEMENTED as of Batch 8b. The
+ * plugin tool surface returns a `failedTextResult` with a "not yet available"
+ * message until the daemon-side wrapper around `openclaw plugins search`
+ * lands. See amendment §16.4 — wrapping `openclaw plugins search <query>`
+ * via `docker exec`.
+ */
+async function searchClawhub(
+  query: string,
+  kind?: ExtensionKind,
+): Promise<ClawhubSearchResult[]> {
+  const params = new URLSearchParams();
+  params.set("q", query);
+  if (kind) params.set("kind", kind);
+  return call<ClawhubSearchResult[]>(
+    "GET",
+    `/api/extensions/clawhub/search?${params.toString()}`,
+  );
+}
+
 /**
  * Daemon client surface. The CRUD methods are called by `tools/daemonCrud.ts`
  * (Batch 5); `invokePtah` is called by `ptahLauncher.ts` (Batch 4).
@@ -289,4 +392,9 @@ export const daemon = {
   readProjectFile,
   listProjectFiles,
   writeProjectFile,
+
+  // Extension / clawhub surface (Batch 8c).
+  requestExtensionInstall,
+  listInstalled,
+  searchClawhub,
 };

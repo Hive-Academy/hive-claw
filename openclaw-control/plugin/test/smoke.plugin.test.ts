@@ -1,7 +1,8 @@
 // Plugin smoke test — instantiates the plugin's `register(api)` with a mock
-// api that records `registerTool` calls. Asserts exactly 7 tools register,
-// with the expected names, and that `start_harness_setup` is NOT present
-// (amendment §3.10 removes it entirely).
+// api that records `registerTool` calls. Asserts exactly 12 tools register
+// (invoke_ptah + 6 daemon CRUD + 5 install/clawhub per Batch 8c), with the
+// expected names, and that `start_harness_setup` is NOT present (amendment
+// §3.10 removes it entirely).
 
 import { describe, it, before } from "node:test";
 import { strict as assert } from "node:assert";
@@ -44,15 +45,15 @@ function buildMockApi(): { api: PluginApi; registered: RegisteredTool[] } {
 }
 
 describe("plugin smoke — register()", () => {
-  it("registers exactly 7 tools with the expected names", () => {
+  it("registers exactly 12 tools with the expected names", () => {
     const { api, registered } = buildMockApi();
     entry.register(api);
 
     const names = registered.map((r) => r.name);
     assert.equal(
       registered.length,
-      7,
-      `expected 7 tools, got ${registered.length}: ${names.join(", ")}`,
+      12,
+      `expected 12 tools, got ${registered.length}: ${names.join(", ")}`,
     );
     assert.deepEqual(names.sort(), [
       "approve_task",
@@ -60,8 +61,13 @@ describe("plugin smoke — register()", () => {
       "get_task",
       "handoff_task",
       "invoke_ptah",
+      "list_installed_mcp_skills",
+      "list_installed_plugins",
       "list_projects",
       "list_tasks",
+      "request_mcp_skill_install",
+      "request_plugin_install",
+      "search_clawhub",
     ]);
   });
 
@@ -84,7 +90,7 @@ describe("plugin smoke — register()", () => {
     assert.equal(names.includes("dispatch_orchestration_task"), false);
   });
 
-  it("emits a logger.info line announcing 7 tools registered", () => {
+  it("emits a logger.info line announcing 12 tools registered", () => {
     const messages: string[] = [];
     const api: PluginApi = {
       logger: {
@@ -94,7 +100,7 @@ describe("plugin smoke — register()", () => {
     };
     entry.register(api);
     assert.equal(messages.length, 1);
-    assert.match(messages[0]!, /registered 7 tools/);
+    assert.match(messages[0]!, /registered 12 tools/);
   });
 
   it("plugin entry has the expected id/name/description shape", () => {
