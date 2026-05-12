@@ -24,6 +24,15 @@ import {
 } from "openclaw/plugin-sdk/agent-runtime";
 
 import { resolveAndInvokePtah } from "../ptahLauncher.js";
+import { validateProjectSlug as _validateProjectSlug } from "../validators.js";
+
+/**
+ * Re-exported for the existing tools.invokePtah.test.ts harness which
+ * imports `validateProjectSlug` from this module. The canonical home is
+ * `../validators.ts` (Batch 5 moved it there alongside `validateTaskId` /
+ * `validateText`).
+ */
+export const validateProjectSlug = _validateProjectSlug;
 
 const InvokePtahParams = Type.Object(
   {
@@ -42,35 +51,6 @@ const InvokePtahParams = Type.Object(
 );
 
 type InvokePtahParamsT = Static<typeof InvokePtahParams>;
-
-/**
- * Reject path-traversal characters and ASCII control chars in a project
- * slug. Returns an error message on rejection, or `null` if the slug is
- * clean. Per arch §7.1 layer 6.
- *
- * Exported for unit-testing.
- */
-export function validateProjectSlug(project: string): string | null {
-  if (project.length === 0) {
-    return "project must be a non-empty string";
-  }
-  if (
-    project.includes("..") ||
-    project.includes("/") ||
-    project.includes("\\")
-  ) {
-    return 'project slug must not contain "..", "/" or "\\"';
-  }
-  // ASCII control chars (0x00–0x1F and 0x7F) — typebox doesn't catch these
-  // and they have no business in a project slug.
-  for (let i = 0; i < project.length; i++) {
-    const code = project.charCodeAt(i);
-    if (code < 0x20 || code === 0x7f) {
-      return "project slug must not contain control characters";
-    }
-  }
-  return null;
-}
 
 export const invokePtahFactory: OpenClawPluginToolFactory = (
   ctx: OpenClawPluginToolContext,
