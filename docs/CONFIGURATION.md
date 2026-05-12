@@ -38,16 +38,21 @@ The entrypoint reads `LLM_PROVIDER`, builds the matching provider block via `jq`
 | `SKILLS_DIR` | `./skills` | Host skills dir, bind-mounted into `~/.openclaw/skills/`. |
 | `OPENCLAW_AUTH_TOKEN` | (auto by setup.sh) | Bearer token gating the **gateway** dashboard on `:18789`. 32-byte hex. |
 
-### Gateway tier — Legacy Discord adapter
+### Gateway tier — Discord (per-persona accounts)
 
-The openclaw gateway has its own `discord` plugin. When the control plane is in use, the bot-bridge owns Discord and these stay empty. Setting them while the bot-bridge is also running causes Discord to reject one of the two clients (same bot can't be online twice).
+Post-TASK_2026_006 Batch 6, the gateway's openclaw config (`config/openclaw.json.tmpl`) declares **two personas by default** — `anubis` (the default) and `horus` — each with its own Discord bot account under `channels.discord.accounts.<id>`. Each persona connects to Discord with its own bot token; @-mentions are routed per-bot by `bindings[]` matching on `(channel: "discord", accountId: "<id>")`.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `DISCORD_BOT_TOKEN` | (empty → channel disabled) | Gateway adapter's bot token. Leave empty when running the bot-bridge. |
-| `DISCORD_GUILD_ID` | (empty → channel disabled) | Server ID. Same caveat. |
+| `DISCORD_TOKEN_ANUBIS` | (empty → that bot disabled) | Bot token for the Anubis persona; substituted into `channels.discord.accounts.anubis.token`. |
+| `DISCORD_TOKEN_HORUS` | (empty → that bot disabled) | Bot token for the Horus persona; substituted into `channels.discord.accounts.horus.token`. |
+| `GITHUB_TOKEN` | (empty) | Substituted into `mcp.servers.gh.env.GITHUB_PERSONAL_ACCESS_TOKEN`. Also used as the `gh auth` fallback when no `gh auth login` state is bind-mounted from the host. |
+| `DISCORD_GUILD_ID` | (empty → channel disabled) | Server ID. If empty, the entrypoint disables the gateway's discord channel entirely. |
+| `DISCORD_BOT_TOKEN` | (empty — **deprecated**) | Legacy single-bot token used by the pre-Batch-6 template. **Removal lands in TASK_2026_006 Batch 11**; the variable still flows through `entrypoint.sh`'s `envsubst` for transitional compatibility during the cutover window. New deployments should leave it empty and set the per-persona tokens above. |
 
-If both are empty, the entrypoint disables the gateway's discord adapter automatically.
+If both `DISCORD_GUILD_ID` and `DISCORD_BOT_TOKEN` are empty, the entrypoint disables the gateway's discord channel automatically (legacy jq path — kept until Batch 11 reworks it for per-persona).
+
+Single-machine deployments where only one persona is bound locally (per `OPENCLAW_LOCAL_AGENT_IDS`) can leave the other persona's token empty; openclaw will fail to sign that bot in and log it, but the rendered config still validates and the bound persona works normally.
 
 ### Gateway tier — Ptah / gh
 

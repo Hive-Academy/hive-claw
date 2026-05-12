@@ -2,8 +2,22 @@
   "agents": {
     "defaults": {
       "model": { "primary": "${LLM_PROVIDER}/${LLM_MODEL}" },
-      "timeoutSeconds": 600
-    }
+      "timeoutSeconds": 600,
+      "tools": {
+        "fs": { "workspaceOnly": true }
+      }
+    },
+    "list": [
+      {
+        "id": "anubis",
+        "default": true,
+        "workspace": "/home/agent/.openclaw/workspace/anubis"
+      },
+      {
+        "id": "horus",
+        "workspace": "/home/agent/.openclaw/workspace/horus"
+      }
+    ]
   },
   "models": {
     "mode": "merge",
@@ -14,9 +28,16 @@
     "discord": {
       "enabled": true,
       "accounts": {
-        "default": {
-          "token": "${DISCORD_BOT_TOKEN}",
+        "anubis": {
+          "token": "${DISCORD_TOKEN_ANUBIS}",
           "enabled": true,
+          "name": "Anubis",
+          "healthMonitor": { "enabled": true }
+        },
+        "horus": {
+          "token": "${DISCORD_TOKEN_HORUS}",
+          "enabled": true,
+          "name": "Horus",
           "healthMonitor": { "enabled": true }
         }
       },
@@ -25,6 +46,21 @@
         "${DISCORD_GUILD_ID}": { "requireMention": true }
       }
     }
+  },
+  "bindings": [
+    { "agentId": "anubis", "match": { "channel": "discord", "accountId": "anubis" } },
+    { "agentId": "horus",  "match": { "channel": "discord", "accountId": "horus"  } }
+  ],
+  "mcp": {
+    "servers": {
+      "gh": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"],
+        "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}" },
+        "connectionTimeoutMs": 30000
+      }
+    },
+    "sessionIdleTtlMs": 600000
   },
   "gateway": {
     "mode": "local",
