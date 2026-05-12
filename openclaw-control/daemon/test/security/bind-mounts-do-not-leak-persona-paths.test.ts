@@ -87,16 +87,27 @@ for (const file of FILES_TO_SCAN) {
   });
 }
 
-// `agents.defaults.tools.fs.workspaceOnly` was the planned persona-privacy
-// layer 5 (Batch 6, arch §7.5), but openclaw v2026.4.24 rejects that path
-// as an unrecognized config key ("Config invalid — agents.defaults: Unrecognized
-// key: 'tools'"). Discovered during Batch 10 cutover. Phase 2 follow-up:
-// locate the correct openclaw schema slot (likely `agents.list[].sandbox.*`)
-// and re-enable this assertion. Until then, persona-privacy at the FS layer
-// is enforced by bind-mount discipline alone — docker-compose.yml MUST NOT
-// mount ~/.claude/local-memory into the gateway container, which the
-// "no leaked persona path" tests above continue to verify.
-test('openclaw config: persona-privacy bind-mount discipline (workspaceOnly defer)', () => {
+// `agents.defaults.tools.fs.workspaceOnly` from arch §7.5 doesn't exist
+// in openclaw's schema. The actual openclaw sandbox slot is
+// `agents.defaults.sandbox.{mode, workspaceAccess, ...}` (verified in
+// openclaw v2026.4.24 at config-DVWzrbBW.js:129-145 via
+// resolveSandboxConfigForAgent). Two meanings:
+//
+//   - `sandbox.mode: "off"` (default): tools run in the gateway's own
+//     filesystem context. Persona privacy is then enforced by:
+//       1) the daemon's memory.ts routing (layers 1-4) for HTTP memory ops,
+//       2) docker-compose.yml bind-mount discipline so the gateway
+//          container doesn't see ~/.claude/local-memory at all,
+//       3) plugin handler input validation (validators.ts).
+//   - `sandbox.mode: "docker"`: openclaw spawns per-session sandbox
+//     containers and applies workspaceAccess: "none"|"ro"|"rw". A heavier
+//     model. We don't use it; the gateway-container approach is sufficient.
+//
+// So there is NO assertion to make here about a workspaceOnly flag. The
+// bind-mount-segment tests above are what actually enforces the invariant.
+// This test guards against a future regression where someone re-adds an
+// invalid `agents.defaults.tools` block (openclaw will refuse to boot).
+test('openclaw config: no rejected agents.defaults.tools block', () => {
   const tmplPath = resolve(REPO_ROOT, 'config/openclaw.json.tmpl');
   const raw = readFileSync(tmplPath, 'utf8');
 
@@ -106,13 +117,11 @@ test('openclaw config: persona-privacy bind-mount discipline (workspaceOnly defe
     .replace(/\$\{[^}]+\}/g, 'STUB');
 
   const cfg = JSON.parse(stubbed);
-  // Just assert the template is structurally valid and has agents.defaults.
-  // workspaceOnly is intentionally absent until the schema slot is identified.
   assert.ok(cfg?.agents?.defaults, 'agents.defaults block must exist');
   assert.equal(
     cfg?.agents?.defaults?.tools,
     undefined,
-    'agents.defaults.tools is rejected by openclaw v2026.4.24; do not re-add without verifying the schema slot',
+    'agents.defaults.tools is rejected by openclaw v2026.4.24 — the correct sandbox slot is agents.defaults.sandbox.* (see config-DVWzrbBW.js:129-145 in the installed openclaw). Persona-privacy at the FS layer is enforced by docker-compose bind-mount discipline + daemon memory.ts layers 1-4, not via this template key.',
   );
 });
 
