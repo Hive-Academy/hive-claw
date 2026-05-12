@@ -95,7 +95,7 @@ function optionalString(args: Record<string, unknown>, key: string): string | un
 // ---------------------------------------------------------------------------
 
 /**
- * Returns the 9 daemon-CRUD tools. Pure function — call on every message.
+ * Returns the daemon-CRUD tools. Pure function — call on every message.
  *
  * The handlers close over the singleton `daemon` HTTP client. Tests stub
  * `daemon.<method>` directly to assert round-tripping (see
