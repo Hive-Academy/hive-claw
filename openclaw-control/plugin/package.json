@@ -20,10 +20,10 @@
     "openclaw": ">=2026.4.24"
   },
   "dependencies": {
-    "undici": "^6.0.0"
+    "undici": "^6.0.0",
+    "@sinclair/typebox": "^0.34.49"
   },
   "devDependencies": {
-    "@sinclair/typebox": "^0.34.49",
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"

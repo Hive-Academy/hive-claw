@@ -87,7 +87,12 @@ COPY --from=daemon-builder --chown=agent:agent /build/daemon/dist /opt/openclaw-
 # already present in openclaw's own node_modules, so no second `npm install`
 # step is needed here. Batch 10 is the cutover that restarts the gateway and
 # makes openclaw actually discover this directory.
-COPY --from=plugin-builder /build/plugin/dist /usr/lib/node_modules/openclaw/dist/extensions/openclaw-control-plugin
+# Preserve the dist/ subdirectory so package.json's "main": "dist/index.js"
+# and "openclaw.extensions": ["./dist/index.js"] resolve correctly. Without
+# the trailing /dist on the destination, Docker COPY flattens dist's
+# CONTENTS into openclaw-control-plugin/ — silently broken (plugin not
+# discovered, "Plugin not found" from `openclaw plugins inspect`).
+COPY --from=plugin-builder /build/plugin/dist /usr/lib/node_modules/openclaw/dist/extensions/openclaw-control-plugin/dist
 COPY --from=plugin-builder /build/plugin/package.json /usr/lib/node_modules/openclaw/dist/extensions/openclaw-control-plugin/package.json
 COPY --from=plugin-builder /build/plugin/openclaw.plugin.json /usr/lib/node_modules/openclaw/dist/extensions/openclaw-control-plugin/openclaw.plugin.json
 

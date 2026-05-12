@@ -2,10 +2,7 @@
   "agents": {
     "defaults": {
       "model": { "primary": "${LLM_PROVIDER}/${LLM_MODEL}" },
-      "timeoutSeconds": 600,
-      "tools": {
-        "fs": { "workspaceOnly": true }
-      }
+      "timeoutSeconds": 600
     },
     "list": [
       {
@@ -82,7 +79,8 @@
   },
   "plugins": {
     "entries": {
-      "bonjour": { "enabled": false }
+      "bonjour": { "enabled": false },
+      "openclaw-control-plugin": { "enabled": true }
     }
   },
   "commands": {

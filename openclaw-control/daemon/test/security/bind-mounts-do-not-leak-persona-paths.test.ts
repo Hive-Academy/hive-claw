@@ -87,26 +87,32 @@ for (const file of FILES_TO_SCAN) {
   });
 }
 
-test('openclaw config: agents.defaults.tools.fs.workspaceOnly is true', () => {
+// `agents.defaults.tools.fs.workspaceOnly` was the planned persona-privacy
+// layer 5 (Batch 6, arch §7.5), but openclaw v2026.4.24 rejects that path
+// as an unrecognized config key ("Config invalid — agents.defaults: Unrecognized
+// key: 'tools'"). Discovered during Batch 10 cutover. Phase 2 follow-up:
+// locate the correct openclaw schema slot (likely `agents.list[].sandbox.*`)
+// and re-enable this assertion. Until then, persona-privacy at the FS layer
+// is enforced by bind-mount discipline alone — docker-compose.yml MUST NOT
+// mount ~/.claude/local-memory into the gateway container, which the
+// "no leaked persona path" tests above continue to verify.
+test('openclaw config: persona-privacy bind-mount discipline (workspaceOnly defer)', () => {
   const tmplPath = resolve(REPO_ROOT, 'config/openclaw.json.tmpl');
   const raw = readFileSync(tmplPath, 'utf8');
 
-  // Strip JSONC line comments before parsing (the production renderer is
-  // envsubst → openclaw's JSON parser; line comments — if any are added by
-  // future template edits — must be tolerated by this test).
   const stripped = raw.replace(/^\s*\/\/.*$/gm, '');
-  // Replace ${VAR} substitutions with stub values so JSON.parse succeeds.
-  // The providers slot is special — envsubst injects a JSON OBJECT there
-  // (not a quoted string), so substitute it with an empty object literal.
   const stubbed = stripped
     .replace(/\$\{LLM_PROVIDERS_JSON\}/g, '{}')
     .replace(/\$\{[^}]+\}/g, 'STUB');
 
   const cfg = JSON.parse(stubbed);
+  // Just assert the template is structurally valid and has agents.defaults.
+  // workspaceOnly is intentionally absent until the schema slot is identified.
+  assert.ok(cfg?.agents?.defaults, 'agents.defaults block must exist');
   assert.equal(
-    cfg?.agents?.defaults?.tools?.fs?.workspaceOnly,
-    true,
-    'agents.defaults.tools.fs.workspaceOnly must be true (persona-privacy layer 5)',
+    cfg?.agents?.defaults?.tools,
+    undefined,
+    'agents.defaults.tools is rejected by openclaw v2026.4.24; do not re-add without verifying the schema slot',
   );
 });
 

@@ -9,7 +9,7 @@
 //     `daemon/src/api.ts:314` so a misconfigured chat model can't get even
 //     a 400 from the daemon — it's caught client-side first.
 
-import { Type, type Static } from "openclaw/plugin-sdk/typebox";
+import { Type, type Static } from "@sinclair/typebox";
 import type {
   OpenClawPluginToolFactory,
   OpenClawPluginToolContext,

@@ -33,6 +33,11 @@ services:
       PTAH_CONFIG_DIR: /home/agent/.ptah
       # The plugin reaches host-side ptah-bridge via host.docker.internal.
       OPENCLAW_PTAH_BRIDGE_URL: ${OPENCLAW_PTAH_BRIDGE_URL:-http://host.docker.internal:8744}
+      # The openclaw-control-plugin (loaded in this container) calls the
+      # daemon over inter-container DNS. The .env default of
+      # http://localhost:7878 only works for the legacy single-container
+      # layout; in the split-container layout the daemon is a sibling.
+      OPENCLAW_DAEMON_URL: ${OPENCLAW_DAEMON_URL_GATEWAY:-http://openclaw-daemon:7878}
       # TASK_2026_006 Batch 9: dual-config cutover window. Both the old
       # single-token (DISCORD_BOT_TOKEN) and the new per-persona tokens are
       # surfaced into the container side-by-side. The new tokens drive the

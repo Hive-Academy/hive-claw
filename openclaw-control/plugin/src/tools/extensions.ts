@@ -23,7 +23,7 @@
 // After Batch 8c, the plugin registers 12 tools total: `invoke_ptah` (Batch
 // 4) + 6 daemon-CRUD (Batch 5) + the 5 here.
 
-import { Type, type Static } from "openclaw/plugin-sdk/typebox";
+import { Type, type Static } from "@sinclair/typebox";
 import type {
   OpenClawPluginToolFactory,
   OpenClawPluginToolContext,
