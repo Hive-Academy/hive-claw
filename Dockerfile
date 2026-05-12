@@ -63,7 +63,8 @@ RUN npm install -g @hive-academy/ptah-cli@^0.1.5 \
 
 RUN useradd --create-home --shell /bin/bash --uid 1000 agent \
     && mkdir -p /workspace /home/agent/.openclaw /home/agent/.openclaw/extensions \
-                /home/agent/.openclaw/skills /home/agent/.ptah /home/agent/.claude \
+                /home/agent/.openclaw/skills /home/agent/.openclaw/workspace \
+                /home/agent/.ptah /home/agent/.claude \
                 /opt/openclaw-control/daemon /opt/openclaw-control/dashboard \
                 /data \
     && chown -R agent:agent /workspace /home/agent/.openclaw /home/agent/.ptah /home/agent/.claude /data

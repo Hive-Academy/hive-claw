@@ -223,6 +223,23 @@ fi
 echo "[entrypoint] Rendering side-by-side cutover preview to $CONFIG_FILE_NEW"
 render_template "$CONFIG_FILE_NEW"
 
+# Pre-create per-persona workspace directories from the rendered config so
+# openclaw's plugin services (acpx, etc.) don't fail at boot with
+# "EACCES: permission denied, mkdir /home/agent/.openclaw/workspace/<id>".
+# The parent /home/agent/.openclaw/workspace/ is created agent-owned by
+# the Dockerfile on image build; subdirs are mkdir'd here per boot.
+echo "[entrypoint] Pre-creating per-persona workspace dirs from rendered config"
+WORKSPACE_PARENT="$(dirname "$(jq -r '.agents.list[0].workspace // "/home/agent/.openclaw/workspace/_"' "$CONFIG_FILE" 2>/dev/null)")"
+mkdir -p "$WORKSPACE_PARENT" 2>/dev/null || true
+jq -r '.agents.list[]?.workspace // empty' "$CONFIG_FILE" 2>/dev/null \
+    | while IFS= read -r ws; do
+        if [ -n "$ws" ]; then
+            mkdir -p "$ws" 2>/dev/null \
+                && echo "  ✓ $ws" \
+                || echo "  ! $ws (mkdir failed; check ownership of parent)"
+        fi
+    done
+
 # Redact every key whose name suggests a secret before logging.
 echo "[entrypoint] Rendered ${CONFIG_FILE} (secrets redacted):"
 jq 'walk(
