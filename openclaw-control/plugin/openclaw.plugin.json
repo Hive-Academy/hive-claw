@@ -1,0 +1,19 @@
+{
+  "id": "openclaw-control-plugin",
+  "name": "OpenClaw Control Plugin",
+  "description": "Daemon CRUD tools + invoke_ptah custom tool for the openclaw-control fleet.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "daemonUrl": {
+        "type": "string",
+        "description": "Override OPENCLAW_DAEMON_URL."
+      },
+      "ptahTimeoutMs": {
+        "type": "number",
+        "description": "Max ptah subprocess runtime in ms (default 1800000)."
+      }
+    }
+  }
+}
