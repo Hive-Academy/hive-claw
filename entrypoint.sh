@@ -134,22 +134,63 @@ export LLM_PROVIDER LLM_MODEL LLM_PROVIDERS_JSON \
 
 mkdir -p "$CONFIG_DIR"
 
-envsubst '${LLM_PROVIDER} ${LLM_MODEL} ${LLM_PROVIDERS_JSON} ${DISCORD_GUILD_ID} ${DISCORD_BOT_TOKEN} ${DISCORD_TOKEN_ANUBIS} ${DISCORD_TOKEN_HORUS} ${GITHUB_TOKEN} ${OPENCLAW_AUTH_TOKEN} ${OPENCLAW_VERSION} ${OPENCLAW_NOW}' \
-    < "$TEMPLATE" > "$CONFIG_FILE"
+# ---------- TASK_2026_006 Batch 9: dual-write rendering ----------
+# The template at $TEMPLATE was updated in Batch 6 to render the NEW
+# multi-agent shape (per-persona Discord accounts: anubis, horus). The
+# config currently running inside the gateway (in the openclaw-state docker
+# volume at $CONFIG_FILE) is still the OLD single-agent shape from before
+# Batch 6.
+#
+# Cutover policy:
+#   - If $CONFIG_FILE already exists, leave it untouched. The operator's
+#     current openclaw.json keeps running unchanged.
+#   - If $CONFIG_FILE does not exist (fresh volume / first boot), render
+#     the new template into it — there's nothing to preserve.
+#   - ALWAYS (re-)render the new template to $CONFIG_FILE.new so the
+#     operator can `diff` old vs new and cut over by `cp`-ing the .new file
+#     onto openclaw.json when ready (see docs/CUTOVER_RUNBOOK.md).
+#
+# Batch 10 will flip this so the rendering goes straight to $CONFIG_FILE.
+CONFIG_FILE_NEW="${CONFIG_FILE}.new"
 
-if [ -z "$DISCORD_BOT_TOKEN" ] || [ -z "$DISCORD_GUILD_ID" ]; then
-    echo "[entrypoint] Discord token or guild missing — disabling discord channel"
-    jq '.channels.discord.enabled = false
-        | .channels.discord.accounts.default.enabled = false' \
-       "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+render_template() {
+    local out="$1"
+    envsubst '${LLM_PROVIDER} ${LLM_MODEL} ${LLM_PROVIDERS_JSON} ${DISCORD_GUILD_ID} ${DISCORD_BOT_TOKEN} ${DISCORD_TOKEN_ANUBIS} ${DISCORD_TOKEN_HORUS} ${GITHUB_TOKEN} ${OPENCLAW_AUTH_TOKEN} ${OPENCLAW_VERSION} ${OPENCLAW_NOW}' \
+        < "$TEMPLATE" > "$out"
+
+    # Mirror the historical "discord disabled when tokens missing" behavior
+    # on the rendered output. Detect which shape we rendered (old: default
+    # account; new: anubis/horus accounts) and disable accordingly.
+    if [ -z "$DISCORD_BOT_TOKEN" ] && [ -z "$DISCORD_TOKEN_ANUBIS" ] && [ -z "$DISCORD_TOKEN_HORUS" ]; then
+        echo "[entrypoint] No Discord tokens configured — disabling discord channel in $out"
+        jq '.channels.discord.enabled = false
+            | (.channels.discord.accounts // {}) |= with_entries(.value.enabled = false)' \
+           "$out" > "${out}.tmp" && mv "${out}.tmp" "$out"
+    elif [ -z "$DISCORD_GUILD_ID" ]; then
+        echo "[entrypoint] DISCORD_GUILD_ID missing — disabling discord channel in $out"
+        jq '.channels.discord.enabled = false
+            | (.channels.discord.accounts // {}) |= with_entries(.value.enabled = false)' \
+           "$out" > "${out}.tmp" && mv "${out}.tmp" "$out"
+    fi
+
+    if ! jq empty "$out" 2>/dev/null; then
+        echo "[entrypoint] FATAL: rendered config $out is not valid JSON. Aborting before openclaw mangles it."
+        cat "$out"
+        exit 1
+    fi
+}
+
+if [ -f "$CONFIG_FILE" ]; then
+    echo "[entrypoint] Existing $CONFIG_FILE found — leaving it in place (cutover pending)."
+else
+    echo "[entrypoint] No existing $CONFIG_FILE — rendering new template into it (fresh boot)."
+    render_template "$CONFIG_FILE"
 fi
 
-# Validate the rendered config is real JSON before openclaw sees it.
-if ! jq empty "$CONFIG_FILE" 2>/dev/null; then
-    echo "[entrypoint] FATAL: rendered config is not valid JSON. Aborting before openclaw mangles it."
-    cat "$CONFIG_FILE"
-    exit 1
-fi
+# Always (re-)render the new-shape template to a side-by-side file so the
+# operator can preview / diff / cp it during the Batch 10 cutover.
+echo "[entrypoint] Rendering side-by-side cutover preview to $CONFIG_FILE_NEW"
+render_template "$CONFIG_FILE_NEW"
 
 # Redact every key whose name suggests a secret before logging.
 echo "[entrypoint] Rendered ${CONFIG_FILE} (secrets redacted):"

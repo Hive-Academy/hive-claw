@@ -33,6 +33,14 @@ services:
       PTAH_CONFIG_DIR: /home/agent/.ptah
       # The plugin reaches host-side ptah-bridge via host.docker.internal.
       OPENCLAW_PTAH_BRIDGE_URL: ${OPENCLAW_PTAH_BRIDGE_URL:-http://host.docker.internal:8744}
+      # TASK_2026_006 Batch 9: dual-config cutover window. Both the old
+      # single-token (DISCORD_BOT_TOKEN) and the new per-persona tokens are
+      # surfaced into the container side-by-side. The new tokens drive the
+      # multi-agent template rendered to /etc/openclaw/openclaw.json.new;
+      # the old token still drives the currently-running openclaw.json.
+      # Batch 11 removes DISCORD_BOT_TOKEN after the cutover is stable.
+      DISCORD_TOKEN_ANUBIS: ${DISCORD_TOKEN_ANUBIS:-}
+      DISCORD_TOKEN_HORUS: ${DISCORD_TOKEN_HORUS:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     security_opt:
