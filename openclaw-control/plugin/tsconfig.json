@@ -5,6 +5,12 @@
     "moduleResolution": "Bundler",
     "outDir": "dist",
     "rootDir": "src",
+    "baseUrl": ".",
+    "paths": {
+      "openclaw/plugin-sdk/plugin-entry": ["src/sdk/plugin-entry.ts"],
+      "openclaw/plugin-sdk/typebox": ["src/sdk/typebox.ts"],
+      "openclaw/plugin-sdk/agent-runtime": ["src/sdk/agent-runtime.ts"]
+    },
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
