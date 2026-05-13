@@ -41,6 +41,15 @@ export interface HarnessTier {
    * the validator, not the parser.
    */
   tools?: string[];
+  /**
+   * Opt-in: when true and the operator's Discord message carries attachments,
+   * the chat tier fetches them, base64-inlines images as `image_url` content
+   * parts, and sends the multi-part user message to a vision-capable model.
+   * Off by default — locked-down personas should not silently consume
+   * attachments. Vision model selection: env `LLM_VISION_MODEL` (falls back
+   * to `LLM_MODEL` if unset, which is fine when LLM_MODEL is already a VLM).
+   */
+  acceptAttachments?: boolean;
   enabledPluginIds?: string[];
   modelTier?: 'claude_code' | 'enhanced';
 }
@@ -152,9 +161,17 @@ function parseTier(v: unknown, path: string, allowOrchestrationFields: boolean):
   // `upload_attachment`). Free-form list; the chat-tier registry validates the
   // names. Optional everywhere — undefined means "no built-in tools".
   const toolsOpt = asOptionalStringArray(v.tools, `${path}.tools`);
+  let acceptAttachments: boolean | undefined;
+  if (v.acceptAttachments !== undefined && v.acceptAttachments !== null) {
+    if (typeof v.acceptAttachments !== 'boolean') {
+      fail(`${path}.acceptAttachments`, `expected boolean, got ${typeof v.acceptAttachments}`);
+    }
+    acceptAttachments = v.acceptAttachments;
+  }
 
   const tier: HarnessTier = { skills, subagents, mcpServers };
   if (toolsOpt !== undefined) tier.tools = toolsOpt;
+  if (acceptAttachments !== undefined) tier.acceptAttachments = acceptAttachments;
 
   if (allowOrchestrationFields) {
     if (v.enabledPluginIds !== undefined && v.enabledPluginIds !== null) {
@@ -202,6 +219,7 @@ export function parseHarnessYaml(yamlText: string): HarnessConfig {
     mcpServers: chatTier.mcpServers,
   };
   if (chatTier.tools !== undefined) chatTierOut.tools = chatTier.tools;
+  if (chatTier.acceptAttachments !== undefined) chatTierOut.acceptAttachments = chatTier.acceptAttachments;
 
   return {
     version: 1,

@@ -1,39 +1,51 @@
+# TASK_2026_006 Batch 5b: three-service compose. The openclaw stack is now
+# split into independent gateway / daemon / redis containers so the plugin
+# install pipeline (Batch 8b) can restart the gateway without taking the
+# daemon (and its dashboard approval UI) down with it.
+#
+# Both openclaw-* application services use the SAME image — only
+# OPENCLAW_CONTAINER_ROLE differs, which entrypoint.sh reads to select the
+# boot path. See docs/OPERATIONS.md for runtime details.
+#
+# Production endpoints (bound to 127.0.0.1 by default):
+#   :18789  openclaw gateway (HTTP + WebSocket)
+#   :7878   openclaw-control daemon (REST + SSE + dashboard)
+#
+# For alternate-port local testing without colliding with a host-native
+# stack, use docker-compose.test.yml instead.
+
 services:
-  openclaw:
+  openclaw-gateway:
     build:
       context: .
       dockerfile: Dockerfile
     image: openclaw-local:latest
-    container_name: openclaw
+    container_name: openclaw-gateway
     restart: unless-stopped
     env_file:
       - .env
     environment:
-      # .env's GH_CONFIG_DIR / PTAH_CONFIG_DIR hold HOST paths (used as bind-mount
-      # sources by docker compose). Inside the container those paths don't exist —
-      # override with container-internal paths so `gh` and `ptah` find their config.
+      OPENCLAW_CONTAINER_ROLE: gateway
+      # GH_CONFIG_DIR / PTAH_CONFIG_DIR in .env hold HOST paths used as
+      # bind-mount sources below. Inside the container override with the
+      # container-internal paths so gh/ptah find their config.
       GH_CONFIG_DIR: /home/agent/.config/gh
       PTAH_CONFIG_DIR: /home/agent/.ptah
-      # openclaw-control daemon — paths inside the container.
-      OPENCLAW_HOST: 0.0.0.0
-      OPENCLAW_PORT: 7878
-      OPENCLAW_PROJECT_ROOTS: /home/agent/.openclaw/workspace
-      OPENCLAW_LOCAL_MEMORY: /home/agent/.claude/local-memory
-      OPENCLAW_DASHBOARD_DIR: /opt/openclaw-control/dashboard/browser
-      REDIS_URL: redis://openclaw-redis:6379
-      PTAH_BIN: ptah
-      PTAH_INVOKER_PROFILE: claude_code
-      PTAH_INVOKER_AUTO_APPROVE: "1"
-      # SQLite spec store — leader writes to /data/specs.db (named volume).
-      # Followers ignore this path; they hit the leader over HTTP.
-      OPENCLAW_SPECS_DB_PATH: ${OPENCLAW_SPECS_DB_PATH:-/data/specs.db}
-      # Follower mode: HTTP base URL of the leader's daemon (only meaningful when OPENCLAW_LEADER=0).
-      OPENCLAW_LEADER_URL: ${OPENCLAW_LEADER_URL:-}
-      # Dispatch poison threshold — K consecutive failures per (project, task, phase) → poisoned.
-      OPENCLAW_DISPATCH_FAILURE_THRESHOLD: ${OPENCLAW_DISPATCH_FAILURE_THRESHOLD:-3}
-      # Daemon delegates orchestration to host-side scripts/ptah-bridge.mjs.
-      # Leave OPENCLAW_PTAH_BRIDGE_URL empty in .env to fall back to in-container ptah spawn.
+      # The plugin reaches host-side ptah-bridge via host.docker.internal.
       OPENCLAW_PTAH_BRIDGE_URL: ${OPENCLAW_PTAH_BRIDGE_URL:-http://host.docker.internal:8744}
+      # The openclaw-control-plugin (loaded in this container) calls the
+      # daemon over inter-container DNS. The .env default of
+      # http://localhost:7878 only works for the legacy single-container
+      # layout; in the split-container layout the daemon is a sibling.
+      OPENCLAW_DAEMON_URL: ${OPENCLAW_DAEMON_URL_GATEWAY:-http://openclaw-daemon:7878}
+      # TASK_2026_006 Batch 9: dual-config cutover window. Both the old
+      # single-token (DISCORD_BOT_TOKEN) and the new per-persona tokens are
+      # surfaced into the container side-by-side. The new tokens drive the
+      # multi-agent template rendered to /etc/openclaw/openclaw.json.new;
+      # the old token still drives the currently-running openclaw.json.
+      # Batch 11 removes DISCORD_BOT_TOKEN after the cutover is stable.
+      DISCORD_TOKEN_ANUBIS: ${DISCORD_TOKEN_ANUBIS:-}
+      DISCORD_TOKEN_HORUS: ${DISCORD_TOKEN_HORUS:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     security_opt:
@@ -41,58 +53,103 @@ services:
     mem_limit: 3g
     pids_limit: 768
     ports:
-      # Existing openclaw gateway
       - "127.0.0.1:18789:18789"
-      # openclaw-control daemon (REST + SSE + dashboard) — bound to localhost on the host.
-      # Set OPENCLAW_CONTROL_BIND=0.0.0.0 in .env to expose to LAN (use Caddy/TLS for that).
-      - "${OPENCLAW_CONTROL_BIND:-127.0.0.1}:7878:7878"
     depends_on:
       openclaw-redis:
         condition: service_healthy
     volumes:
-      - ${WORKSPACE_DIR:-${HOME}/projects}:/home/agent/.openclaw/workspace:rw
-      - ${SKILLS_DIR:-./skills}:/home/agent/.openclaw/skills:rw
+      # Named volumes (per amendment §9.1 / §9.5). The nested mounts
+      # (extensions, skills) are belt-and-braces — if openclaw-state's mount
+      # is ever removed, installed plugins/skills still survive.
       - openclaw-state:/home/agent/.openclaw
-      # Share Ptah CLI config (auth, providers, settings, skills) with the host
-      # so a single `ptah auth login` on either side works for both. Discord
-      # chat is no longer routed through ptah — it goes direct to LLM_PROVIDER
-      # — so the desktop's "claudeCli" auth method is fine here even when the
-      # container lacks the Claude CLI binary. The orchestration loop runs ptah
-      # on the host via the ptah-bridge service; see scripts/ptah-bridge.mjs.
+      - openclaw-extensions:/home/agent/.openclaw/extensions
+      - openclaw-skills:/home/agent/.openclaw/skills
+      # Host bind-mounts (read-only where safe).
+      - ${GH_CONFIG_DIR:-${HOME}/.config/gh}:/home/agent/.config/gh:ro
       - ${PTAH_CONFIG_DIR:-${HOME}/.ptah}:/home/agent/.ptah:rw
-      # TASK_2026_002 B6: identity-mapped bind-mount of ~/.ptah so the daemon
-      # writes per-agent settings.json + the per-persona plugin tree at the
-      # same path the bridge sees. The daemon emits host paths (computed via
-      # OPENCLAW_HOST_HOME); the bridge identity-translates `~/.ptah/...`.
-      # Same path on both sides — the ${PTAH_CONFIG_DIR} mount above maps to
-      # /home/agent/.ptah for backwards compat with ptah's container-side
-      # auth state; this entry maps the host path identity-style.
+      # TASK_2026_002 B6 identity-mapped ptah path (same source as above,
+      # different mount target so daemon-emitted host paths resolve inside
+      # the container too).
       - ${OPENCLAW_HOST_HOME:-${HOME}}/.ptah:${OPENCLAW_HOST_HOME:-${HOME}}/.ptah:rw
-      # Share `gh` CLI auth with the host so a single `gh auth login` on the
-      # host gives the agent access to private repos / PR creation / etc.
-      - ${GH_CONFIG_DIR:-${HOME}/.config/gh}:/home/agent/.config/gh:rw
-      # ---- openclaw-control mounts ----
-      # SQLite spec store. The leader's daemon opens /data/specs.db on boot and
-      # runs migrations; followers never write here (they go HTTP-only via
-      # OPENCLAW_LEADER_URL) so the volume is harmless on follower hosts. If you
-      # prefer a leader-only attach, move this line into a docker-compose.override.leader.yml.
-      - specs-db:/data
-      # Local memory: NEVER synced. Holds private agent personas (system prompts) and
-      # any per-machine secrets. Each machine has its own — Anubis's persona never
-      # leaves the leader machine, Amun's never leaves Amun's host.
+      # Persona privacy backend (CLAUDE.md §"Persona privacy rule" layer 1).
+      # The gateway reads persona.md per local agent and copies it to the
+      # workspace's IDENTITY.md so openclaw's context-file loader picks it up.
+      # The daemon shares the same mount so the local memory backend
+      # (resolveBackend) can read/write private agent files.
       - ${OPENCLAW_LOCAL_MEMORY_DIR:-${HOME}/.claude/local-memory}:/home/agent/.claude/local-memory:rw
-      # Live Claude Code session JSONL files from the host. Read-only — bots tail these
-      # to surface "what is the user doing right now" in the live-sessions feed.
-      - ${HOME}/.claude/projects:/home/agent/.claude/projects:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18789/ | grep -qE '^(200|301|302|401|403|404)$' || exit 1"]
-      interval: 30s
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:18789/health || curl -fsS -o /dev/null http://127.0.0.1:18789/ || exit 1"]
+      interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 120s
+      start_period: 60s
 
-  # Redis backs the cross-agent handoff bus (agent:<id>:inbox channels).
-  # Tiny, in-memory only, internal network only — never published to host.
+  openclaw-daemon:
+    image: openclaw-local:latest
+    container_name: openclaw-daemon
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      OPENCLAW_CONTAINER_ROLE: daemon
+      OPENCLAW_HOST: 0.0.0.0
+      OPENCLAW_PORT: 7878
+      OPENCLAW_PROJECT_ROOTS: /workspace
+      OPENCLAW_DASHBOARD_DIR: /opt/openclaw-control/dashboard/browser
+      OPENCLAW_SPECS_DB_PATH: ${OPENCLAW_SPECS_DB_PATH:-/data/specs.db}
+      OPENCLAW_LEADER_URL: ${OPENCLAW_LEADER_URL:-}
+      OPENCLAW_DISPATCH_FAILURE_THRESHOLD: ${OPENCLAW_DISPATCH_FAILURE_THRESHOLD:-3}
+      OPENCLAW_PTAH_BRIDGE_URL: ${OPENCLAW_PTAH_BRIDGE_URL:-http://host.docker.internal:8744}
+      REDIS_URL: redis://openclaw-redis:6379
+      # The daemon reaches the sibling gateway over the docker network.
+      OPENCLAW_GATEWAY_URL: ${OPENCLAW_GATEWAY_URL:-http://openclaw-gateway:18789}
+      # Batch 8b: the daemon restarts the gateway after plugin installs via
+      # the bind-mounted docker socket. Name the container so dockerode can
+      # find it (matches container_name above).
+      OPENCLAW_GATEWAY_CONTAINER: openclaw-gateway
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # The daemon needs to read/write /var/run/docker.sock (bind-mounted below)
+    # to drive the install pipeline (Batch 8b). The socket is owned by
+    # root:docker (gid varies by host — common values: 985 Debian/Ubuntu,
+    # 999 some distros). Configure DOCKER_GID in .env to match.
+    group_add:
+      - "${DOCKER_GID:-985}"
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    pids_limit: 512
+    ports:
+      - "${OPENCLAW_CONTROL_BIND:-127.0.0.1}:7878:7878"
+    depends_on:
+      openclaw-gateway:
+        condition: service_started
+      openclaw-redis:
+        condition: service_healthy
+    volumes:
+      # SQLite spec store (leader writes; follower deployments leave the
+      # volume harmlessly empty — daemon takes the HTTP path when
+      # OPENCLAW_LEADER_URL is set).
+      - openclaw-data:/data
+      # Read-only mirror of the gateway's state — daemon reads
+      # ~/.openclaw/openclaw.json + plugins metadata to drive the install /
+      # restart pipeline. Read-only so the daemon can't corrupt the gateway.
+      - openclaw-state:/home/agent/.openclaw:ro
+      # The plugin install pipeline (Batch 8b) needs to docker-restart
+      # openclaw-gateway. The socket bind grants the daemon container full
+      # control of the host's docker — documented in docs/OPERATIONS.md.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persona privacy backend (CLAUDE.md §"Persona privacy rule" layer 1).
+      # The daemon's memory.ts resolveBackend() routes private agent files to
+      # this path; without the mount, PUTs to persona.md / secrets.md fail.
+      - ${OPENCLAW_LOCAL_MEMORY_DIR:-${HOME}/.claude/local-memory}:/home/agent/.claude/local-memory:rw
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:7878/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   openclaw-redis:
     image: redis:7-alpine
     container_name: openclaw-redis
@@ -106,5 +163,7 @@ services:
       retries: 5
 
 volumes:
-  openclaw-state:
-  specs-db: {}
+  openclaw-state:        # ~/.openclaw/ — openclaw.json, logs, plugin-runtime-deps cache
+  openclaw-extensions:   # ~/.openclaw/extensions/ — user-installed plugins
+  openclaw-skills:       # ~/.openclaw/skills/    — user-installed skills (incl. MCP bundles)
+  openclaw-data:         # /data/                  — daemon SQLite (specs.db + extension_install_requests)

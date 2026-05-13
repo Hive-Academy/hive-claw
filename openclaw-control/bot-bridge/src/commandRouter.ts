@@ -93,8 +93,12 @@ export async function route(ctx: RouteContext): Promise<boolean> {
         return true;
       }
       case 'tick': {
-        const r = await daemon.tick();
-        await ctx.message.reply(`Ticked: dispatched=${r.dispatched}, pending=${r.pending}, checkpoints=${r.checkpoints}.`);
+        // TASK_2026_004 (HITL refactor): no bulk tick exists. The `!tick`
+        // command stays around for muscle memory but always reminds the
+        // operator that work creation is dashboard-only now.
+        await ctx.message.reply(
+          '⚠️ `!tick` was removed — open the dashboard, pick the task you want to step, and click Advance (HITL mode).',
+        );
         return true;
       }
       default:

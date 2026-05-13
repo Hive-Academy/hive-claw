@@ -106,6 +106,16 @@ Why this is the linearization point:
 
 This is verified by `openclaw-control/daemon/test/dispatch-claim.test.ts`, which spins up 8 worker_threads × 10 attempts = 80 concurrent `claim()` calls against the same row in a real on-disk SQLite file. The test asserts exactly one winner.
 
+### No-progress detection (TASK_2026_005)
+
+When `ptah-cli` exits with code 0 but produced no observable change — no file was added/modified/deleted and the phase did not advance — the dispatch is marked as a **soft-failure** rather than `done`. The dispatch worker takes a pre/post snapshot of `(filename, sizeBytes)` pairs and the current phase around each invocation; if the diff is empty and the phase is unchanged, `progressMade = false` is passed to `markDone`.
+
+`markDone` with `exitCode === 0 && progressMade === false` transitions to `failed` with `stderr_snippet` containing `"no progress detected"`. This means the existing K-recent-failed poison window catches streaks of no-progress dispatches naturally: three consecutive no-progress dispatches for the same (project, task, phase) poison the lane, requiring operator acknowledgment before retry.
+
+The `noProgressStreak(project, taskId, phase)` function in `DispatchRepo` counts how many consecutive dispatches at the head of the history have `state = 'failed'` and `stderr_snippet LIKE '%no progress detected%'`. The dashboard uses this to show a warning badge and gate the Advance button when the streak ≥ 2.
+
+**Per-task dispatch budget.** `tasks.dispatch_budget` (default 20) caps the number of dispatches a task can consume. `advanceTask` refuses with HTTP 409 (`E_BUDGET_EXHAUSTED`) when `dispatch_count >= dispatch_budget`. Operators can top up via `POST /api/projects/:slug/tasks/:taskId/budget` with `{ delta: N }` or `{ set: N }`. Acknowledging a no-progress streak (`POST .../acknowledge-no-progress`) tops up by 1 — the "Acknowledge and force advance" button calls this endpoint then immediately calls Advance.
+
 ### Single-machine collapse
 
 If only one machine is in the picture: `OPENCLAW_LEADER=1`, `OPENCLAW_LOCAL_AGENT_IDS=anubis`, no follower exists. The continuation loop and the dispatch worker run in the same process against the same local DB. The `OPENCLAW_LEADER_URL` env var is unused. All the same code paths run.

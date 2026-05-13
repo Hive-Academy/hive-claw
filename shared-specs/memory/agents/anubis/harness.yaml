@@ -39,15 +39,6 @@ chatTier:
         endpoint to curl, a specific SQL one-liner from docs/OPERATIONS.md).
         No preamble, no closing summary, no severity rating. Three bullets,
         stop.
-  mcpServers:
-    - id: gh
-      command: npx
-      args:
-        - "-y"
-        - "@modelcontextprotocol/server-github"
-      env:
-        GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}"
-      timeoutMs: 30000
   # TASK_2026_003 — Discord-native chat tools, opt-in per-agent. Anubis is the
   # leader-tier coordinator and needs both: read_channel_history for context
   # awareness when an operator asks "what was just discussed", and
@@ -57,6 +48,11 @@ chatTier:
   tools:
     - read_channel_history
     - upload_attachment
+  # Operator can drop screenshots / logs / JSON into a @mention; the chat tier
+  # base64-inlines them and routes the turn to LLM_VISION_MODEL when the payload
+  # contains an image. Locked-down personas (e.g. horus when scoped to security
+  # incidents only) should leave this off.
+  acceptAttachments: true
 
 orchestrationTier:
   skills:

@@ -38,16 +38,21 @@ The entrypoint reads `LLM_PROVIDER`, builds the matching provider block via `jq`
 | `SKILLS_DIR` | `./skills` | Host skills dir, bind-mounted into `~/.openclaw/skills/`. |
 | `OPENCLAW_AUTH_TOKEN` | (auto by setup.sh) | Bearer token gating the **gateway** dashboard on `:18789`. 32-byte hex. |
 
-### Gateway tier — Legacy Discord adapter
+### Gateway tier — Discord (per-persona accounts)
 
-The openclaw gateway has its own `discord` plugin. When the control plane is in use, the bot-bridge owns Discord and these stay empty. Setting them while the bot-bridge is also running causes Discord to reject one of the two clients (same bot can't be online twice).
+Post-TASK_2026_006 Batch 6, the gateway's openclaw config (`config/openclaw.json.tmpl`) declares **two personas by default** — `anubis` (the default) and `horus` — each with its own Discord bot account under `channels.discord.accounts.<id>`. Each persona connects to Discord with its own bot token; @-mentions are routed per-bot by `bindings[]` matching on `(channel: "discord", accountId: "<id>")`.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `DISCORD_BOT_TOKEN` | (empty → channel disabled) | Gateway adapter's bot token. Leave empty when running the bot-bridge. |
-| `DISCORD_GUILD_ID` | (empty → channel disabled) | Server ID. Same caveat. |
+| `DISCORD_TOKEN_ANUBIS` | (empty → that bot disabled) | Bot token for the Anubis persona; substituted into `channels.discord.accounts.anubis.token`. |
+| `DISCORD_TOKEN_HORUS` | (empty → that bot disabled) | Bot token for the Horus persona; substituted into `channels.discord.accounts.horus.token`. |
+| `GITHUB_TOKEN` | (empty) | Substituted into `mcp.servers.gh.env.GITHUB_PERSONAL_ACCESS_TOKEN`. Also used as the `gh auth` fallback when no `gh auth login` state is bind-mounted from the host. |
+| `DISCORD_GUILD_ID` | (empty → channel disabled) | Server ID. If empty, the entrypoint disables the gateway's discord channel entirely. |
+| `DISCORD_BOT_TOKEN` | (empty — **deprecated**) | Legacy single-bot token used by the pre-Batch-6 template. **Removal lands in TASK_2026_006 Batch 11**; the variable still flows through `entrypoint.sh`'s `envsubst` for transitional compatibility during the cutover window. New deployments should leave it empty and set the per-persona tokens above. |
 
-If both are empty, the entrypoint disables the gateway's discord adapter automatically.
+If both `DISCORD_GUILD_ID` and `DISCORD_BOT_TOKEN` are empty, the entrypoint disables the gateway's discord channel automatically (legacy jq path — kept until Batch 11 reworks it for per-persona).
+
+Single-machine deployments where only one persona is bound locally (per `OPENCLAW_LOCAL_AGENT_IDS`) can leave the other persona's token empty; openclaw will fail to sign that bot in and log it, but the rendered config still validates and the bound persona works normally.
 
 ### Gateway tier — Ptah / gh
 
@@ -80,7 +85,7 @@ Defaults below are read in `openclaw-control/daemon/src/config.ts` (the cited li
 | `OPENCLAW_HARNESS_AUTHOR_TIMEOUT_MS` | `1800000` (30 min) | always optional | bot-bridge | Idle-timeout for harness-authoring mode. If `Date.now() - ctx.state.harnessSetup.startedAt` exceeds this, the next message clears the state and posts a friendly cancel reply. Bump up for longer interactive sessions. |
 | `OPENCLAW_DISCORD_TOOLS_MAX_ATTACHMENT_MB` | `25` | always optional | bot-bridge | Per-attachment size cap for the `upload_attachment` chat tool (TASK_2026_003). Discord's free / Nitro-Basic per-message limit is 25 MB; bump only if your Discord server is configured for higher. The cap applies uniformly to all three source modes (`url`, `path`, `data`). Negative or non-numeric values fall back to the 25 MB default. |
 | `OPENCLAW_HOST_HOME` | `${HOME}` | always optional | leader-only (daemon) | Host-side `$HOME` for path translation. The daemon writes materialized ptah configs to `${OPENCLAW_HOST_HOME}/.ptah/agents/<id>/settings.json` and `${OPENCLAW_HOST_HOME}/.ptah/plugins/openclaw-<id>-harness/`. Must be identity-bind-mounted (host path = container path) so the host-side ptah-bridge sees the same bytes the daemon wrote. See [ARCHITECTURE.md](ARCHITECTURE.md) for the bind-mount and [SKILLS-AND-PERSONA.md](SKILLS-AND-PERSONA.md) for the materialization output paths. |
-| `PTAH_MIN_VERSION` | `0.1.3` | always optional | leader-only (daemon) | Minimum supported ptah CLI version. Probed at daemon boot; below this, `ptahLauncher.ts` takes the 0.1.3 branch (per-agent settings.json + per-persona Claude plugin). Above the version that lands `--config-dir` / `--subagent` / workspace `.claude/agents/` upstream, the launcher swaps branches — bumping this var is the migration. |
+| `PTAH_MIN_VERSION` | `0.1.5` | always optional | leader-only (daemon) | Minimum supported ptah CLI version. Probed at daemon boot; below this, `ptahLauncher.ts` takes the 0.1.3 branch (per-agent settings.json + per-persona Claude plugin). Above the version that lands `--config-dir` / `--subagent` / workspace `.claude/agents/` upstream, the launcher swaps branches — bumping this var is the migration. |
 | `OPENCLAW_REQUIRE_COMMUNITY_TIER` | `0` | always optional | both | Hard-asserts the operator runs only ptah's community-tier RPCs. When `1`: (a) the daemon's outbound HTTP wrapper throws on any JSON body whose `method` matches `^wizard:` or `^harness:analyze-intent$`; (b) on boot, the daemon probes `ptah --json license status` via the bridge and refuses to start unless tier is `community`. Default off. Flip to `1` on a host where you want belt-and-braces enforcement that no Pro RPC ever fires. |
 
 ### Control plane tier — Leader / follower mode

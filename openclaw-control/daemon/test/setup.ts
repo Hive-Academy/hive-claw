@@ -51,6 +51,7 @@ import { ProjectsRepo, _resetProjectsRepoForTests } from '../src/db/projects.js'
 import { TasksRepo, _resetTasksRepoForTests } from '../src/db/tasks.js';
 import { DispatchRepo, _resetDispatchRepoForTests } from '../src/db/dispatches.js';
 import { MemoryRepo, _resetMemoryRepoForTests } from '../src/db/memory.js';
+import { _resetInstallRequestsRepoForTests } from '../src/db/installRequests.js';
 
 export interface TestDbHandle {
   /** Absolute path to the on-disk SQLite file. */
@@ -89,6 +90,7 @@ export function setupTestDb(): TestDbHandle {
   _resetMemoryRepoForTests();
   _resetProjectsRepoForTests();
   _resetTasksRepoForTests();
+  _resetInstallRequestsRepoForTests();
 
   openOnce(dbPath);
   runMigrations(getDb());

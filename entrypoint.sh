@@ -1,5 +1,35 @@
 #!/usr/bin/env bash
+# Role-aware entrypoint. Both compose services (openclaw-gateway and
+# openclaw-daemon) run the SAME image; they differ only in
+# OPENCLAW_CONTAINER_ROLE which selects the boot path here.
+#
+#   OPENCLAW_CONTAINER_ROLE=gateway → render openclaw.json, probe provider, exec
+#                                     `openclaw gateway` (the original behavior).
+#   OPENCLAW_CONTAINER_ROLE=daemon  → skip openclaw setup; hand off to
+#                                     /usr/local/bin/entrypoint-control.sh in
+#                                     foreground mode.
+#
+# Legacy single-container deployments (no OPENCLAW_CONTAINER_ROLE set) fall back
+# to the historical behavior: render config, then exec
+# /usr/local/bin/entrypoint-control.sh in background mode and finally exec the
+# gateway. Honors OPENCLAW_CONTROL_DISABLE=1 for gateway-only runs.
+
 set -euo pipefail
+
+ROLE="${OPENCLAW_CONTAINER_ROLE:-legacy}"
+
+# ---------- DAEMON-ONLY ROLE ----------
+# When the daemon runs in its own container, no openclaw.json rendering, no
+# provider probe, no gh/ptah bootstrap. The daemon doesn't speak to an LLM
+# directly; the gateway does that. Hand off to the control launcher in
+# foreground mode (it'll exec the daemon process so tini sees PID 2 = daemon).
+if [ "$ROLE" = "daemon" ]; then
+    if [ ! -x /usr/local/bin/entrypoint-control.sh ]; then
+        echo "[entrypoint] FATAL: role=daemon but entrypoint-control.sh missing or not executable" >&2
+        exit 1
+    fi
+    exec /usr/local/bin/entrypoint-control.sh foreground
+fi
 
 CONFIG_DIR="${HOME}/.openclaw"
 CONFIG_FILE="${CONFIG_DIR}/openclaw.json"
@@ -16,6 +46,9 @@ TEMPLATE="/etc/openclaw/openclaw.json.tmpl"
 : "${CUSTOM_API_KEY:=}"
 : "${DISCORD_GUILD_ID:=}"
 : "${DISCORD_BOT_TOKEN:=}"
+: "${DISCORD_TOKEN_ANUBIS:=}"
+: "${DISCORD_TOKEN_HORUS:=}"
+: "${GITHUB_TOKEN:=}"
 : "${OPENCLAW_AUTH_TOKEN:=}"
 
 if [ -z "$OPENCLAW_AUTH_TOKEN" ]; then
@@ -96,26 +129,136 @@ OPENCLAW_VERSION="$(openclaw --version 2>/dev/null | awk '{print $2}' || echo un
 OPENCLAW_NOW="$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")"
 export LLM_PROVIDER LLM_MODEL LLM_PROVIDERS_JSON \
        DISCORD_GUILD_ID DISCORD_BOT_TOKEN \
+       DISCORD_TOKEN_ANUBIS DISCORD_TOKEN_HORUS GITHUB_TOKEN \
        OPENCLAW_AUTH_TOKEN OPENCLAW_VERSION OPENCLAW_NOW
 
 mkdir -p "$CONFIG_DIR"
 
-envsubst '${LLM_PROVIDER} ${LLM_MODEL} ${LLM_PROVIDERS_JSON} ${DISCORD_GUILD_ID} ${DISCORD_BOT_TOKEN} ${OPENCLAW_AUTH_TOKEN} ${OPENCLAW_VERSION} ${OPENCLAW_NOW}' \
-    < "$TEMPLATE" > "$CONFIG_FILE"
+# ---------- TASK_2026_006 Batch 9: dual-write rendering ----------
+# The template at $TEMPLATE was updated in Batch 6 to render the NEW
+# multi-agent shape (per-persona Discord accounts: anubis, horus). The
+# config currently running inside the gateway (in the openclaw-state docker
+# volume at $CONFIG_FILE) is still the OLD single-agent shape from before
+# Batch 6.
+#
+# Cutover policy:
+#   - If $CONFIG_FILE already exists, leave it untouched. The operator's
+#     current openclaw.json keeps running unchanged.
+#   - If $CONFIG_FILE does not exist (fresh volume / first boot), render
+#     the new template into it — there's nothing to preserve.
+#   - ALWAYS (re-)render the new template to $CONFIG_FILE.new so the
+#     operator can `diff` old vs new and cut over by `cp`-ing the .new file
+#     onto openclaw.json when ready (see docs/CUTOVER_RUNBOOK.md).
+#
+# Batch 10 will flip this so the rendering goes straight to $CONFIG_FILE.
+CONFIG_FILE_NEW="${CONFIG_FILE}.new"
 
-if [ -z "$DISCORD_BOT_TOKEN" ] || [ -z "$DISCORD_GUILD_ID" ]; then
-    echo "[entrypoint] Discord token or guild missing — disabling discord channel"
-    jq '.channels.discord.enabled = false
-        | .channels.discord.accounts.default.enabled = false' \
-       "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+render_template() {
+    local out="$1"
+    envsubst '${LLM_PROVIDER} ${LLM_MODEL} ${LLM_PROVIDERS_JSON} ${DISCORD_GUILD_ID} ${DISCORD_BOT_TOKEN} ${DISCORD_TOKEN_ANUBIS} ${DISCORD_TOKEN_HORUS} ${GITHUB_TOKEN} ${OPENCLAW_AUTH_TOKEN} ${OPENCLAW_VERSION} ${OPENCLAW_NOW}' \
+        < "$TEMPLATE" > "$out"
+
+    # ---------- Scope to OPENCLAW_LOCAL_AGENT_IDS ----------
+    # Each machine's openclaw config should contain only the personas it
+    # actually hosts. The template is the same on every machine (one git
+    # source); per-machine differentiation is the env var.
+    #
+    # OPENCLAW_LOCAL_AGENT_IDS is a comma-separated list (e.g. "anubis" or
+    # "anubis,horus"). We filter agents.list[], channels.discord.accounts,
+    # and bindings[] down to just the listed IDs.
+    #
+    # Empty/unset OPENCLAW_LOCAL_AGENT_IDS = no filtering (legacy / dev mode
+    # where the template ships unchanged).
+    if [ -n "${OPENCLAW_LOCAL_AGENT_IDS:-}" ]; then
+        local local_ids_json local_ids_count
+        local_ids_json=$(printf '%s' "$OPENCLAW_LOCAL_AGENT_IDS" \
+            | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
+        local_ids_count=$(printf '%s' "$local_ids_json" | jq 'length')
+        if [ "$local_ids_count" = "0" ]; then
+            echo "[entrypoint] OPENCLAW_LOCAL_AGENT_IDS=\"$OPENCLAW_LOCAL_AGENT_IDS\" parses to empty after trim — skipping scope filter (template preserved)."
+        else
+            echo "[entrypoint] Scoping openclaw config to OPENCLAW_LOCAL_AGENT_IDS=$OPENCLAW_LOCAL_AGENT_IDS (${local_ids_json})"
+            jq --argjson local_ids "$local_ids_json" '
+                  .agents.list = ((.agents.list // [])
+                    | map(select(.id as $id | $local_ids | any(. == $id))))
+                | .channels.discord.accounts = ((.channels.discord.accounts // {})
+                    | with_entries(select(.key as $id | $local_ids | any(. == $id))))
+                | .bindings = ((.bindings // [])
+                    | map(select(.agentId as $id | $local_ids | any(. == $id))))
+            ' "$out" > "${out}.tmp" && mv "${out}.tmp" "$out"
+        fi
+    fi
+
+    # Mirror the historical "discord disabled when tokens missing" behavior
+    # on the rendered output. Detect which shape we rendered (old: default
+    # account; new: anubis/horus accounts) and disable accordingly.
+    if [ -z "$DISCORD_BOT_TOKEN" ] && [ -z "$DISCORD_TOKEN_ANUBIS" ] && [ -z "$DISCORD_TOKEN_HORUS" ]; then
+        echo "[entrypoint] No Discord tokens configured — disabling discord channel in $out"
+        jq '.channels.discord.enabled = false
+            | (.channels.discord.accounts // {}) |= with_entries(.value.enabled = false)' \
+           "$out" > "${out}.tmp" && mv "${out}.tmp" "$out"
+    elif [ -z "$DISCORD_GUILD_ID" ]; then
+        echo "[entrypoint] DISCORD_GUILD_ID missing — disabling discord channel in $out"
+        jq '.channels.discord.enabled = false
+            | (.channels.discord.accounts // {}) |= with_entries(.value.enabled = false)' \
+           "$out" > "${out}.tmp" && mv "${out}.tmp" "$out"
+    fi
+
+    if ! jq empty "$out" 2>/dev/null; then
+        echo "[entrypoint] FATAL: rendered config $out is not valid JSON. Aborting before openclaw mangles it."
+        cat "$out"
+        exit 1
+    fi
+}
+
+if [ -f "$CONFIG_FILE" ]; then
+    echo "[entrypoint] Existing $CONFIG_FILE found — leaving it in place (cutover pending)."
+else
+    echo "[entrypoint] No existing $CONFIG_FILE — rendering new template into it (fresh boot)."
+    render_template "$CONFIG_FILE"
 fi
 
-# Validate the rendered config is real JSON before openclaw sees it.
-if ! jq empty "$CONFIG_FILE" 2>/dev/null; then
-    echo "[entrypoint] FATAL: rendered config is not valid JSON. Aborting before openclaw mangles it."
-    cat "$CONFIG_FILE"
-    exit 1
-fi
+# Always (re-)render the new-shape template to a side-by-side file so the
+# operator can preview / diff / cp it during the Batch 10 cutover.
+echo "[entrypoint] Rendering side-by-side cutover preview to $CONFIG_FILE_NEW"
+render_template "$CONFIG_FILE_NEW"
+
+# Pre-create per-persona workspace directories from the rendered config so
+# openclaw's plugin services (acpx, etc.) don't fail at boot with
+# "EACCES: permission denied, mkdir /home/agent/.openclaw/workspace/<id>".
+# The parent /home/agent/.openclaw/workspace/ is created agent-owned by
+# the Dockerfile on image build; subdirs are mkdir'd here per boot.
+echo "[entrypoint] Pre-creating per-persona workspace dirs from rendered config"
+WORKSPACE_PARENT="$(dirname "$(jq -r '.agents.list[0].workspace // "/home/agent/.openclaw/workspace/_"' "$CONFIG_FILE" 2>/dev/null)")"
+mkdir -p "$WORKSPACE_PARENT" 2>/dev/null || true
+jq -r '.agents.list[]?.workspace // empty' "$CONFIG_FILE" 2>/dev/null \
+    | while IFS= read -r ws; do
+        if [ -n "$ws" ]; then
+            mkdir -p "$ws" 2>/dev/null \
+                && echo "  ✓ $ws" \
+                || echo "  ! $ws (mkdir failed; check ownership of parent)"
+        fi
+    done
+
+# Materialize each local agent's persona into the workspace as IDENTITY.md so
+# openclaw's context-file loader (priority 30; see openclaw/dist/system-prompt-*)
+# picks it up. The persona files live under the private-memory bind mount
+# (CLAUDE.md §"Persona privacy rule" layer 1). Without this step openclaw
+# falls back to its stock IDENTITY.md template and the agent has no identity.
+PERSONA_ROOT="${OPENCLAW_LOCAL_MEMORY:-/home/agent/.claude/local-memory}/agents"
+echo "[entrypoint] Syncing persona.md → IDENTITY.md for local agents (source: $PERSONA_ROOT)"
+jq -r '.agents.list[]? | "\(.id)\t\(.workspace // "")"' "$CONFIG_FILE" 2>/dev/null \
+    | while IFS=$'\t' read -r aid ws; do
+        if [ -z "$aid" ] || [ -z "$ws" ]; then continue; fi
+        src="$PERSONA_ROOT/$aid/persona.md"
+        if [ -f "$src" ]; then
+            cp -f "$src" "$ws/IDENTITY.md" \
+                && echo "  ✓ $aid: $src → $ws/IDENTITY.md ($(wc -c <"$src") bytes)" \
+                || echo "  ! $aid: copy failed ($src → $ws/IDENTITY.md)"
+        else
+            echo "  - $aid: no persona.md at $src (workspace IDENTITY.md left as-is)"
+        fi
+    done
 
 # Redact every key whose name suggests a secret before logging.
 echo "[entrypoint] Rendered ${CONFIG_FILE} (secrets redacted):"
@@ -158,17 +301,13 @@ if command -v ptah >/dev/null 2>&1; then
 
     # TASK_2026_002 B6: ensure the per-agent + plugin subdirs exist on first
     # boot so the daemon's materializeAll() pass at startup can write into
-    # them without ENOENT. Both paths are bind-mount-backed identity-mapped
-    # (${OPENCLAW_HOST_HOME:-${HOME}}/.ptah on both sides — see
-    # docker-compose.yml). The daemon does its own defensive mkdir -p on
-    # write; this is belt-and-braces.
+    # them without ENOENT.
     mkdir -p "${OPENCLAW_HOST_HOME:-${HOME}}/.ptah/agents" \
              "${OPENCLAW_HOST_HOME:-${HOME}}/.ptah/plugins" 2>/dev/null || true
 
     if [ ! -f "$PTAH_STAMP" ]; then
         echo "[entrypoint] Ptah CLI: first-run bootstrap"
 
-        # Register the shared workspace so `ptah harness scan` finds projects here.
         WS_NAME="${PTAH_WORKSPACE_NAME:-$(basename "$(readlink -f /home/agent/.openclaw/workspace 2>/dev/null || echo workspace)")}"
         ptah workspace add --path /home/agent/.openclaw/workspace --name "$WS_NAME" >/dev/null 2>&1 \
             && echo "  ✓ workspace registered: $WS_NAME" \
@@ -183,10 +322,6 @@ else
 fi
 
 # ---------- gh CLI auth probe ----------
-# ~/.config/gh is bind-mounted from the host (see docker-compose.yml).
-# A single `gh auth login` on the host authenticates the agent too.
-# IMPORTANT: GH_CONFIG_DIR / PTAH_CONFIG_DIR carry HOST paths from .env which
-# don't exist inside the container — unset them so gh falls back to $HOME/.config/gh.
 unset GH_CONFIG_DIR PTAH_CONFIG_DIR
 if command -v gh >/dev/null 2>&1; then
     if gh auth status >/dev/null 2>&1; then
@@ -202,11 +337,20 @@ fi
 
 echo "[entrypoint] Dashboard:  http://127.0.0.1:18789/?token=${OPENCLAW_AUTH_TOKEN}"
 
-# ---------- openclaw-control: daemon + multi-agent bot bridge ----------
-# Boots in background so all agents share the same workspace and shared-memory tree.
-# Disable with OPENCLAW_CONTROL_DISABLE=1.
+# ---------- GATEWAY-ONLY ROLE ----------
+# Multi-container deployment: gateway is its own service; the daemon runs in a
+# sibling container. Do NOT start the control launcher here.
+if [ "$ROLE" = "gateway" ]; then
+    echo "[entrypoint] role=gateway — starting openclaw gateway only (daemon runs in sibling container)"
+    echo "[entrypoint] Starting openclaw gateway on :18789 (bind=lan, log=debug)"
+    exec openclaw --log-level debug gateway --port 18789 --bind lan --verbose
+fi
+
+# ---------- LEGACY SINGLE-CONTAINER ROLE ----------
+# Boots the control launcher in background mode, then execs the gateway. This
+# is the historical pre-Batch-5b behavior, preserved for one-container deploys.
 if [ "${OPENCLAW_CONTROL_DISABLE:-0}" != "1" ] && [ -x /usr/local/bin/entrypoint-control.sh ]; then
-    /usr/local/bin/entrypoint-control.sh || echo "[entrypoint] WARNING: openclaw-control launcher returned non-zero"
+    /usr/local/bin/entrypoint-control.sh background || echo "[entrypoint] WARNING: openclaw-control launcher returned non-zero"
 fi
 
 echo "[entrypoint] Starting openclaw gateway on :18789 (bind=lan, log=debug)"

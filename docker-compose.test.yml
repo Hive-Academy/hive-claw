@@ -1,0 +1,129 @@
+# TASK_2026_006 Batch 5b — alternate-port test stack.
+#
+# The production docker-compose.yml binds 127.0.0.1:18789 and 127.0.0.1:7878.
+# The user's host runs a NATIVE (non-docker) openclaw stack on those ports,
+# so a real `docker compose up -d` of the production file would collide.
+#
+# This file is the non-destructive smoke-test variant:
+#   - distinct ports     (18790, 7879)
+#   - distinct container_names (.. -test)
+#   - distinct named volumes (project prefix isolates them already, but we
+#     also rename them so a stray top-level `docker volume rm` can't hit
+#     production volumes by accident)
+#   - no host bind-mount of ~/.config/gh, ~/.ptah (we don't need a real LLM
+#     up to verify the compose shape parses, builds, and boots)
+#   - no .env file required — we provide just-enough env inline
+#   - same image (openclaw-local:latest)
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml build
+#   docker compose -f docker-compose.test.yml up -d
+#   curl http://127.0.0.1:18790/health     # gateway
+#   curl http://127.0.0.1:7879/api/health  # daemon
+#   docker compose -f docker-compose.test.yml down -v   # wipe at end
+#
+# CRITICAL: do NOT touch the host's NATIVE openclaw processes (PIDs 2314,
+# 2572, 2598, 1092 per research-findings §B4-addendum). This compose stack
+# coexists with them by using non-overlapping ports.
+
+name: openclaw-test
+
+services:
+  openclaw-gateway-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: openclaw-local:latest
+    container_name: openclaw-gateway-test
+    restart: "no"
+    environment:
+      OPENCLAW_CONTAINER_ROLE: gateway
+      OPENCLAW_AUTH_TOKEN: smoke-test-token
+      LLM_PROVIDER: ollama
+      LLM_MODEL: smoke-test-model
+      OLLAMA_BASE_URL: http://127.0.0.1:11434/v1
+      # Avoid bootstrapping gh/ptah for a smoke test.
+      GH_CONFIG_DIR: /home/agent/.config/gh
+      PTAH_CONFIG_DIR: /home/agent/.ptah
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g
+    pids_limit: 512
+    ports:
+      - "127.0.0.1:18790:18789"
+    depends_on:
+      openclaw-redis-test:
+        condition: service_healthy
+    volumes:
+      - openclaw-state-test:/home/agent/.openclaw
+      - openclaw-extensions-test:/home/agent/.openclaw/extensions
+      - openclaw-skills-test:/home/agent/.openclaw/skills
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:18789/health || curl -fsS -o /dev/null http://127.0.0.1:18789/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+
+  openclaw-daemon-test:
+    image: openclaw-local:latest
+    container_name: openclaw-daemon-test
+    restart: "no"
+    environment:
+      OPENCLAW_CONTAINER_ROLE: daemon
+      OPENCLAW_HOST: 0.0.0.0
+      OPENCLAW_PORT: 7878
+      OPENCLAW_PROJECT_ROOTS: /workspace
+      OPENCLAW_DASHBOARD_DIR: /opt/openclaw-control/dashboard/browser
+      OPENCLAW_SPECS_DB_PATH: /data/specs.db
+      OPENCLAW_LEADER: "1"
+      OPENCLAW_LEADER_URL: ""
+      OPENCLAW_AUTH_TOKEN: smoke-test-token
+      REDIS_URL: redis://openclaw-redis-test:6379
+      OPENCLAW_GATEWAY_URL: http://openclaw-gateway-test:18789
+      OPENCLAW_GATEWAY_CONTAINER: openclaw-gateway-test
+      # bot-bridge is intentionally not started in foreground mode; no
+      # DISCORD_TOKEN_* present here regardless.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 768m
+    pids_limit: 512
+    ports:
+      - "127.0.0.1:7879:7878"
+    depends_on:
+      openclaw-gateway-test:
+        condition: service_started
+      openclaw-redis-test:
+        condition: service_healthy
+    volumes:
+      - openclaw-data-test:/data
+      - openclaw-state-test:/home/agent/.openclaw:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:7878/api/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+
+  openclaw-redis-test:
+    image: redis:7-alpine
+    container_name: openclaw-redis-test
+    restart: "no"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    mem_limit: 64m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  openclaw-state-test:
+  openclaw-extensions-test:
+  openclaw-skills-test:
+  openclaw-data-test:

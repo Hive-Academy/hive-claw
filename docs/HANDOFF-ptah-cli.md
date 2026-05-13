@@ -2,7 +2,9 @@
 
 **Status: RESOLVED in `@hive-academy/ptah-cli@0.1.3`** (published 2026-05-02). Headless `ptah --json --auto-approve session start --profile claude_code --task "..."` now drives a real turn: it spawns the underlying `claude` subprocess, streams `agent.message` deltas, and exits 0. Verified end-to-end through `scripts/ptah-bridge.mjs` against the openclaw-control daemon's invoker contract.
 
-`setup.sh` phase 13 now pins a minimum version (`PTAH_MIN_VERSION=0.1.3`); fresh provisions install at-or-above that, and existing hosts on an older version are upgraded automatically with `npm install -g @hive-academy/ptah-cli@^0.1.3` followed by a `systemctl --user restart ptah-bridge.service` so the bridge's cached version refreshes.
+`setup.sh` phase 13 pins a minimum version (`PTAH_MIN_VERSION=0.1.5`); fresh provisions install at-or-above that, and existing hosts on an older version are upgraded automatically with `npm install -g @hive-academy/ptah-cli@^0.1.5` followed by a `systemctl --user restart ptah-bridge.service` so the bridge's cached version refreshes.
+
+**Note:** ptah-cli 0.1.5 wraps all `--json` command output in a JSON-RPC 2.0 envelope (`{ jsonrpc: "2.0", method: "...", params: { ... } }`). The bridge's `getPtahLicenseTier()` was updated to read `parsed.params.tier` instead of `parsed.tier` to handle this change.
 
 The historical investigation is preserved below — leave it as a reference for the failure mode in case a similar regression appears in a future ptah-cli release.
 

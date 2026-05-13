@@ -29,6 +29,11 @@ export const config = {
   llm: {
     provider: process.env.LLM_PROVIDER ?? 'ollama',
     model: process.env.LLM_MODEL ?? 'kimi-k2.6:cloud',
+    // Vision turn override. When the operator's message has attachments AND
+    // the persona opts in via `chatTier.acceptAttachments: true`, chat.ts
+    // overrides `model` for that turn. Empty string = "use llm.model as-is",
+    // appropriate when LLM_MODEL is already a VLM (e.g. qwen3-vl:235b-cloud).
+    visionModel: process.env.LLM_VISION_MODEL ?? '',
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? 'http://host.docker.internal:11434/v1',
     openaiApiKey: process.env.OPENAI_API_KEY ?? '',
     openrouterApiKey: process.env.OPENROUTER_API_KEY ?? '',
@@ -36,6 +41,14 @@ export const config = {
     customBaseUrl: process.env.CUSTOM_BASE_URL ?? '',
     customApiKey: process.env.CUSTOM_API_KEY ?? '',
   },
+
+  // Per-attachment download budget. Discord allows up to 25 MB on free tier
+  // and 500 MB on boosted servers; we cap aggressively because base64-inlined
+  // images blow up prompt size and Ollama Cloud / vision providers reject
+  // anything past ~5–10 MB anyway. Operators can raise via env if they're
+  // self-hosting a VLM with a different limit.
+  attachmentMaxBytes: Number(process.env.OPENCLAW_ATTACHMENT_MAX_BYTES ?? 8 * 1024 * 1024),
+  attachmentMaxCount: Number(process.env.OPENCLAW_ATTACHMENT_MAX_COUNT ?? 8),
 
   // TASK_2026_002 — chat-tier tool-calling feature flag + loop bounds.
   // Default OFF for safe rollout. See docs/CONFIGURATION.md (B8) for the

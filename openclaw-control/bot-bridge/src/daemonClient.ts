@@ -239,7 +239,11 @@ export const daemon = {
     call('POST', `/api/projects/${slug}/tasks/${id}/approve`, body),
   handoff: (slug: string, id: string, toAgent: string, reason?: string) =>
     call('POST', `/api/projects/${slug}/tasks/${id}/handoff`, { toAgent, reason }),
-  tick: () => call<{ dispatched: number; checkpoints: number; pending: number; dispatchedIds?: string[] }>('POST', '/api/continuation/tick'),
+  // TASK_2026_004 (HITL refactor): the bulk continuation tick was removed
+  // from the daemon. There is no replacement on the daemon-client surface —
+  // dispatch creation only happens via the dashboard's per-task Advance
+  // button. Discord-side personas can still create tasks via `createTask`;
+  // they cannot trigger work on them. See docs/CONFIGURATION.md.
 
   // -------------------------------------------------------------------------
   // TASK_2026_002 B2 — daemon-CRUD tool surface helpers.
@@ -258,20 +262,10 @@ export const daemon = {
   ) => call('POST', `/api/projects/${slug}/tasks/${id}/approve`, body),
   handoffTask: (slug: string, id: string, toAgent: string, reason?: string) =>
     call('POST', `/api/projects/${slug}/tasks/${id}/handoff`, { toAgent, reason }),
-  /**
-   * Tick the continuation loop. TASK_2026_002 B6 forwarded sub-task #13:
-   * the leader now returns `dispatchedIds: string[]` so callers can surface
-   * the real dispatch row id rather than synthesizing `dispatched:<n>`.
-   * The field is optional in the response shape for backwards-compat
-   * against an older leader (returns `[]` in that case).
-   */
-  tickContinuation: () =>
-    call<{
-      dispatched: number;
-      checkpoints: number;
-      pending: number;
-      dispatchedIds?: string[];
-    }>('POST', '/api/continuation/tick'),
+  // `tickContinuation` was removed in TASK_2026_004 (HITL refactor). The
+  // chat tier no longer has any way to trigger autonomous work. Operators
+  // drive task progression via the dashboard's per-task Advance button
+  // (POST /api/projects/:slug/tasks/:taskId/advance). See ARCHITECTURE.md.
   // NOTE: `appendInteraction` was removed in TASK_2026_001 Batch 8 — it was
   // a 4-arg stub that ignored 3 of its arguments, wrote a placeholder body,
   // and silently swallowed errors (`.catch(() => {})`). It had no callers.

@@ -26,7 +26,7 @@
 
 import type { Database } from 'better-sqlite3';
 import { openOnce, closeAll } from './client.js';
-import { CURRENT_VERSION, SCHEMA_V1 } from './schema.js';
+import { CURRENT_VERSION, SCHEMA_V1, SCHEMA_V3 } from './schema.js';
 
 function hasSchemaVersionTable(db: Database): boolean {
   const row = db
@@ -88,6 +88,28 @@ function applyV2(db: Database): void {
 }
 
 /**
+ * Apply the v2 → v3 step: additive — create the `extension_install_requests`
+ * table plus its two indexes. Backs TASK_2026_006 Batch 8b (plugin/MCP
+ * self-extension feature, amendment-1 §16.2). Each CREATE runs inside the
+ * same transaction as the version-row insert so a mid-step crash leaves
+ * the DB at v2.
+ */
+function applyV3(db: Database): void {
+  const apply = db.transaction((statements: readonly string[]) => {
+    for (let i = 0; i < statements.length; i++) {
+      try {
+        db.exec(statements[i]);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(`migration v3 step ${i + 1}/${statements.length} failed: ${message}`);
+      }
+    }
+    db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(3);
+  });
+  apply(SCHEMA_V3);
+}
+
+/**
  * Apply all missing migrations up to CURRENT_VERSION. Idempotent.
  *
  * Each step's CREATE/DROP and the version-row insert run in a single
@@ -105,7 +127,11 @@ export function runMigrations(db: Database): void {
     applyV2(db);
     have = 2;
   }
-  // Future: if (have < 3) applyV3(db); ...
+  if (have < 3) {
+    applyV3(db);
+    have = 3;
+  }
+  // Future: if (have < 4) applyV4(db); ...
 }
 
 /**

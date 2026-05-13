@@ -100,6 +100,18 @@ export const config = {
     profile: process.env.PTAH_INVOKER_PROFILE ?? 'claude_code',
     autoApprove: (process.env.PTAH_INVOKER_AUTO_APPROVE ?? '1') === '1',
     bridgeUrl: process.env.OPENCLAW_PTAH_BRIDGE_URL ?? '',
+    /**
+     * Upper bound for `POST /api/ptah/invoke`'s `timeoutMs` body field.
+     * The route rejects (400) any caller-provided timeout that exceeds
+     * this and applies this value as the default when the caller omits
+     * the field. 30 minutes by default — matches the chat-tier's tolerance
+     * for a long ptah subprocess.
+     */
+    invokerTimeoutMs: (() => {
+      const raw = process.env.PTAH_INVOKER_TIMEOUT_MS ?? '1800000';
+      const parsed = Number.parseInt(raw, 10);
+      return Number.isFinite(parsed) && parsed >= 1 ? parsed : 1_800_000;
+    })(),
   },
 
   dashboardDir:

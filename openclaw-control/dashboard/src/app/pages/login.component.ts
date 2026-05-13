@@ -4,18 +4,19 @@ import { Component } from '@angular/core';
   selector: 'oc-login',
   standalone: true,
   template: `
-    <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;">
-      <div class="card" style="max-width:420px;text-align:center">
-        <h1 style="margin:0 0 .5rem">OpenClaw Control</h1>
-        <p class="muted">Multi-agent orchestration dashboard</p>
-        <a href="/auth/discord/login">
-          <button class="primary" style="margin-top:1rem;font-size:15px;padding:.6rem 1.2rem">
+    <div class="min-h-screen flex items-center justify-center bg-base-100 px-4">
+      <div class="card bg-base-200 w-full max-w-md shadow-xl border border-base-300">
+        <div class="card-body items-center text-center gap-4">
+          <div class="text-5xl">🐾</div>
+          <h1 class="card-title text-2xl">OpenClaw Control</h1>
+          <p class="text-base-content/60">Multi-agent orchestration dashboard</p>
+          <a href="/auth/discord/login" class="btn btn-primary w-full mt-2">
             Continue with Discord
-          </button>
-        </a>
-        <p class="muted" style="margin-top:1.5rem;font-size:11px">
-          Only allowlisted Discord IDs may sign in. Local dev mode bypasses auth when DISCORD_CLIENT_ID is unset.
-        </p>
+          </a>
+          <p class="text-xs text-base-content/50 mt-2">
+            Only allowlisted Discord IDs may sign in. Local dev mode bypasses auth when DISCORD_CLIENT_ID is unset.
+          </p>
+        </div>
       </div>
     </div>
   `,

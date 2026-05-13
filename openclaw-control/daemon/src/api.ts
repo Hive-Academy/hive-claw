@@ -9,20 +9,26 @@ import path from 'node:path';
 import { config } from './config.js';
 import { listSessions, tailSession, newestSessionForProject } from './sessions.js';
 import { attachSse, broadcast } from './sse.js';
-import { registerAuth, requireAuth } from './auth.js';
+import { registerAuth, requireAuth, currentUser, isOAuthConfigured } from './auth.js';
 import { MemoryError } from './memory.js';
 import { publishHandoff, publishHarnessSync } from './bus.js';
 import { harnessHash } from './harness/types.js';
 import { materializeAgent, materializeAll } from './harness/materialize.js';
+import { spawnPtahForAgent } from './harness/ptahLauncher.js';
 import {
   PRIVATE_AGENT_FILES,
   isTerminalState,
   getReadOnlyDb,
   UnknownDispatchError,
   DispatchStateError,
+  InstallRequestsRepo,
+  UnknownInstallRequestError,
+  InstallRequestStateError,
   type DispatchState,
   type MemoryScope,
+  type InstallKind,
 } from './db/index.js';
+import { enqueueApproved, listInstalled } from './installWorker.js';
 import type { Phase } from './phase.js';
 import * as leaderClient from './leaderClient.js';
 import * as storage from './storage.js';
@@ -261,6 +267,145 @@ export function buildApp() {
   app.post('/api/continuation/tick', { preHandler: guard }, async () =>
     storage.continuationTickThroughFacade(),
   );
+
+  // --- POST /api/ptah/invoke -------------------------------------------
+  //
+  // Thin wrapper around `harness/ptahLauncher.ts:spawnPtahForAgent`. Called
+  // by the future openclaw-control plugin's `invoke_ptah` tool (TASK_2026_006
+  // batch 4). The plugin runs in-process with openclaw on the host; this
+  // route is the trust-boundary crossing into the daemon.
+  //
+  // Body:
+  //   { project, prompt, agentId?, sessionKey?, timeoutMs? }
+  // Response on success:
+  //   { ok: true, exitCode: 0, durationMs, output }
+  // Response on failure:
+  //   { ok: false, exitCode, durationMs, output, stderr? }
+  //
+  // Leader-only: the project workspace path comes from `storage.readProject`
+  // which is local-FS on the leader. Followers 405.
+  // Auth: `guard` (internal-token bearer is the canonical caller).
+  // `timeoutMs` is bounded by `config.ptah.invokerTimeoutMs`; caller cannot
+  // exceed it. Route-side timeout is enforced via `Promise.race`; the bridge
+  // call itself does not yet honor the value (Phase 2 plumbing).
+  app.post<{
+    Body: {
+      project?: unknown;
+      prompt?: unknown;
+      agentId?: unknown;
+      sessionKey?: unknown;
+      timeoutMs?: unknown;
+    };
+  }>('/api/ptah/invoke', { preHandler: guard }, async (req, reply) => {
+    if (!config.leader) {
+      return reply
+        .code(405)
+        .send({ error: 'ptah/invoke is leader-only — POST to OPENCLAW_LEADER_URL instead' });
+    }
+
+    // --- body validation ----------------------------------------------
+    const body = req.body ?? {};
+    const project = typeof body.project === 'string' ? body.project.trim() : '';
+    const prompt = typeof body.prompt === 'string' ? body.prompt : '';
+    if (project.length === 0) {
+      return reply.code(400).send({ error: 'body.project (non-empty string) required' });
+    }
+    if (prompt.length === 0) {
+      return reply.code(400).send({ error: 'body.prompt (non-empty string) required' });
+    }
+    // Defense-in-depth path-traversal rejection at the trust boundary;
+    // belt-and-braces on top of `safeProjectPath` (which the plugin code
+    // also enforces client-side per arch §7.1 layer 6).
+    if (project.includes('..') || project.includes('/') || project.includes('\\')) {
+      return reply.code(400).send({ error: 'project slug must not contain "..", "/" or "\\"' });
+    }
+
+    const agentId =
+      typeof body.agentId === 'string' && body.agentId.length > 0 ? body.agentId : null;
+    const sessionKey =
+      typeof body.sessionKey === 'string' && body.sessionKey.length > 0
+        ? body.sessionKey
+        : null;
+
+    const maxTimeoutMs = config.ptah.invokerTimeoutMs;
+    let timeoutMs: number = maxTimeoutMs;
+    if (body.timeoutMs !== undefined && body.timeoutMs !== null) {
+      if (typeof body.timeoutMs !== 'number' || !Number.isFinite(body.timeoutMs) || body.timeoutMs < 1) {
+        return reply
+          .code(400)
+          .send({ error: 'body.timeoutMs (positive number, ms) is invalid' });
+      }
+      if (body.timeoutMs > maxTimeoutMs) {
+        return reply.code(400).send({
+          error: `body.timeoutMs ${body.timeoutMs} exceeds PTAH_INVOKER_TIMEOUT_MS=${maxTimeoutMs}`,
+        });
+      }
+      timeoutMs = body.timeoutMs;
+    }
+
+    // --- project lookup -----------------------------------------------
+    const proj = await storage.readProject(project);
+    if (!proj) return reply.code(404).send({ error: 'project not found' });
+
+    // --- agent resolution ---------------------------------------------
+    // If caller omitted `agentId`, fall back to the x-openclaw-agent-id
+    // header (the openclaw runtime forwards the current agent's id in this
+    // header — see arch §6.1). If neither is present, pick the first
+    // configured local agent. The fallback chain is intentionally
+    // permissive — callers that care should set agentId explicitly.
+    const headerAgent = req.headers['x-openclaw-agent-id'];
+    const resolvedAgentId =
+      agentId ??
+      (typeof headerAgent === 'string' && headerAgent.length > 0 ? headerAgent : null) ??
+      config.localAgentIds[0] ??
+      'unknown';
+
+    // --- spawn (with route-side timeout) ------------------------------
+    const taskId = sessionKey ?? `ptah-invoke-${Date.now()}`;
+    const started = Date.now();
+    let timer: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<{ timedOut: true }>((resolve) => {
+      timer = setTimeout(() => resolve({ timedOut: true }), timeoutMs);
+    });
+    try {
+      const spawnPromise = spawnPtahForAgent({
+        agentId: resolvedAgentId,
+        cwd: proj.path,
+        prompt,
+        taskId,
+      });
+      const winner = await Promise.race([spawnPromise, timeoutPromise]);
+      if ('timedOut' in winner) {
+        return {
+          ok: false,
+          exitCode: null,
+          durationMs: Date.now() - started,
+          output: '',
+          stderr: `[ptah/invoke] timed out after ${timeoutMs}ms`,
+        };
+      }
+      // Spawn completed first. Cancel the timer.
+      const r = winner;
+      const durationMs = r.durationMs ?? Date.now() - started;
+      if (r.ok) {
+        return {
+          ok: true,
+          exitCode: r.exitCode ?? 0,
+          durationMs,
+          output: r.stdout,
+        };
+      }
+      return {
+        ok: false,
+        exitCode: r.exitCode,
+        durationMs,
+        output: r.stdout,
+        stderr: r.stderr,
+      };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  });
 
   // --- task files (T3.2) ------------------------------------------------
   // List files for a task. Returns metadata only — no body.
@@ -966,6 +1111,203 @@ export function buildApp() {
         });
       }
       return results;
+    },
+  );
+
+  // --- extension install requests (TASK_2026_006 Batch 8b) --------------
+  //
+  // Routes per amendment-1 §16.3. Auth split:
+  //   POST  /api/extensions/install-requests           Bearer (plugin)
+  //   GET   /api/extensions/install-requests/pending   Cookie OR Bearer
+  //   GET   /api/extensions/install-requests/:id       Cookie OR Bearer
+  //   POST  /api/extensions/install-requests/:id/approve  COOKIE ONLY
+  //   POST  /api/extensions/install-requests/:id/reject   COOKIE ONLY
+  //   GET   /api/extensions/installed                  Cookie OR Bearer
+  //
+  // The approve/reject routes are cookie-only by design — the plugin (which
+  // holds the Bearer token) must NOT be able to self-approve. We share the
+  // `guard` preHandler for the Bearer/Cookie-or-Bearer routes and use a
+  // dedicated `cookieOnlyGuard` for the operator-decision pair.
+  const cookieOnlyGuard: preHandlerHookHandler = async (req, reply) => {
+    // When OAuth is unconfigured we permit the daemon's `local-dev` user
+    // (loopback dev). Anything else must present a valid Discord JWT cookie.
+    if (!isOAuthConfigured()) {
+      req.user = { discordId: 'local', username: 'local-dev' };
+      return;
+    }
+    const user = await currentUser(req);
+    if (!user) {
+      reply.code(401).send({ error: 'operator cookie required' });
+      return reply;
+    }
+    req.user = user;
+  };
+
+  app.post<{
+    Body: {
+      kind?: unknown;
+      slug?: unknown;
+      requestingAgentId?: unknown;
+      reason?: unknown;
+    };
+  }>('/api/extensions/install-requests', { preHandler: guard }, async (req, reply) => {
+    const body = req.body ?? {};
+    const kind = typeof body.kind === 'string' ? body.kind : '';
+    if (kind !== 'plugin' && kind !== 'mcp_skill') {
+      return reply.code(400).send({ error: 'body.kind must be "plugin" or "mcp_skill"' });
+    }
+    const slug = typeof body.slug === 'string' ? body.slug.trim() : '';
+    if (slug.length === 0) {
+      return reply.code(400).send({ error: 'body.slug (non-empty string) required' });
+    }
+    if (slug.length > 256 || slug.includes('\n') || slug.includes('\r')) {
+      return reply.code(400).send({ error: 'body.slug is malformed' });
+    }
+    const requestingAgentId =
+      typeof body.requestingAgentId === 'string' ? body.requestingAgentId.trim() : '';
+    if (requestingAgentId.length === 0) {
+      return reply
+        .code(400)
+        .send({ error: 'body.requestingAgentId (non-empty string) required' });
+    }
+    const reason =
+      typeof body.reason === 'string' && body.reason.length > 0 ? body.reason.slice(0, 4096) : null;
+
+    const row = InstallRequestsRepo.create({
+      kind: kind as InstallKind,
+      slug,
+      requestingAgentId,
+      reason,
+    });
+    broadcast('installs.requested', {
+      requestId: row.id,
+      kind: row.kind,
+      slug: row.slug,
+      requestingAgentId: row.requestingAgentId,
+      reason: row.reason,
+      createdAt: row.createdAt,
+    });
+    return reply
+      .code(201)
+      .send({ requestId: row.id, status: row.status, createdAt: row.createdAt });
+  });
+
+  app.get(
+    '/api/extensions/install-requests/pending',
+    { preHandler: guard },
+    async () => ({ requests: InstallRequestsRepo.listPending() }),
+  );
+
+  app.get<{ Params: { id: string } }>(
+    '/api/extensions/install-requests/:id',
+    { preHandler: guard },
+    async (req, reply) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return reply.code(400).send({ error: 'id must be a positive integer' });
+      }
+      const row = InstallRequestsRepo.get(id);
+      if (!row) return reply.code(404).send({ error: 'install request not found' });
+      return row;
+    },
+  );
+
+  app.post<{
+    Params: { id: string };
+    Body: { note?: unknown; deferApply?: unknown };
+  }>(
+    '/api/extensions/install-requests/:id/approve',
+    { preHandler: cookieOnlyGuard },
+    async (req, reply) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return reply.code(400).send({ error: 'id must be a positive integer' });
+      }
+      const body = req.body ?? {};
+      const note = typeof body.note === 'string' ? body.note.slice(0, 4096) : null;
+      const deferApply = body.deferApply === true;
+      try {
+        const row = InstallRequestsRepo.markApproved(id, note);
+        broadcast('installs.approved', {
+          requestId: row.id,
+          kind: row.kind,
+          slug: row.slug,
+          deferApply,
+          decidedAt: row.decidedAt,
+        });
+        if (!deferApply) {
+          // Fire-and-forget; the worker emits installs.applied / installs.failed
+          // via SSE when it finishes. Errors inside the chain are swallowed by
+          // installWorker (see comment there).
+          void enqueueApproved(row.id);
+        }
+        return reply.send({
+          status: row.status,
+          deferApply,
+          estimatedRestartSeconds: deferApply ? null : 10,
+        });
+      } catch (err) {
+        if (err instanceof UnknownInstallRequestError) {
+          return reply.code(404).send({ error: 'install request not found' });
+        }
+        if (err instanceof InstallRequestStateError) {
+          return reply.code(409).send({
+            error: `cannot approve from state=${err.state}`,
+            state: err.state,
+          });
+        }
+        throw err;
+      }
+    },
+  );
+
+  app.post<{
+    Params: { id: string };
+    Body: { note?: unknown };
+  }>(
+    '/api/extensions/install-requests/:id/reject',
+    { preHandler: cookieOnlyGuard },
+    async (req, reply) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return reply.code(400).send({ error: 'id must be a positive integer' });
+      }
+      const body = req.body ?? {};
+      const note = typeof body.note === 'string' ? body.note.slice(0, 4096) : null;
+      try {
+        const row = InstallRequestsRepo.markRejected(id, note);
+        broadcast('installs.rejected', {
+          requestId: row.id,
+          kind: row.kind,
+          slug: row.slug,
+          decidedAt: row.decidedAt,
+        });
+        return reply.send({ status: row.status });
+      } catch (err) {
+        if (err instanceof UnknownInstallRequestError) {
+          return reply.code(404).send({ error: 'install request not found' });
+        }
+        if (err instanceof InstallRequestStateError) {
+          return reply.code(409).send({
+            error: `cannot reject from state=${err.state}`,
+            state: err.state,
+          });
+        }
+        throw err;
+      }
+    },
+  );
+
+  app.get(
+    '/api/extensions/installed',
+    { preHandler: guard },
+    async (_req, reply) => {
+      try {
+        return await listInstalled();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return reply.code(503).send({ error: `installed inventory unavailable: ${msg}` });
+      }
     },
   );
 

@@ -19,3 +19,8 @@ log.md
 .ptah/
 .mcp.json
 node_modules/
+
+# TASK_2026_006 Batch 7: keep the plugin builder stage's outputs out of the
+# build context. The multi-stage `npm ci + npm run build` produces them fresh.
+openclaw-control/plugin/node_modules
+openclaw-control/plugin/dist
