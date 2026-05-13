@@ -240,6 +240,26 @@ jq -r '.agents.list[]?.workspace // empty' "$CONFIG_FILE" 2>/dev/null \
         fi
     done
 
+# Materialize each local agent's persona into the workspace as IDENTITY.md so
+# openclaw's context-file loader (priority 30; see openclaw/dist/system-prompt-*)
+# picks it up. The persona files live under the private-memory bind mount
+# (CLAUDE.md §"Persona privacy rule" layer 1). Without this step openclaw
+# falls back to its stock IDENTITY.md template and the agent has no identity.
+PERSONA_ROOT="${OPENCLAW_LOCAL_MEMORY:-/home/agent/.claude/local-memory}/agents"
+echo "[entrypoint] Syncing persona.md → IDENTITY.md for local agents (source: $PERSONA_ROOT)"
+jq -r '.agents.list[]? | "\(.id)\t\(.workspace // "")"' "$CONFIG_FILE" 2>/dev/null \
+    | while IFS=$'\t' read -r aid ws; do
+        if [ -z "$aid" ] || [ -z "$ws" ]; then continue; fi
+        src="$PERSONA_ROOT/$aid/persona.md"
+        if [ -f "$src" ]; then
+            cp -f "$src" "$ws/IDENTITY.md" \
+                && echo "  ✓ $aid: $src → $ws/IDENTITY.md ($(wc -c <"$src") bytes)" \
+                || echo "  ! $aid: copy failed ($src → $ws/IDENTITY.md)"
+        else
+            echo "  - $aid: no persona.md at $src (workspace IDENTITY.md left as-is)"
+        fi
+    done
+
 # Redact every key whose name suggests a secret before logging.
 echo "[entrypoint] Rendered ${CONFIG_FILE} (secrets redacted):"
 jq 'walk(

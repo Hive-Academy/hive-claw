@@ -71,6 +71,12 @@ services:
       # different mount target so daemon-emitted host paths resolve inside
       # the container too).
       - ${OPENCLAW_HOST_HOME:-${HOME}}/.ptah:${OPENCLAW_HOST_HOME:-${HOME}}/.ptah:rw
+      # Persona privacy backend (CLAUDE.md §"Persona privacy rule" layer 1).
+      # The gateway reads persona.md per local agent and copies it to the
+      # workspace's IDENTITY.md so openclaw's context-file loader picks it up.
+      # The daemon shares the same mount so the local memory backend
+      # (resolveBackend) can read/write private agent files.
+      - ${OPENCLAW_LOCAL_MEMORY_DIR:-${HOME}/.claude/local-memory}:/home/agent/.claude/local-memory:rw
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:18789/health || curl -fsS -o /dev/null http://127.0.0.1:18789/ || exit 1"]
       interval: 10s
@@ -133,6 +139,10 @@ services:
       # openclaw-gateway. The socket bind grants the daemon container full
       # control of the host's docker — documented in docs/OPERATIONS.md.
       - /var/run/docker.sock:/var/run/docker.sock
+      # Persona privacy backend (CLAUDE.md §"Persona privacy rule" layer 1).
+      # The daemon's memory.ts resolveBackend() routes private agent files to
+      # this path; without the mount, PUTs to persona.md / secrets.md fail.
+      - ${OPENCLAW_LOCAL_MEMORY_DIR:-${HOME}/.claude/local-memory}:/home/agent/.claude/local-memory:rw
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:7878/api/health || exit 1"]
       interval: 10s
