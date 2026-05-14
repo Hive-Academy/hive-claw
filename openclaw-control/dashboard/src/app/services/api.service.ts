@@ -3,6 +3,7 @@ import { inject, Injectable } from '@angular/core';
 import { Observable } from 'rxjs';
 import type {
   Agent,
+  AgentActivity,
   Dispatch,
   DispatchState,
   HealthStatus,
@@ -141,6 +142,10 @@ export class ApiService {
     return this.http.get<SessionTail>(`/api/sessions/${agentId}/latest?lines=${lines}`, { withCredentials: true });
   }
 
+  agentActivity(id: string): Observable<AgentActivity> {
+    return this.http.get<AgentActivity>(`/api/agents/${id}/activity`, { withCredentials: true });
+  }
+
   memories(scope: string): Observable<MemoryEntry[]> {
     return this.http.get<MemoryEntry[]>(`/api/memories/${scope}`, { withCredentials: true });
   }
@@ -160,6 +165,7 @@ export class ApiService {
 
 export type {
   Agent,
+  AgentActivity,
   Dispatch,
   DispatchState,
   HealthStatus,

@@ -91,6 +91,128 @@ export async function tailSession(filePath: string, maxLines = 50): Promise<Sess
     .filter((e): e is SessionEvent => e !== null);
 }
 
+/**
+ * Per-agent activity summary — used by the dashboard's Agents page to show
+ * what the agent is *currently doing*, not just whether the heartbeat hit
+ * recently. Reads the agent's newest session JSONL (skipping trajectory
+ * sidecars), tails the last N events, and reports:
+ *   - the active session id + its mtime,
+ *   - the most-recent tool call (if any) and how long ago it happened,
+ *   - the most-recent assistant text preview (truncated),
+ *   - a histogram of tools used in the recent window.
+ */
+export interface AgentActivitySummary {
+  agentId: string;
+  sessionId: string | null;
+  filePath: string | null;
+  sessionMtime: string | null;
+  lastEventTs: string | null;
+  lastTool: string | null;
+  lastToolAt: string | null;
+  lastTextPreview: string | null;
+  recentToolCounts: Record<string, number>;
+  windowSize: number;
+}
+
+const ACTIVITY_TAIL_LINES = 80;
+
+export async function agentActivity(agentId: string): Promise<AgentActivitySummary> {
+  const empty: AgentActivitySummary = {
+    agentId,
+    sessionId: null,
+    filePath: null,
+    sessionMtime: null,
+    lastEventTs: null,
+    lastTool: null,
+    lastToolAt: null,
+    lastTextPreview: null,
+    recentToolCounts: {},
+    windowSize: 0,
+  };
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(agentId)) return empty;
+
+  const sessionsDir = path.join(config.openclawAgentsRoot, agentId, 'sessions');
+  let entries: string[];
+  try {
+    entries = await fs.readdir(sessionsDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return empty;
+    throw err;
+  }
+
+  // Newest non-trajectory transcript wins.
+  let newest: { fp: string; mtime: number } | null = null;
+  for (const f of entries) {
+    if (!f.endsWith('.jsonl') || f.endsWith('.trajectory.jsonl')) continue;
+    const fp = path.join(sessionsDir, f);
+    const stat = await fs.stat(fp);
+    if (!newest || stat.mtimeMs > newest.mtime) newest = { fp, mtime: stat.mtimeMs };
+  }
+  if (!newest) return empty;
+
+  const fp = newest.fp;
+  const stat = await fs.stat(fp);
+  const lines: string[] = [];
+  const rl = readline.createInterface({ input: createReadStream(fp, 'utf8') });
+  for await (const line of rl) {
+    lines.push(line);
+    if (lines.length > ACTIVITY_TAIL_LINES * 4) lines.shift();
+  }
+  const window = lines.slice(-ACTIVITY_TAIL_LINES);
+
+  let lastEventTs: string | null = null;
+  let lastTool: string | null = null;
+  let lastToolAt: string | null = null;
+  let lastTextPreview: string | null = null;
+  const counts: Record<string, number> = {};
+
+  for (const raw of window) {
+    if (!raw.trim()) continue;
+    let parsed: any;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    const ts: string | undefined = parsed.timestamp ?? parsed.ts;
+    if (typeof ts === 'string') lastEventTs = ts;
+
+    const content = parsed.message?.content;
+    if (Array.isArray(content)) {
+      for (const c of content) {
+        if (!c || typeof c !== 'object') continue;
+        if (c.type === 'tool_use' && typeof c.name === 'string') {
+          counts[c.name] = (counts[c.name] ?? 0) + 1;
+          lastTool = c.name;
+          if (typeof ts === 'string') lastToolAt = ts;
+        } else if (c.type === 'text' && typeof c.text === 'string' && c.text.length > 0) {
+          // Track the most-recent assistant-channel text.
+          if (parsed.message?.role === 'assistant' || parsed.role === 'assistant') {
+            lastTextPreview = c.text.slice(0, 200);
+          }
+        }
+      }
+    } else if (typeof content === 'string' && content.length > 0) {
+      if (parsed.message?.role === 'assistant' || parsed.role === 'assistant') {
+        lastTextPreview = content.slice(0, 200);
+      }
+    }
+  }
+
+  return {
+    agentId,
+    sessionId: path.basename(fp, '.jsonl'),
+    filePath: fp,
+    sessionMtime: stat.mtime.toISOString(),
+    lastEventTs,
+    lastTool,
+    lastToolAt,
+    lastTextPreview,
+    recentToolCounts: counts,
+    windowSize: window.length,
+  };
+}
+
 export function parseEvent(line: string): SessionEvent | null {
   if (!line.trim()) return null;
   try {

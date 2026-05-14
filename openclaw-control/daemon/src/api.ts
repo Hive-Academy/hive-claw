@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { config } from './config.js';
-import { listSessions, tailSession, newestSessionForProject } from './sessions.js';
+import { agentActivity, listSessions, tailSession, newestSessionForProject } from './sessions.js';
 import { attachSse, broadcast } from './sse.js';
 import { registerAuth, requireAuth, currentUser, isOAuthConfigured } from './auth.js';
 import { MemoryError } from './memory.js';
@@ -707,6 +707,21 @@ export function buildApp() {
 
   // --- agents -----------------------------------------------------------
   app.get('/api/agents', { preHandler: guard }, async () => storage.listAgentsList());
+
+  // Per-agent activity summary — the dashboard Agents page uses this to
+  // show "Now: <tool> · Ns ago" next to each agent. Read from the agent's
+  // newest session JSONL inside the gateway's openclaw-state volume.
+  app.get<{ Params: { id: string } }>(
+    '/api/agents/:id/activity',
+    { preHandler: guard },
+    async (req, reply) => {
+      const id = req.params.id;
+      if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) {
+        return reply.code(400).send({ error: 'invalid agent id' });
+      }
+      return agentActivity(id);
+    },
+  );
 
   // Plugin heartbeat: the openclaw-control-plugin POSTs here every ~30s for
   // each agent id in `OPENCLAW_LOCAL_AGENT_IDS` so the dashboard can show

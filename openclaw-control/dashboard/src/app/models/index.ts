@@ -129,6 +129,23 @@ export interface SessionTail {
   events: any[];
 }
 
+/**
+ * Per-agent activity summary — sourced from the agent's newest session
+ * JSONL. Powers the "Now: <tool> · Ns ago" indicator on the Agents page.
+ */
+export interface AgentActivity {
+  agentId: string;
+  sessionId: string | null;
+  filePath: string | null;
+  sessionMtime: string | null;
+  lastEventTs: string | null;
+  lastTool: string | null;
+  lastToolAt: string | null;
+  lastTextPreview: string | null;
+  recentToolCounts: Record<string, number>;
+  windowSize: number;
+}
+
 export interface TaskAdvanceResult {
   ok: boolean;
   projectSlug: string;
