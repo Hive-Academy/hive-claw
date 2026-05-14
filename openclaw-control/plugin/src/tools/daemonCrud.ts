@@ -154,6 +154,30 @@ function reject(toolName: string, error: string): AgentToolResult {
 const ListProjectsParams = Type.Object({}, { additionalProperties: false });
 type ListProjectsParamsT = Static<typeof ListProjectsParams>;
 
+const CreateProjectParams = Type.Object(
+  {
+    slug: Type.String({
+      minLength: 1,
+      maxLength: 64,
+      description:
+        "Project slug (kebab-case, [a-z0-9][a-z0-9-]{0,63}). Used as the URL key.",
+    }),
+    name: Type.String({
+      minLength: 1,
+      maxLength: 200,
+      description: "Human-friendly project name.",
+    }),
+    workspace: Type.Optional(
+      Type.String({
+        description:
+          "Optional absolute path on the host this project's work runs in.",
+      }),
+    ),
+  },
+  { additionalProperties: false },
+);
+type CreateProjectParamsT = Static<typeof CreateProjectParams>;
+
 const ListTasksParams = Type.Object(
   {
     project: Type.String({ minLength: 1, description: "Project slug." }),
@@ -238,6 +262,48 @@ export const listProjectsFactory: OpenClawPluginToolFactory = (
         status: "ok",
         count: projects.length,
       });
+    });
+  },
+});
+
+export const createProjectFactory: OpenClawPluginToolFactory = (
+  _ctx: OpenClawPluginToolContext,
+): AnyAgentTool => ({
+  name: "create_project",
+  label: "Create project",
+  description:
+    "Create a new project (the parent container for tasks). Slug is kebab-case ([a-z0-9][a-z0-9-]{0,63}); name is a short human label. Use when the operator says 'start a project' or asks for a brand-new initiative.",
+  parameters: CreateProjectParams,
+  async execute(
+    _toolCallId: string,
+    params: CreateProjectParamsT,
+  ): Promise<AgentToolResult> {
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(params.slug)) {
+      return reject(
+        "create_project",
+        "slug must match [a-z0-9][a-z0-9-]{0,63} (kebab-case, ≤64 chars)",
+      );
+    }
+    const name = params.name.trim();
+    if (name.length === 0) return reject("create_project", "name must not be empty");
+    const workspace =
+      typeof params.workspace === "string" && params.workspace.trim().length > 0
+        ? params.workspace.trim()
+        : undefined;
+    if (workspace && !workspace.startsWith("/")) {
+      return reject("create_project", "workspace must be an absolute path");
+    }
+
+    return runTool("create_project", async () => {
+      const row = await daemon.createProject({
+        slug: params.slug,
+        name,
+        workspace: workspace ?? null,
+      });
+      return textResult(
+        JSON.stringify({ ok: true, slug: params.slug, name, workspace: workspace ?? null }),
+        { status: "ok", slug: params.slug, row },
+      );
     });
   },
 });

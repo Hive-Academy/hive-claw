@@ -143,6 +143,10 @@ services:
       # The daemon's memory.ts resolveBackend() routes private agent files to
       # this path; without the mount, PUTs to persona.md / secrets.md fail.
       - ${OPENCLAW_LOCAL_MEMORY_DIR:-${HOME}/.claude/local-memory}:/home/agent/.claude/local-memory:rw
+      # Claude Code session JSONLs (used by /api/sessions + watcher.ts).
+      # Read-only — the daemon only tails them. Without this mount the
+      # sessions endpoint 500s with ENOENT.
+      - ${HOME}/.claude/projects:/home/agent/.claude/projects:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:7878/api/health || exit 1"]
       interval: 10s

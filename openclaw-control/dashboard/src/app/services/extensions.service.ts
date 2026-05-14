@@ -89,6 +89,15 @@ export class ExtensionsService {
       this.lastSeenInstallEventTs = newest.ts;
       // Anything that changes the pending set: requested/approved/rejected/applied/failed.
       this.refreshPending();
+      // Any decision (approve/reject/applied/failed) adds a row to history.
+      if (
+        newest.type === 'installs.approved' ||
+        newest.type === 'installs.rejected' ||
+        newest.type === 'installs.applied' ||
+        newest.type === 'installs.failed'
+      ) {
+        this.refreshHistory();
+      }
       if (newest.type === 'installs.applied' || newest.type === 'installs.failed') {
         this.refreshInstalled();
       }
@@ -135,6 +144,13 @@ export class ExtensionsService {
     });
   }
 
+  listHistory(limit = 100): Observable<{ requests: InstallRequest[] }> {
+    return this.http.get<{ requests: InstallRequest[] }>(
+      `/api/extensions/install-requests/history?limit=${limit}`,
+      { withCredentials: true },
+    );
+  }
+
   // ---- Cache refresh helpers -------------------------------------------
 
   refreshPending(): void {
@@ -157,6 +173,16 @@ export class ExtensionsService {
         const msg = err?.error?.error || err?.message || 'failed to load installed inventory';
         this.installedError.set(msg);
         this.installed.set({ plugins: [], mcpSkills: [] });
+      },
+    });
+  }
+
+  refreshHistory(limit = 100): void {
+    this.listHistory(limit).subscribe({
+      next: (resp) => this.recentDecisions.set(resp.requests ?? []),
+      error: () => {
+        // Soft failure — the History tab renders an empty state from the
+        // current cache rather than overwriting it with an empty list.
       },
     });
   }

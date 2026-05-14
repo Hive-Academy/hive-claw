@@ -118,7 +118,8 @@ export interface HealthStatus {
 
 export interface SessionInfo {
   sessionId: string;
-  projectKey: string;
+  /** Openclaw agent id whose session this is (e.g. "anubis", "horus"). */
+  agentId: string;
   mtime: string;
   size: number;
 }

@@ -137,8 +137,8 @@ export class ApiService {
     return this.http.get<SessionInfo[]>('/api/sessions', { withCredentials: true });
   }
 
-  tailSession(projectKey: string, lines = 100): Observable<SessionTail> {
-    return this.http.get<SessionTail>(`/api/sessions/${projectKey}/latest?lines=${lines}`, { withCredentials: true });
+  tailSession(agentId: string, lines = 100): Observable<SessionTail> {
+    return this.http.get<SessionTail>(`/api/sessions/${agentId}/latest?lines=${lines}`, { withCredentials: true });
   }
 
   memories(scope: string): Observable<MemoryEntry[]> {

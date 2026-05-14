@@ -361,6 +361,24 @@ export const daemon = {
   createTask: (body: CreateTaskBody) =>
     call<CreateTaskResponse>("POST", "/api/tasks", body),
 
+  // Project create — the dashboard "New project" button and the plugin's
+  // `create_project` tool both hit this. Daemon returns the canonical row
+  // (slug + name + workspace + timestamps).
+  createProject: (body: { slug: string; name: string; workspace?: string | null }) =>
+    call<Record<string, unknown>>("POST", "/api/projects", body),
+
+  // Status heartbeat from the plugin — the dashboard derives "online" from
+  // this. Fire-and-forget; the plugin's interval ignores the response.
+  agentHeartbeat: (
+    id: string,
+    body: { status?: "online" | "busy" | "offline"; busyWith?: string } = {},
+  ) =>
+    call<{ ok: boolean }>(
+      "POST",
+      `/api/agents/${encodeURIComponent(id)}/heartbeat`,
+      body,
+    ),
+
   approve: (slug: string, id: string, body: ApproveTaskBody) =>
     call(
       "POST",

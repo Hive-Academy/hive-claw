@@ -1,12 +1,14 @@
 /**
  * ExtensionsPageComponent — top-level page for plugin/MCP install governance.
  *
- * Two tabs via a signal-driven view toggle (matches the `tasks.component.ts`
- * style of inline state — no nested router-outlet needed for a 2-tab page).
+ * Three tabs via a signal-driven view toggle (matches the `tasks.component.ts`
+ * style of inline state — no nested router-outlet needed for a 3-tab page).
  *
- * Loads pending requests + installed inventory on activation; subsequent
- * updates are driven by `ExtensionsService` reacting to `installs.*` SSE
- * events (amendment-1 §16.3, §16.6).
+ * Loads pending + installed + history on activation; subsequent updates are
+ * driven by `ExtensionsService` reacting to `installs.*` SSE events
+ * (amendment-1 §16.3, §16.6). The History tab was added in the follow-up
+ * pass after a failed install vanished from "Pending" with no operator
+ * feedback.
  *
  * Note: until Batch 10 cutover wires `setDocker()` into the daemon, the
  * installed inventory endpoint will 503 — `installed-inventory.component`
@@ -16,13 +18,14 @@ import { ChangeDetectionStrategy, Component, OnInit, computed, inject, signal } 
 import { ExtensionsService } from '../../services/extensions.service';
 import { PendingApprovalsComponent } from './pending-approvals.component';
 import { InstalledInventoryComponent } from './installed-inventory.component';
+import { ExtensionsHistoryComponent } from './history.component';
 
-type Tab = 'pending' | 'installed';
+type Tab = 'pending' | 'installed' | 'history';
 
 @Component({
   selector: 'oc-extensions-page',
   standalone: true,
-  imports: [PendingApprovalsComponent, InstalledInventoryComponent],
+  imports: [PendingApprovalsComponent, InstalledInventoryComponent, ExtensionsHistoryComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="space-y-4">
@@ -60,12 +63,25 @@ type Tab = 'pending' | 'installed';
         >
           Installed inventory
         </a>
+        <a
+          role="tab"
+          class="tab gap-2"
+          [class.tab-active]="tab() === 'history'"
+          (click)="tab.set('history')"
+        >
+          History
+          @if (historyCount() > 0) {
+            <span class="badge badge-ghost badge-sm">{{ historyCount() }}</span>
+          }
+        </a>
       </div>
 
       @if (tab() === 'pending') {
         <oc-pending-approvals />
-      } @else {
+      } @else if (tab() === 'installed') {
         <oc-installed-inventory />
+      } @else {
+        <oc-extensions-history />
       }
     </div>
   `,
@@ -76,6 +92,7 @@ export class ExtensionsPageComponent implements OnInit {
   tab = signal<Tab>('pending');
   loading = signal(false);
   pendingCount = this.ext.pendingCount;
+  historyCount = computed(() => this.ext.recentDecisions().length);
 
   ngOnInit(): void {
     this.refresh();
@@ -83,9 +100,9 @@ export class ExtensionsPageComponent implements OnInit {
 
   refresh(): void {
     this.loading.set(true);
-    // Both refreshes are independent; the service swallows individual errors
+    // Three independent refreshes; the service swallows individual errors
     // (e.g. 503 from installed when docker handle isn't wired pre-Batch 10).
-    let outstanding = 2;
+    let outstanding = 3;
     const done = () => {
       outstanding -= 1;
       if (outstanding === 0) this.loading.set(false);
@@ -109,6 +126,13 @@ export class ExtensionsPageComponent implements OnInit {
         this.ext.installed.set({ plugins: [], mcpSkills: [] });
         done();
       },
+    });
+    this.ext.listHistory().subscribe({
+      next: (resp) => {
+        this.ext.recentDecisions.set(resp.requests ?? []);
+        done();
+      },
+      error: () => done(),
     });
   }
 }

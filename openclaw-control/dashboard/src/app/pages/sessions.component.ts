@@ -27,7 +27,9 @@ import { ToastService } from '../services/toast.service';
       </div>
 
       <p class="text-sm text-base-content/60">
-        Streamed from all <kbd class="kbd kbd-sm">~/.claude/projects/&lt;project&gt;/*.jsonl</kbd> files in real time.
+        Streamed from openclaw's per-agent transcripts at
+        <kbd class="kbd kbd-sm">~/.openclaw/agents/&lt;agent&gt;/sessions/*.jsonl</kbd>
+        in real time.
       </p>
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -57,7 +59,7 @@ import { ToastService } from '../services/toast.service';
                     [class.bg-base-300]="selected()?.sessionId === s.sessionId"
                     (click)="select(s)"
                   >
-                    <div class="text-xs text-base-content/50 font-mono">{{ s.projectKey }}</div>
+                    <div class="text-xs text-base-content/50 font-mono">agent: {{ s.agentId }}</div>
                     <div class="text-sm font-mono break-all">{{ s.sessionId }}</div>
                     <div class="text-xs text-base-content/40 mt-1">
                       {{ s.mtime }} · {{ (s.size / 1024) | number:'1.0-1' }} KB
@@ -137,7 +139,7 @@ export class SessionsComponent implements OnInit, OnDestroy {
     if (!q) return list;
     return list.filter((s) =>
       s.sessionId.toLowerCase().includes(q) ||
-      s.projectKey.toLowerCase().includes(q),
+      s.agentId.toLowerCase().includes(q),
     );
   });
 
@@ -167,7 +169,7 @@ export class SessionsComponent implements OnInit, OnDestroy {
   select(s: SessionInfo) {
     this.selected.set(s);
     this.tail.set(null);
-    this.api.tailSession(s.projectKey, 100).subscribe({
+    this.api.tailSession(s.agentId, 100).subscribe({
       next: (t) => this.tail.set(t),
       error: (err) => this.toast.error(err?.error?.error || 'Failed to load session tail'),
     });

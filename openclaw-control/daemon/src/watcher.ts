@@ -13,25 +13,30 @@ import { parseEvent } from './sessions.js';
  * emitted directly from the daemon's write paths (TasksRepo writeFile,
  * MemoryRepo write, dispatch state transitions).
  *
- * What stays here is the host's Claude Code session JSONL watcher —
- * `~/.claude/projects/*.jsonl` files are written by the host's running
- * Claude CLI sessions and bind-mounted read-only into the container.
- * They are unrelated to the openclaw specs storage.
+ * Post-cutover (TASK_2026_006), what stays here is the openclaw per-agent
+ * session JSONL watcher. Path structure:
+ *   <openclawAgentsRoot>/<agentId>/sessions/<sessionId>.jsonl
+ * (the sibling `.trajectory.jsonl` is skipped — that's openclaw's replay
+ * sidecar, not the chat transcript).
  */
 
 const sessionOffsets = new Map<string, number>();
 
 export async function startWatchers(): Promise<void> {
-  // Live Claude Code session JSONL files (host's, mounted read-only).
-  const sessionsWatcher = chokidar.watch(`${config.claudeProjectsRoot}/**/*.jsonl`, {
-    ignoreInitial: false,
-    awaitWriteFinish: false,
-  });
+  const sessionsWatcher = chokidar.watch(
+    `${config.openclawAgentsRoot}/*/sessions/*.jsonl`,
+    {
+      ignoreInitial: false,
+      awaitWriteFinish: false,
+    },
+  );
   sessionsWatcher.on('add', (fp) => {
+    if (fp.endsWith('.trajectory.jsonl')) return;
     sessionOffsets.set(fp, 0);
     void streamNew(fp);
   });
   sessionsWatcher.on('change', (fp) => {
+    if (fp.endsWith('.trajectory.jsonl')) return;
     void streamNew(fp);
   });
 }
@@ -46,9 +51,11 @@ async function streamNew(filePath: string): Promise<void> {
       bytes += Buffer.byteLength(line, 'utf8') + 1;
       const ev = parseEvent(line);
       if (!ev) return;
-      const projectKey = path.basename(path.dirname(filePath));
+      // <agentsRoot>/<agentId>/sessions/<sessionId>.jsonl — climb two levels
+      // to recover the agent id.
+      const agentId = path.basename(path.dirname(path.dirname(filePath)));
       const sessionId = path.basename(filePath, '.jsonl');
-      broadcast('session.message', { projectKey, sessionId, event: ev });
+      broadcast('session.message', { agentId, sessionId, event: ev });
     });
     rl.on('close', () => {
       sessionOffsets.set(filePath, bytes);

@@ -4,8 +4,16 @@ import readline from 'node:readline';
 import path from 'node:path';
 import { config } from './config.js';
 
+/**
+ * SessionFile — one row in the dashboard's "Live sessions" page.
+ *
+ * Post-cutover (TASK_2026_006), sessions live under
+ * `<openclawAgentsRoot>/<agentId>/sessions/<sessionId>.jsonl`. The legacy
+ * `projectKey` field name is preserved as `agentId` here; the dashboard
+ * column is relabeled to "Agent".
+ */
 export interface SessionFile {
-  projectKey: string;
+  agentId: string;
   sessionId: string;
   filePath: string;
   size: number;
@@ -21,18 +29,35 @@ export interface SessionEvent {
 }
 
 export async function listSessions(): Promise<SessionFile[]> {
-  const entries = await fs.readdir(config.claudeProjectsRoot, { withFileTypes: true });
+  let entries: import('node:fs').Dirent[];
+  try {
+    entries = await fs.readdir(config.openclawAgentsRoot, { withFileTypes: true });
+  } catch (err) {
+    // The agents root only exists once openclaw has booted at least one
+    // agent. On a cold container this is ENOENT — return empty rather than
+    // 500'ing the dashboard.
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return [];
+    throw err;
+  }
   const out: SessionFile[] = [];
   for (const e of entries) {
     if (!e.isDirectory()) continue;
-    const projectDir = path.join(config.claudeProjectsRoot, e.name);
-    const files = await fs.readdir(projectDir);
+    const sessionsDir = path.join(config.openclawAgentsRoot, e.name, 'sessions');
+    let files: string[];
+    try {
+      files = await fs.readdir(sessionsDir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
+      throw err;
+    }
     for (const f of files) {
-      if (!f.endsWith('.jsonl')) continue;
-      const fp = path.join(projectDir, f);
+      // Skip openclaw's per-session sidecar files; the dashboard wants the
+      // chat transcript, not the trajectory replay.
+      if (!f.endsWith('.jsonl') || f.endsWith('.trajectory.jsonl')) continue;
+      const fp = path.join(sessionsDir, f);
       const stat = await fs.stat(fp);
       out.push({
-        projectKey: e.name,
+        agentId: e.name,
         sessionId: f.replace(/\.jsonl$/, ''),
         filePath: fp,
         size: stat.size,
@@ -43,9 +68,14 @@ export async function listSessions(): Promise<SessionFile[]> {
   return out.sort((a, b) => b.mtime.localeCompare(a.mtime));
 }
 
-export async function newestSessionForProject(projectKey: string): Promise<SessionFile | null> {
+/**
+ * Find the newest session for a given agent. Kept under its original name
+ * (`newestSessionForProject`) for `api.ts` import compatibility — the
+ * "projectKey" naming is historical and the parameter is now an agent id.
+ */
+export async function newestSessionForProject(agentId: string): Promise<SessionFile | null> {
   const all = await listSessions();
-  return all.find((s) => s.projectKey === projectKey) ?? null;
+  return all.find((s) => s.agentId === agentId) ?? null;
 }
 
 export async function tailSession(filePath: string, maxLines = 50): Promise<SessionEvent[]> {

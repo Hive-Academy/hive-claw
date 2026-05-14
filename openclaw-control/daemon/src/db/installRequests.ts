@@ -72,6 +72,7 @@ interface Statements {
   insert: Statement<{ kind: string; slug: string; agent: string; reason: string | null }>;
   get: Statement<{ id: number }>;
   listPending: Statement<[]>;
+  listHistory: Statement<{ limit: number }>;
   listByAgent: Statement<{ agent: string; limit: number }>;
   markApproved: Statement<{ id: number; note: string | null }>;
   markRejected: Statement<{ id: number; note: string | null }>;
@@ -97,6 +98,12 @@ function stmts(): Statements {
       `SELECT ${selectCols} FROM extension_install_requests
         WHERE status = 'pending'
         ORDER BY created_at ASC`,
+    ),
+    listHistory: db.prepare(
+      `SELECT ${selectCols} FROM extension_install_requests
+        WHERE status IN ('approved','rejected','applied','failed')
+        ORDER BY COALESCE(applied_at, decided_at, created_at) DESC
+        LIMIT @limit`,
     ),
     listByAgent: db.prepare(
       `SELECT ${selectCols} FROM extension_install_requests
@@ -197,6 +204,17 @@ export const InstallRequestsRepo = {
 
   listPending(): InstallRequest[] {
     const rows = stmts().listPending.all() as RawRow[];
+    return rows.map(toRow);
+  },
+
+  /**
+   * Terminal-state history (approved + rejected + applied + failed),
+   * newest-first. The dashboard "History" tab reads this so failed installs
+   * (which leave `pending` immediately) remain visible to the operator.
+   */
+  listHistory(limit = 100): InstallRequest[] {
+    const capped = Math.max(1, Math.min(500, Math.floor(limit)));
+    const rows = stmts().listHistory.all({ limit: capped }) as RawRow[];
     return rows.map(toRow);
   },
 
