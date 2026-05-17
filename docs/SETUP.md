@@ -15,7 +15,7 @@ If you only want the original single-machine OpenClaw + Ollama + Discord setup w
 
 | Requirement | Why |
 |---|---|
-| Docker Engine ≥ 24 | runs the container |
+| Docker Engine ≥ 24 | runs the containers |
 | Docker Compose plugin v2 | `docker compose` |
 | systemd | hosts Ollama (and the optional ptah-bridge user service) |
 | `curl`, `openssl`, `jq` | used by setup.sh + entrypoint |
@@ -28,6 +28,13 @@ If `docker` isn't installed:
 ```bash
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker $USER && newgrp docker
+```
+
+**Find your docker GID** (needed in `.env` for the daemon):
+
+```bash
+stat -c '%g' /var/run/docker.sock
+# → 985 (Debian/Ubuntu) or 999 (some distros)
 ```
 
 ---
@@ -96,6 +103,7 @@ OPENCLAW_LEADER=1
 OPENCLAW_LOCAL_AGENT_IDS=anubis              # or whichever agent(s) this host owns
 OPENCLAW_SPECS_DB_PATH=/data/specs.db        # default; rarely changed
 DISCORD_TOKEN_ANUBIS=...                     # one per local agent
+DOCKER_GID=985                               # from `stat -c '%g' /var/run/docker.sock`
 ```
 
 `setup.sh` will auto-generate `OPENCLAW_JWT_SECRET` and `OPENCLAW_INTERNAL_TOKEN` if you leave them empty. Note the generated `OPENCLAW_INTERNAL_TOKEN` value — you'll need to copy it to every follower's `.env`.
@@ -108,6 +116,7 @@ OPENCLAW_LEADER_URL=https://leader.tailnet.ts.net    # or http://leader.lan:7878
 OPENCLAW_LOCAL_AGENT_IDS=amun                        # disjoint from the leader's
 OPENCLAW_INTERNAL_TOKEN=<paste the leader's value>   # MUST match
 DISCORD_TOKEN_AMUN=...                               # one per local agent
+DOCKER_GID=985                                       # same check as leader
 ```
 
 If `OPENCLAW_LEADER=0` and `OPENCLAW_LEADER_URL` is empty, the daemon refuses to start (config-load hard-fail at `daemon/src/config.ts`).
@@ -173,9 +182,23 @@ Fill in name, role, voice, scope, do, don't. **This file is never sent over HTTP
 
 The bot-bridge re-reads the persona on every message, so no restart is needed.
 
+On every boot, the gateway's entrypoint copies `local-memory/agents/<id>/persona.md` into `<workspace>/<id>/IDENTITY.md` so openclaw's context-file loader picks it up. This means:
+
+- Your persona edits take effect on the next message (bot-bridge) **and** on the next container restart (gateway context files).
+- The workspace copy is re-materialized from the local-memory source on every boot — edit the source, not the workspace copy.
+
 ---
 
 ## Step 6 — Verify
+
+### Gateway
+
+```bash
+docker compose ps
+# → openclaw-gateway   healthy
+# → openclaw-daemon    healthy
+# → openclaw-redis     healthy
+```
 
 ### Daemon
 
@@ -191,7 +214,7 @@ Open `http://127.0.0.1:7878` in a browser on the same host. If `DISCORD_CLIENT_I
 ### Bot-bridge
 
 ```bash
-./scripts/dc.sh compose exec openclaw tail -f /tmp/openclaw-control-bot.log
+docker compose logs -f openclaw-daemon | grep bot-bridge
 # Look for: "[bot-bridge] agent <id> logged in as <bot-name>#NNNN"
 ```
 
@@ -206,7 +229,7 @@ The bot should reply within ~10s (cloud model latency).
 ### Leader spec DB
 
 ```bash
-docker compose exec openclaw sqlite3 /data/specs.db ".tables"
+docker compose exec openclaw-daemon sqlite3 /data/specs.db ".tables"
 # Should print: dispatch_log  dispatches  memory_files  projects  schema_version  task_files  tasks
 ```
 
@@ -217,7 +240,7 @@ If you'd like to peek at open dispatches, see `docs/OPERATIONS.md`.
 On a follower:
 
 ```bash
-docker compose exec openclaw curl -fsS \
+docker compose exec openclaw-daemon curl -fsS \
     -H "Authorization: Bearer $OPENCLAW_INTERNAL_TOKEN" \
     "$OPENCLAW_LEADER_URL/api/health"
 # Should return {"ok":true,...}
@@ -261,10 +284,10 @@ That runs `git pull --ff-only && ./scripts/dc.sh compose up -d --build` and wait
 After editing only `.env`:
 
 ```bash
-./scripts/dc.sh compose up -d
+docker compose up -d
 ```
 
-After editing only persona / shared-memory: nothing to restart. The daemon re-reads files on every request.
+After editing only persona / shared-memory: nothing to restart. The daemon re-reads files on every request. The gateway re-materializes persona → workspace on its next boot.
 
 ---
 
@@ -293,6 +316,8 @@ A Discord bot token can only be used by one running instance at a time. Two opti
 | `503 discord oauth not configured` | `DISCORD_CLIENT_ID` empty | Either set it or stop trying to expose publicly |
 | Two leaders racing | Both machines have `OPENCLAW_LEADER=1` | Pick one; flip the other to `0` |
 | Discord token leaked | Pasted in chat / committed `.env` | Regenerate the token in Developer Portal; update `.env`; restart |
+| Daemon can't restart gateway after plugin install | `DOCKER_GID` wrong or missing | Run `stat -c '%g' /var/run/docker.sock` and set `DOCKER_GID` in `.env` |
+| Gateway logs `EACCES: permission denied, mkdir /home/agent/.openclaw/workspace/<id>` | First boot on fresh volume | Already fixed — `entrypoint.sh` auto-creates per-agent workspace dirs. If you see this on an old volume: `docker exec --user root openclaw-gateway chown -R agent:agent /home/agent/.openclaw/workspace` |
 
 Full table: [TROUBLESHOOTING.md](TROUBLESHOOTING.md). Daily ops recipes: [OPERATIONS.md](OPERATIONS.md).
 
