@@ -46,6 +46,8 @@ services:
       # Batch 11 removes DISCORD_BOT_TOKEN after the cutover is stable.
       DISCORD_TOKEN_ANUBIS: ${DISCORD_TOKEN_ANUBIS:-}
       DISCORD_TOKEN_HORUS: ${DISCORD_TOKEN_HORUS:-}
+      DISCORD_TOKEN_CHAPPIE: ${DISCORD_TOKEN_CHAPPIE:-}
+      ZERNIO_API_KEY: ${ZERNIO_API_KEY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     security_opt:
@@ -77,6 +79,11 @@ services:
       # The daemon shares the same mount so the local memory backend
       # (resolveBackend) can read/write private agent files.
       - ${OPENCLAW_LOCAL_MEMORY_DIR:-${HOME}/.claude/local-memory}:/home/agent/.claude/local-memory:rw
+      # Agent workspaces — bind-mounted so file writes (drafts, canvas, etc.)
+      # are visible on the host filesystem. See docs/ARCHITECTURE.md line 163.
+      - ${WORKSPACE_DIR:-${HOME}/projects}:/home/agent/.openclaw/workspace:rw
+      # Host project workspace — ptah task files and project roots land here.
+      - ${WORKSPACE_DIR:-${HOME}/projects}:/workspace:rw
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:18789/health || curl -fsS -o /dev/null http://127.0.0.1:18789/ || exit 1"]
       interval: 10s
@@ -143,6 +150,8 @@ services:
       # The daemon's memory.ts resolveBackend() routes private agent files to
       # this path; without the mount, PUTs to persona.md / secrets.md fail.
       - ${OPENCLAW_LOCAL_MEMORY_DIR:-${HOME}/.claude/local-memory}:/home/agent/.claude/local-memory:rw
+      # Host project workspace — shared with gateway so both tiers see the same files.
+      - ${WORKSPACE_DIR:-${HOME}/projects}:/workspace:rw
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:7878/api/health || exit 1"]
       interval: 10s
