@@ -50,7 +50,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && rm -rf /var/lib/apt/lists/* \
     && node --version && npm --version
 
-RUN npm install -g openclaw@2026.4.24 \
+RUN npm install -g openclaw@2026.5.7 \
     && openclaw --version
 
 # Ptah CLI — first-class project orchestration (discover, scaffold, GitHub auth).

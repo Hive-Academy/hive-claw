@@ -209,9 +209,25 @@ render_template() {
            "$out" > "${out}.tmp" && mv "${out}.tmp" "$out"
     fi
 
-    # Disable web search when no provider or API key is configured.
+    # Web search wiring.
+    #
+    # As of openclaw 2026.5.x, provider-owned web-search config (apiKey, etc.)
+    # lives under plugins.entries.<providerId>.config.webSearch rather than
+    # tools.web.search.apiKey. The template renders the non-secret search
+    # config (enabled/provider/maxResults/...); we inject the API key here
+    # against the dynamic provider id (tavily/exa/perplexity/brave/...).
+    #
+    # When either var is unset, disable the search tool entirely.
     if [ -z "${WEB_SEARCH_PROVIDER:-}" ] || [ -z "${WEB_SEARCH_API_KEY:-}" ]; then
         jq '.tools.web.search.enabled = false' "$out" > "${out}.tmp" && mv "${out}.tmp" "$out"
+    else
+        jq --arg provider "$WEB_SEARCH_PROVIDER" --arg key "$WEB_SEARCH_API_KEY" '
+              .plugins.entries[$provider] = (
+                (.plugins.entries[$provider] // {})
+                | .enabled = true
+                | .config = ((.config // {}) | .webSearch = ((.webSearch // {}) | .apiKey = $key))
+              )
+            ' "$out" > "${out}.tmp" && mv "${out}.tmp" "$out"
     fi
 
     if ! jq empty "$out" 2>/dev/null; then
