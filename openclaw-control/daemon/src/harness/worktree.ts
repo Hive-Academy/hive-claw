@@ -82,6 +82,45 @@ async function isGitWorkingDir(p: string): Promise<boolean> {
 }
 
 /**
+ * Attempt a fresh `git clone` of `project.githubRepo` into `project.path`.
+ * Uses GITHUB_TOKEN (or GH_TOKEN) via a transient insteadOf rewrite so the
+ * token never lands in .git/config — the cloned remote URL stays plain HTTPS.
+ * Returns {ok, note} — never throws.
+ */
+async function tryClone(project: Project): Promise<{ ok: boolean; note: string }> {
+  const cloneUrl = `https://github.com/${project.githubRepo!}.git`;
+  const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
+  const env: NodeJS.ProcessEnv = token
+    ? {
+        ...process.env,
+        // Inject credentials for this one subprocess only; the cloned
+        // .git/config gets a plain https://github.com/... remote URL.
+        GIT_CONFIG_COUNT: '1',
+        GIT_CONFIG_KEY_0: `url.https://x-access-token:${token}@github.com/.insteadOf`,
+        GIT_CONFIG_VALUE_0: 'https://github.com/',
+      }
+    : { ...process.env };
+
+  try {
+    await fs.mkdir(path.dirname(project.path), { recursive: true });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, note: `clone skipped: mkdir parent of ${project.path} failed: ${msg}` };
+  }
+
+  try {
+    await execFileAsync('git', ['clone', cloneUrl, project.path], {
+      timeout: 120_000,
+      env,
+    });
+    return { ok: true, note: `auto-cloned ${project.githubRepo} → ${project.path}` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, note: `worktree skipped: git clone ${cloneUrl} failed: ${msg}` };
+  }
+}
+
+/**
  * Check whether the worktree at `worktreePath` is already registered with
  * the project's git repo. Cheap — runs `git worktree list --porcelain` once.
  */
@@ -118,9 +157,10 @@ async function branchExists(projectPath: string, branch: string): Promise<boolea
 /**
  * Create or reuse the per-task worktree. Returns `{cwd, branch, worktreePath, note}`.
  *
- * When `project.githubRepo` is null, or when `project.path` is not a git
- * working dir, returns the project path unchanged (`branch=null,
- * worktreePath=null`) — the dispatch behaves exactly as before.
+ * When `project.githubRepo` is null, returns the project path unchanged
+ * (`branch=null, worktreePath=null`). When `project.path` is not a git
+ * working dir, attempts an auto-clone first; falls back to project root if
+ * the clone fails.
  *
  * Idempotency:
  *   - Worktree dir already registered for this task → reuse, no-op.
@@ -146,13 +186,18 @@ export async function setupWorktree(
     };
   }
 
+  let cloneNote: string | null = null;
   if (!(await isGitWorkingDir(project.path))) {
-    return {
-      cwd: project.path,
-      branch: null,
-      worktreePath: null,
-      note: `worktree skipped: ${project.path} is not a git working dir`,
-    };
+    const result = await tryClone(project);
+    if (!result.ok) {
+      return {
+        cwd: project.path,
+        branch: null,
+        worktreePath: null,
+        note: result.note,
+      };
+    }
+    cloneNote = result.note;
   }
 
   const { worktreePath, branch, baseBranch } = plan(project, agentId, taskId);
@@ -207,12 +252,13 @@ export async function setupWorktree(
     };
   }
 
+  const worktreeNote = reuseBranch
+    ? `worktree created at ${worktreePath} (reusing existing branch ${branch})`
+    : `worktree created at ${worktreePath} (new branch ${branch} from ${baseBranch})`;
   return {
     cwd: worktreePath,
     branch,
     worktreePath,
-    note: reuseBranch
-      ? `worktree created at ${worktreePath} (reusing existing branch ${branch})`
-      : `worktree created at ${worktreePath} (new branch ${branch} from ${baseBranch})`,
+    note: cloneNote ? `${cloneNote}; ${worktreeNote}` : worktreeNote,
   };
 }
