@@ -2,7 +2,9 @@
   "agents": {
     "defaults": {
       "model": { "primary": "${LLM_PROVIDER}/${LLM_MODEL}" },
-      "timeoutSeconds": 600
+      "timeoutSeconds": 600,
+      "videoGenerationModel": "google/veo-3.1-fast-generate-preview",
+      "mediaGenerationAutoProviderFallback": true
     },
     "list": [
       {
