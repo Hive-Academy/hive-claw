@@ -48,7 +48,9 @@ TEMPLATE="/etc/openclaw/openclaw.json.tmpl"
 : "${DISCORD_BOT_TOKEN:=}"
 : "${DISCORD_TOKEN_ANUBIS:=}"
 : "${DISCORD_TOKEN_HORUS:=}"
+: "${DISCORD_TOKEN_CHAPPIE:=}"
 : "${GITHUB_TOKEN:=}"
+: "${ZERNIO_API_KEY:=}"
 : "${OPENCLAW_AUTH_TOKEN:=}"
 
 if [ -z "$OPENCLAW_AUTH_TOKEN" ]; then
@@ -129,7 +131,7 @@ OPENCLAW_VERSION="$(openclaw --version 2>/dev/null | awk '{print $2}' || echo un
 OPENCLAW_NOW="$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")"
 export LLM_PROVIDER LLM_MODEL LLM_PROVIDERS_JSON \
        DISCORD_GUILD_ID DISCORD_BOT_TOKEN \
-       DISCORD_TOKEN_ANUBIS DISCORD_TOKEN_HORUS GITHUB_TOKEN \
+       DISCORD_TOKEN_ANUBIS DISCORD_TOKEN_HORUS DISCORD_TOKEN_CHAPPIE GITHUB_TOKEN ZERNIO_API_KEY \
        OPENCLAW_AUTH_TOKEN OPENCLAW_VERSION OPENCLAW_NOW
 
 mkdir -p "$CONFIG_DIR"
@@ -155,7 +157,7 @@ CONFIG_FILE_NEW="${CONFIG_FILE}.new"
 
 render_template() {
     local out="$1"
-    envsubst '${LLM_PROVIDER} ${LLM_MODEL} ${LLM_PROVIDERS_JSON} ${DISCORD_GUILD_ID} ${DISCORD_BOT_TOKEN} ${DISCORD_TOKEN_ANUBIS} ${DISCORD_TOKEN_HORUS} ${GITHUB_TOKEN} ${OPENCLAW_AUTH_TOKEN} ${OPENCLAW_VERSION} ${OPENCLAW_NOW}' \
+    envsubst '${LLM_PROVIDER} ${LLM_MODEL} ${LLM_PROVIDERS_JSON} ${DISCORD_GUILD_ID} ${DISCORD_BOT_TOKEN} ${DISCORD_TOKEN_ANUBIS} ${DISCORD_TOKEN_HORUS} ${DISCORD_TOKEN_CHAPPIE} ${GITHUB_TOKEN} ${ZERNIO_API_KEY} ${OPENCLAW_AUTH_TOKEN} ${OPENCLAW_VERSION} ${OPENCLAW_NOW}' \
         < "$TEMPLATE" > "$out"
 
     # ---------- Scope to OPENCLAW_LOCAL_AGENT_IDS ----------
@@ -192,7 +194,7 @@ render_template() {
     # Mirror the historical "discord disabled when tokens missing" behavior
     # on the rendered output. Detect which shape we rendered (old: default
     # account; new: anubis/horus accounts) and disable accordingly.
-    if [ -z "$DISCORD_BOT_TOKEN" ] && [ -z "$DISCORD_TOKEN_ANUBIS" ] && [ -z "$DISCORD_TOKEN_HORUS" ]; then
+    if [ -z "$DISCORD_BOT_TOKEN" ] && [ -z "$DISCORD_TOKEN_ANUBIS" ] && [ -z "$DISCORD_TOKEN_HORUS" ] && [ -z "$DISCORD_TOKEN_CHAPPIE" ]; then
         echo "[entrypoint] No Discord tokens configured — disabling discord channel in $out"
         jq '.channels.discord.enabled = false
             | (.channels.discord.accounts // {}) |= with_entries(.value.enabled = false)' \

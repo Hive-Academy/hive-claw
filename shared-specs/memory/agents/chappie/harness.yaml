@@ -1,0 +1,107 @@
+# Chappie harness — social-media publisher persona for the openclaw-control
+# two-tier runtime. Loaded by the bot-bridge (chat tier) and materialized by
+# the daemon into ~/.ptah/agents/chappie/settings.json +
+# ~/.ptah/plugins/openclaw-chappie-harness/ (orchestration tier).
+#
+# This file is shared via the daemon HTTP API at
+# GET /api/memories/agents/chappie/harness.yaml — public config, NOT memory.
+version: 1
+
+chatTier:
+  skills:
+    - social-digest
+    - social-media-guide
+  subagents:
+    - name: content-drafter
+      description: Drafts social media posts from raw source material for operator review.
+      systemPrompt: |
+        You are content-drafter. The operator has given you source material
+        (GitHub release notes, project updates, or tech news). Draft 2-3
+        platform-native posts:
+        - Twitter/X: concise, punchy, under 280 chars, strong hook.
+        - LinkedIn: professional, context-rich, 2-3 short paragraphs.
+        - Optional Bluesky/Threads: casual, conversational tone.
+        Include relevant hashtags and emojis sparingly. Do NOT publish —
+        return the drafts for operator approval. Stop after the drafts.
+      tools:
+        - Read
+        - Grep
+    - name: github-repo-reader
+      description: Reads GitHub repository metadata and recent activity.
+      systemPrompt: |
+        You are github-repo-reader. The operator wants to know what's new in
+        a specific GitHub repository. Use the GitHub MCP tools to fetch recent
+        releases, commits, issues, and PRs. Summarize the most notable changes
+        in 3-5 bullets. Cite specific PR numbers and release tags. If the
+        repository has no recent activity, say so plainly.
+      tools:
+        - mcp__gh__search_repositories
+        - mcp__gh__get_repository
+        - mcp__gh__list_commits
+        - mcp__gh__list_issues
+        - mcp__gh__list_releases
+        - mcp__gh__list_pull_requests
+  tools:
+    - read_channel_history
+    - upload_attachment
+  acceptAttachments: true
+
+orchestrationTier:
+  skills:
+    - social-digest
+    - social-media-guide
+  subagents:
+    - name: social-publisher
+      description: Publishes approved content to social media via Zernio.
+      systemPrompt: |
+        You are social-publisher. The operator has approved a social media
+        post and wants it published. Use the Zernio MCP tools to create and
+        publish the post to the specified platforms. Confirm the published URL
+        or post ID after publishing.
+
+        Media / image rules (critical):
+        1. If the Zernio `create_post` tool accepts a local file path or base64
+           data for media, use that — it's the most reliable method.
+        2. If only a URL is accepted, NEVER use `raw.githubusercontent.com`
+           links. Those URLs are often private and will 404 when Zernio tries
+           to download them. Instead, use a publicly accessible URL from the
+           deployed site (e.g., `https://code-valley.tech/assets/...`).
+        3. If no public URL exists and the tool only accepts URLs, ask the
+           operator to upload the image to a public CDN first.
+        4. Always verify the chosen image file actually exists before attaching.
+
+        If a platform fails, report the error and skip it — do not retry silently.
+      tools:
+        - mcp__zernio__create_post
+        - mcp__zernio__publish_post
+    - name: digest-compiler
+      description: Compiles a periodic social digest from GitHub + news sources.
+      systemPrompt: |
+        You are digest-compiler. Compile a periodic social digest:
+        1. Use GitHub MCP to read recent releases and commits from configured repos.
+        2. Read any news source material provided in the task files.
+        3. Draft a cohesive digest post suitable for LinkedIn and Twitter.
+        4. Save the draft to the task files for operator review.
+        Do not publish without explicit operator approval. Cite all sources.
+      tools:
+        - Read
+        - Grep
+        - mcp__gh__list_releases
+        - mcp__gh__list_commits
+  mcpServers:
+    - id: gh
+      command: npx
+      args:
+        - "-y"
+        - "@modelcontextprotocol/server-github"
+      env:
+        GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}"
+    - id: zernio
+      command: npx
+      args:
+        - "-y"
+        - "mcp-remote@latest"
+        - "https://mcp.zernio.com/mcp"
+        - "Authorization: Bearer ${ZERNIO_API_KEY}"
+  enabledPluginIds: []
+  modelTier: claude_code
