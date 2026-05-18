@@ -48,6 +48,8 @@ services:
       DISCORD_TOKEN_HORUS: ${DISCORD_TOKEN_HORUS:-}
       DISCORD_TOKEN_CHAPPIE: ${DISCORD_TOKEN_CHAPPIE:-}
       ZERNIO_API_KEY: ${ZERNIO_API_KEY:-}
+      WEB_SEARCH_PROVIDER: ${WEB_SEARCH_PROVIDER:-}
+      WEB_SEARCH_API_KEY: ${WEB_SEARCH_API_KEY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     security_opt:

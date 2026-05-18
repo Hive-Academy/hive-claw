@@ -51,6 +51,8 @@ TEMPLATE="/etc/openclaw/openclaw.json.tmpl"
 : "${DISCORD_TOKEN_CHAPPIE:=}"
 : "${GITHUB_TOKEN:=}"
 : "${ZERNIO_API_KEY:=}"
+: "${WEB_SEARCH_PROVIDER:=}"
+: "${WEB_SEARCH_API_KEY:=}"
 : "${OPENCLAW_AUTH_TOKEN:=}"
 
 if [ -z "$OPENCLAW_AUTH_TOKEN" ]; then
@@ -132,6 +134,7 @@ OPENCLAW_NOW="$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")"
 export LLM_PROVIDER LLM_MODEL LLM_PROVIDERS_JSON \
        DISCORD_GUILD_ID DISCORD_BOT_TOKEN \
        DISCORD_TOKEN_ANUBIS DISCORD_TOKEN_HORUS DISCORD_TOKEN_CHAPPIE GITHUB_TOKEN ZERNIO_API_KEY \
+       WEB_SEARCH_PROVIDER WEB_SEARCH_API_KEY \
        OPENCLAW_AUTH_TOKEN OPENCLAW_VERSION OPENCLAW_NOW
 
 mkdir -p "$CONFIG_DIR"
@@ -157,7 +160,7 @@ CONFIG_FILE_NEW="${CONFIG_FILE}.new"
 
 render_template() {
     local out="$1"
-    envsubst '${LLM_PROVIDER} ${LLM_MODEL} ${LLM_PROVIDERS_JSON} ${DISCORD_GUILD_ID} ${DISCORD_BOT_TOKEN} ${DISCORD_TOKEN_ANUBIS} ${DISCORD_TOKEN_HORUS} ${DISCORD_TOKEN_CHAPPIE} ${GITHUB_TOKEN} ${ZERNIO_API_KEY} ${OPENCLAW_AUTH_TOKEN} ${OPENCLAW_VERSION} ${OPENCLAW_NOW}' \
+    envsubst '${LLM_PROVIDER} ${LLM_MODEL} ${LLM_PROVIDERS_JSON} ${DISCORD_GUILD_ID} ${DISCORD_BOT_TOKEN} ${DISCORD_TOKEN_ANUBIS} ${DISCORD_TOKEN_HORUS} ${DISCORD_TOKEN_CHAPPIE} ${GITHUB_TOKEN} ${ZERNIO_API_KEY} ${WEB_SEARCH_PROVIDER} ${WEB_SEARCH_API_KEY} ${OPENCLAW_AUTH_TOKEN} ${OPENCLAW_VERSION} ${OPENCLAW_NOW}' \
         < "$TEMPLATE" > "$out"
 
     # ---------- Scope to OPENCLAW_LOCAL_AGENT_IDS ----------
@@ -204,6 +207,11 @@ render_template() {
         jq '.channels.discord.enabled = false
             | (.channels.discord.accounts // {}) |= with_entries(.value.enabled = false)' \
            "$out" > "${out}.tmp" && mv "${out}.tmp" "$out"
+    fi
+
+    # Disable web search when no provider or API key is configured.
+    if [ -z "${WEB_SEARCH_PROVIDER:-}" ] || [ -z "${WEB_SEARCH_API_KEY:-}" ]; then
+        jq '.tools.web.search.enabled = false' "$out" > "${out}.tmp" && mv "${out}.tmp" "$out"
     fi
 
     if ! jq empty "$out" 2>/dev/null; then

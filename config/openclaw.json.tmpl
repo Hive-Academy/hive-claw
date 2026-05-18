@@ -93,6 +93,36 @@
     },
     "trustedProxies": ["127.0.0.1", "::1"]
   },
+  "tools": {
+    "web": {
+      "search": {
+        "enabled": true,
+        "provider": "${WEB_SEARCH_PROVIDER}",
+        "apiKey": "${WEB_SEARCH_API_KEY}",
+        "maxResults": 5,
+        "timeoutSeconds": 30,
+        "cacheTtlMinutes": 15
+      },
+      "fetch": {
+        "enabled": true,
+        "readability": true,
+        "timeoutSeconds": 30,
+        "maxChars": 50000
+      }
+    }
+  },
+  "browser": {
+    "enabled": true,
+    "headless": true,
+    "noSandbox": true,
+    "evaluateEnabled": true,
+    "executablePath": "/usr/bin/chromium",
+    "tabCleanup": {
+      "enabled": true,
+      "idleMinutes": 60,
+      "maxTabsPerSession": 4
+    }
+  },
   "plugins": {
     "entries": {
       "bonjour": { "enabled": false },
