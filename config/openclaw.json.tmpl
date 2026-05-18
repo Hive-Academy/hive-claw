@@ -35,24 +35,32 @@
           "token": "${DISCORD_TOKEN_ANUBIS}",
           "enabled": true,
           "name": "Anubis",
-          "healthMonitor": { "enabled": true }
+          "healthMonitor": { "enabled": true },
+          "groupPolicy": "allowlist",
+          "guilds": {
+            "${DISCORD_GUILD_ID}": { "requireMention": true }
+          }
         },
         "horus": {
           "token": "${DISCORD_TOKEN_HORUS}",
           "enabled": true,
           "name": "Horus",
-          "healthMonitor": { "enabled": true }
+          "healthMonitor": { "enabled": true },
+          "groupPolicy": "allowlist",
+          "guilds": {
+            "${DISCORD_GUILD_ID}": { "requireMention": true }
+          }
         },
         "chappie": {
           "token": "${DISCORD_TOKEN_CHAPPIE}",
           "enabled": true,
           "name": "Chappie",
-          "healthMonitor": { "enabled": true }
+          "healthMonitor": { "enabled": true },
+          "groupPolicy": "allowlist",
+          "guilds": {
+            "${DISCORD_GUILD_ID}": { "requireMention": true }
+          }
         }
-      },
-      "groupPolicy": "allowlist",
-      "guilds": {
-        "${DISCORD_GUILD_ID}": { "requireMention": true }
       }
     }
   },
@@ -132,7 +140,8 @@
   "plugins": {
     "entries": {
       "bonjour": { "enabled": false },
-      "openclaw-control-plugin": { "enabled": true }
+      "openclaw-control-plugin": { "enabled": true },
+      "discord": { "enabled": true }
     }
   },
   "commands": {

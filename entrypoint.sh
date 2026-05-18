@@ -299,6 +299,31 @@ jq 'walk(
       else . end
     )' "$CONFIG_FILE" || cat "$CONFIG_FILE"
 
+# ---------- Externalized channel plugins (idempotent) ----------
+# Discord was extracted from openclaw core into `@openclaw/discord` as of
+# openclaw 2026.5.2 (see CHANGELOG). Without it, channels.discord shows up
+# as "not installed" in `openclaw channels list --all` and configured bots
+# never come online — the gateway logs a config warning and keeps running.
+# The plugin uses `workspace:*` deps in its package.json, so a plain
+# `npm install` fails at image build with EUNSUPPORTEDPROTOCOL; the only
+# supported installer is `openclaw plugins install`, which links its peer
+# openclaw at install time. We run it here as the agent user (HOME is
+# already /home/agent) so the package lands in
+# /home/agent/.openclaw/npm/node_modules/@openclaw/discord — under the
+# openclaw-state volume, so the install survives across container restarts
+# and follower machines.
+DISCORD_PLUGIN_VERSION="2026.5.7"
+DISCORD_PLUGIN_DIR="${HOME}/.openclaw/npm/node_modules/@openclaw/discord"
+if [ ! -f "${DISCORD_PLUGIN_DIR}/package.json" ] \
+   || [ "$(jq -r '.version // empty' "${DISCORD_PLUGIN_DIR}/package.json" 2>/dev/null)" != "${DISCORD_PLUGIN_VERSION}" ]; then
+    echo "[entrypoint] Installing @openclaw/discord@${DISCORD_PLUGIN_VERSION} (one-time per volume)"
+    openclaw plugins install "@openclaw/discord@${DISCORD_PLUGIN_VERSION}" --force 2>&1 \
+        | sed 's/^/  /' \
+        || echo "[entrypoint] WARNING: discord plugin install failed; channels.discord will be 'not installed'"
+else
+    echo "[entrypoint] @openclaw/discord@${DISCORD_PLUGIN_VERSION} already installed"
+fi
+
 # Probe whichever provider endpoint we ended up with.
 case "$LLM_PROVIDER" in
     ollama)     PROBE_URL="${OLLAMA_BASE_URL%/}/models" ;;
