@@ -40,19 +40,54 @@ The entrypoint reads `LLM_PROVIDER`, builds the matching provider block via `jq`
 
 ### Gateway tier — Discord (per-persona accounts)
 
-Post-TASK_2026_006 Batch 6, the gateway's openclaw config (`config/openclaw.json.tmpl`) declares **two personas by default** — `anubis` (the default) and `horus` — each with its own Discord bot account under `channels.discord.accounts.<id>`. Each persona connects to Discord with its own bot token; @-mentions are routed per-bot by `bindings[]` matching on `(channel: "discord", accountId: "<id>")`.
+The gateway's openclaw config (`config/openclaw.json.tmpl`) declares **three active personas** — `anubis` (default), `horus`, and `chappie` — each with its own Discord bot account under `channels.discord.accounts.<id>`. Each persona connects to Discord with its own bot token; @-mentions are routed per-bot by `bindings[]` matching on `(channel: "discord", accountId: "<id>")`.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `DISCORD_TOKEN_ANUBIS` | (empty → that bot disabled) | Bot token for the Anubis persona; substituted into `channels.discord.accounts.anubis.token`. |
-| `DISCORD_TOKEN_HORUS` | (empty → that bot disabled) | Bot token for the Horus persona; substituted into `channels.discord.accounts.horus.token`. |
-| `GITHUB_TOKEN` | (empty) | Substituted into `mcp.servers.gh.env.GITHUB_PERSONAL_ACCESS_TOKEN`. Also used as the `gh auth` fallback when no `gh auth login` state is bind-mounted from the host. |
+| `DISCORD_TOKEN_ANUBIS` | (empty → that bot disabled) | Bot token for the Anubis persona; substituted into `channels.discord.accounts.anubis.token`. Typically set on the leader machine. |
+| `DISCORD_TOKEN_HORUS` | (empty → that bot disabled) | Bot token for the Horus persona; substituted into `channels.discord.accounts.horus.token`. Set on the follower machine that hosts Horus. |
+| `DISCORD_TOKEN_CHAPPIE` | (empty → that bot disabled) | Bot token for the Chappie persona; substituted into `channels.discord.accounts.chappie.token`. Set on the machine hosting Chappie; also requires `ZERNIO_API_KEY`. |
+| `GITHUB_TOKEN` | (empty) | Substituted into `mcp.servers.gh.env.GITHUB_PERSONAL_ACCESS_TOKEN`. Also used as the `gh auth` fallback when no `gh auth login` state is bind-mounted from the host. Used by `setupWorktree()` for auto-clone via `GIT_CONFIG_COUNT` env (token never stored in `.git/config`). |
 | `DISCORD_GUILD_ID` | (empty → channel disabled) | Server ID. If empty, the entrypoint disables the gateway's discord channel entirely. |
 | `DISCORD_BOT_TOKEN` | (empty — **deprecated**) | Legacy single-bot token used by the pre-Batch-6 template. **Removal lands in TASK_2026_006 Batch 11**; the variable still flows through `entrypoint.sh`'s `envsubst` for transitional compatibility during the cutover window. New deployments should leave it empty and set the per-persona tokens above. |
 
 If both `DISCORD_GUILD_ID` and `DISCORD_BOT_TOKEN` are empty, the entrypoint disables the gateway's discord channel automatically (legacy jq path — kept until Batch 11 reworks it for per-persona).
 
-Single-machine deployments where only one persona is bound locally (per `OPENCLAW_LOCAL_AGENT_IDS`) can leave the other persona's token empty; openclaw will fail to sign that bot in and log it, but the rendered config still validates and the bound persona works normally.
+Single-machine deployments where only one persona is bound locally (per `OPENCLAW_LOCAL_AGENT_IDS`) can leave the other personas' tokens empty; openclaw will fail to sign those bots in and log it, but the rendered config still validates and the bound persona works normally.
+
+### Gateway tier — Web tools and search
+
+| Variable | Default | What it does |
+|---|---|---|
+| `WEB_SEARCH_PROVIDER` | `tavily` | Search provider for the gateway's `web_search` tool. Supported values: `tavily`, `brave`, `perplexity`, `exa`, `duckduckgo`, `searxng`. Leave empty to disable web search entirely. |
+| `WEB_SEARCH_API_KEY` | (empty → web search disabled) | API key for the chosen provider. If either this or `WEB_SEARCH_PROVIDER` is empty, `entrypoint.sh` disables the `tools.web.search` block in the rendered config via a `jq` step. |
+
+`web_fetch` (URL fetching, readability mode, 50 KB cap) and the `browser` tool (headless Chromium at `/usr/bin/chromium`, no-sandbox mode) are always enabled regardless of the search key. The Dockerfile installs the `chromium` package.
+
+### Gateway tier — Video generation
+
+| Variable | Default | What it does |
+|---|---|---|
+| `GEMINI_API_KEY` | (auto-detected from container env) | Google Gemini API key used by openclaw's Veo video generation. Set it in `.env`; openclaw picks it up automatically from the container environment. No explicit openclaw config field is needed. |
+
+The template sets `agents.defaults.videoGenerationModel: "google/veo-3.1-fast-generate-preview"` and `mediaGenerationAutoProviderFallback: true`. All three agents (anubis, horus, chappie) get the `generate_video` tool when `GEMINI_API_KEY` is present. Available models: `veo-3.1-fast-generate-preview` (default), `veo-3.1-generate-preview`, `veo-3.1-lite-generate-preview`, `veo-3.0-generate-001`, `veo-2.0-generate-001`. To override the model per-agent, edit `agents.defaults.videoGenerationModel` in `openclaw.json.tmpl`.
+
+### Gateway tier — Canva MCP
+
+The Canva MCP server (`mcp.servers.canva` in `openclaw.json.tmpl`) is configured as `npx mcp-remote@latest https://mcp.canva.com/mcp` and requires **no env var**. Authentication is handled by a one-time browser OAuth flow via `mcp-remote` on the host:
+
+```bash
+npx -y mcp-remote@latest https://mcp.canva.com/mcp
+# Complete the Canva OAuth flow in the browser, then Ctrl+C.
+```
+
+Tokens are cached in `~/.mcp-auth/` on the host. `docker-compose.yml` bind-mounts that directory into the gateway container at `/home/agent/.mcp-auth:rw`. The `mcp-remote` process inside the container reads and refreshes the tokens automatically. If you run multiple machines, each machine's host needs its own one-time OAuth step.
+
+### Gateway tier — Zernio MCP (Chappie)
+
+| Variable | Default | What it does |
+|---|---|---|
+| `ZERNIO_API_KEY` | (empty → Zernio MCP disabled) | API key for the Zernio social media MCP server (`mcp.servers.zernio`). Required on the machine hosting Chappie. Get a key at https://zernio.com/agents. |
 
 ### Gateway tier — Ptah / gh
 
@@ -127,13 +162,15 @@ If both `DISCORD_ALLOWED_USER_IDS` and `DISCORD_ALLOWED_GUILD_ID` are empty, the
 
 One env var per agent dir under `local-memory/agents/<id>/`. Default name is `DISCORD_TOKEN_<UPPER_ID>`. Override the env var name via the leader's shared memory at `agents/<id>/discord.json#tokenEnvVar` (served by `GET /api/memories/agents/<id>/discord.json`).
 
+Three active agents in the fleet:
+
 ```
-DISCORD_TOKEN_ANUBIS=...
-DISCORD_TOKEN_AMUN=...
-DISCORD_TOKEN_CHAPPIE=...
+DISCORD_TOKEN_ANUBIS=...    # leader machine (orchestrator)
+DISCORD_TOKEN_HORUS=...     # follower machine (general-purpose)
+DISCORD_TOKEN_CHAPPIE=...   # follower machine (social/content; also needs ZERNIO_API_KEY)
 ```
 
-The bot-bridge skips any agent whose token env var is unset or whose `local-memory/agents/<id>/persona.md` is missing. (Agents on *other* machines don't need a token here.)
+The bot-bridge skips any agent whose token env var is unset or whose `local-memory/agents/<id>/persona.md` is missing. (Agents on *other* machines don't need a token here.) Set only the token(s) for the agent(s) owned by this machine via `OPENCLAW_LOCAL_AGENT_IDS`.
 
 ### Per-agent harness — `shared-specs/memory/agents/<id>/harness.yaml`
 
@@ -176,10 +213,14 @@ The canonical OpenClaw config, rendered through `envsubst` at container start. E
 
 ```json
 {
-  "agents": { ... },         // default model + timeouts
+  "agents": { ... },         // default model + timeouts + videoGenerationModel
   "models": { ... },         // provider configurations
   "channels": { ... },       // discord, telegram, slack, etc.
+  "bindings": [ ... ],       // per-persona discord account routing
+  "mcp": { ... },            // MCP server definitions (gh, zernio, canva)
   "gateway": { ... },        // auth, bind address, controlUi
+  "tools": { ... },          // web search + web fetch configuration
+  "browser": { ... },        // headless Chromium configuration
   "plugins": { ... },        // per-plugin enable/disable
   "commands": { ... },       // command-execution policies
   "update": { ... },         // self-update behavior
@@ -193,13 +234,17 @@ The canonical OpenClaw config, rendered through `envsubst` at container start. E
 "agents": {
   "defaults": {
     "model": { "primary": "${LLM_PROVIDER}/${LLM_MODEL}" },
-    "timeoutSeconds": 600
+    "timeoutSeconds": 600,
+    "videoGenerationModel": "google/veo-3.1-fast-generate-preview",
+    "mediaGenerationAutoProviderFallback": true
   }
 }
 ```
 
 - `model.primary`: rendered as `<LLM_PROVIDER>/<LLM_MODEL>`. The provider name must match the single key produced in `models.providers` (the entrypoint guarantees this).
 - `timeoutSeconds`: hard cap on a single agent run. Default 600 (10 min). Increase for long tool chains.
+- `videoGenerationModel`: Google Veo model used by the `generate_video` tool. Default `veo-3.1-fast-generate-preview`. Available: `veo-3.1-fast-generate-preview`, `veo-3.1-generate-preview`, `veo-3.1-lite-generate-preview`, `veo-3.0-generate-001`, `veo-2.0-generate-001`. `GEMINI_API_KEY` must be in the container environment for Veo to authenticate.
+- `mediaGenerationAutoProviderFallback`: when `true`, openclaw tries alternative providers if the primary Veo call fails.
 
 ### `models.providers` — assembled at runtime
 
@@ -303,6 +348,77 @@ To disable more plugins (e.g. `browser` if you don't need playwright):
 
 This will also slim down startup time and image size on rebuild.
 
+### `tools.web` — web search and fetch
+
+```json
+"tools": {
+  "web": {
+    "search": {
+      "enabled": true,
+      "provider": "${WEB_SEARCH_PROVIDER}",
+      "apiKey": "${WEB_SEARCH_API_KEY}",
+      "maxResults": 5,
+      "timeoutSeconds": 30,
+      "cacheTtlMinutes": 15
+    },
+    "fetch": {
+      "enabled": true,
+      "readability": true,
+      "timeoutSeconds": 30,
+      "maxChars": 50000
+    }
+  }
+}
+```
+
+`entrypoint.sh` disables `tools.web.search` via a `jq` patch when `WEB_SEARCH_PROVIDER` or `WEB_SEARCH_API_KEY` is empty. `tools.web.fetch` is always on.
+
+### `browser` — headless Chromium
+
+```json
+"browser": {
+  "enabled": true,
+  "headless": true,
+  "noSandbox": true,
+  "evaluateEnabled": true,
+  "executablePath": "/usr/bin/chromium",
+  "tabCleanup": {
+    "enabled": true,
+    "idleMinutes": 60,
+    "maxTabsPerSession": 4
+  }
+}
+```
+
+`noSandbox: true` is required in Docker because the container doesn't have the kernel capabilities for Chromium's sandbox. `chromium` is installed in the Dockerfile via `apk add chromium` (or `apt-get install chromium`).
+
+### `mcp.servers` — MCP server definitions
+
+```json
+"mcp": {
+  "servers": {
+    "gh": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}" }
+    },
+    "zernio": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote@latest", "https://mcp.zernio.com/mcp",
+               "--header", "Authorization: Bearer ${ZERNIO_API_KEY}"]
+    },
+    "canva": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote@latest", "https://mcp.canva.com/mcp"]
+    }
+  }
+}
+```
+
+- **`gh`** — GitHub MCP server. Requires `GITHUB_TOKEN`. Available to all agents.
+- **`zernio`** — Zernio social media MCP server. Requires `ZERNIO_API_KEY`. Used by Chappie.
+- **`canva`** — Canva design MCP server via `mcp-remote`. No API key; uses OAuth token cache in `/home/agent/.mcp-auth/` (bind-mounted from `~/.mcp-auth/` on the host). Requires the [one-time host OAuth step](SETUP.md#canva-mcp-one-time-oauth-gateway-machine).
+
 ### `commands.useAccessGroups`
 
 ```json
@@ -341,11 +457,13 @@ Container init. Don't edit unless you know what you're doing. Key behaviors:
 To add new env vars to envsubst, update the allow-list:
 
 ```bash
-envsubst '${LLM_PROVIDER} ${LLM_MODEL} ${LLM_PROVIDERS_JSON} ${DISCORD_GUILD_ID} ${DISCORD_BOT_TOKEN} ${OPENCLAW_AUTH_TOKEN} ${OPENCLAW_VERSION} ${OPENCLAW_NOW} ${YOUR_NEW_VAR}' \
+envsubst '${LLM_PROVIDER} ${LLM_MODEL} ${LLM_PROVIDERS_JSON} ${DISCORD_GUILD_ID} ${DISCORD_BOT_TOKEN} ${DISCORD_TOKEN_ANUBIS} ${DISCORD_TOKEN_HORUS} ${DISCORD_TOKEN_CHAPPIE} ${OPENCLAW_AUTH_TOKEN} ${OPENCLAW_VERSION} ${OPENCLAW_NOW} ${WEB_SEARCH_PROVIDER} ${WEB_SEARCH_API_KEY} ${ZERNIO_API_KEY} ${GITHUB_TOKEN} ${YOUR_NEW_VAR}' \
     < "$TEMPLATE" > "$CONFIG_FILE"
 ```
 
 Otherwise envsubst will leave the `${YOUR_NEW_VAR}` literal in the output.
+
+`entrypoint.sh` also exports `WEB_SEARCH_PROVIDER` and `WEB_SEARCH_API_KEY` and runs a `jq` step that disables `tools.web.search` when either is unset or empty — so the rendered config always has a valid (possibly disabled) search block.
 
 ---
 

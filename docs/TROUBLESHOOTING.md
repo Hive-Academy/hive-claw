@@ -675,6 +675,91 @@ This was R5 in `.ptah/specs/TASK_2026_002/spike-findings.md` and the bind-mount 
 
 ---
 
+## Web search, browser, and video generation
+
+### Symptom: web search tool not available or returns "search disabled"
+
+`entrypoint.sh` disables `tools.web.search` when either `WEB_SEARCH_PROVIDER` or `WEB_SEARCH_API_KEY` is unset. Check the rendered config:
+
+```bash
+docker compose exec openclaw-gateway cat /home/agent/.openclaw/openclaw.json \
+  | jq '.tools.web.search.enabled'
+# false → one of the env vars is missing
+```
+
+Fix: set both in `.env` and `docker compose up -d`.
+
+```bash
+grep 'WEB_SEARCH' .env
+# Both lines must be non-empty
+```
+
+### Symptom: browser tool fails — "chromium not found" or "no such file"
+
+The Dockerfile installs `chromium` at `/usr/bin/chromium`. If you're running an old image that predates the Chromium addition, rebuild:
+
+```bash
+docker compose up -d --build
+docker compose exec openclaw-gateway /usr/bin/chromium --version
+# Should print the version
+```
+
+The template sets `browser.noSandbox: true`. If you've altered this and the container lacks the necessary kernel capabilities, restoring `noSandbox: true` is the fix.
+
+### Symptom: video generation fails — "provider not configured" or empty response
+
+`generate_video` requires `GEMINI_API_KEY`. Check:
+
+```bash
+docker compose exec openclaw-gateway printenv GEMINI_API_KEY | wc -c
+# 0 → key is missing; add it to .env and docker compose up -d
+```
+
+If the key is present but calls still fail, verify the key is valid for the Gemini API (Google AI Studio → API keys). The `mediaGenerationAutoProviderFallback: true` setting means openclaw will try alternative providers before failing, but if no provider has a valid key the call will error.
+
+### Symptom: Canva MCP auth expired — tools return 401 or "not authenticated"
+
+The `mcp-remote` OAuth token cache at `~/.mcp-auth/` on the host has expired. Re-run the one-time auth:
+
+```bash
+npx -y mcp-remote@latest https://mcp.canva.com/mcp
+# Complete the Canva OAuth flow in the browser, then Ctrl+C.
+```
+
+No container restart is needed — the gateway's `mcp-remote` process reads the updated cache. If the MCP server is still failing after re-auth:
+
+```bash
+docker compose restart openclaw-gateway
+```
+
+To confirm the mount is present:
+
+```bash
+docker compose exec openclaw-gateway ls -la /home/agent/.mcp-auth/
+# Should list the cached token files
+```
+
+If the directory is empty or the mount is missing, check that `${HOME}/.mcp-auth` exists on the host and is bind-mounted in `docker-compose.yml`.
+
+### Symptom: auto-clone fails on first dispatch — "worktree: clone failed"
+
+`setupWorktree()` auto-clones the repo when the workspace path is missing. Common failure causes:
+
+1. **`GITHUB_TOKEN` missing or insufficient** — the token needs at minimum `repo:read` scope. Check `.env`: `grep GITHUB_TOKEN .env`. If it's empty, set it and `docker compose up -d`.
+2. **Wrong repo slug in the project record** — check the `projects` table: `docker compose exec openclaw-daemon sqlite3 /data/specs.db "SELECT slug, repo_slug FROM projects;"`. If `repo_slug` is null or malformed, update it via the dashboard or SQL.
+3. **Target path not writable** — the daemon runs as uid 1000. Check that `OPENCLAW_PROJECTS_DIR` (default `${HOME}/projects`) is writable by uid 1000 from inside the container.
+
+The dispatch log records the clone attempt:
+
+```bash
+docker compose exec openclaw-daemon sqlite3 /data/specs.db \
+  "SELECT ts, level, message FROM dispatch_log
+    WHERE dispatch_id='<id>' ORDER BY ts;"
+# Look for: [worktree] auto-cloning ... or [worktree] clone failed
+```
+
+---
+
 ## Last resorts
 
 ### Nuclear reset (loses bot memory)

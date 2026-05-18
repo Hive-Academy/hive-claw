@@ -404,6 +404,145 @@ When to run it: after any change to `bot-bridge/src/mcp/mcpManager.ts`, before f
 
 ---
 
+## 11. Web search, browser, and fetch tools
+
+### Verifying web search
+
+Web search is enabled when both `WEB_SEARCH_PROVIDER` and `WEB_SEARCH_API_KEY` are set in `.env`. The gateway renders the `tools.web.search` block; `entrypoint.sh` disables it via `jq` when either variable is empty.
+
+To confirm search is active, check the rendered config inside the container:
+
+```bash
+docker compose exec openclaw-gateway cat /home/agent/.openclaw/openclaw.json \
+  | jq '.tools.web.search'
+# Expect: { "enabled": true, "provider": "tavily", ... }
+# If "enabled": false — check that WEB_SEARCH_PROVIDER and WEB_SEARCH_API_KEY are set in .env
+```
+
+To change the provider: update `WEB_SEARCH_PROVIDER` and `WEB_SEARCH_API_KEY` in `.env`, then `docker compose up -d` (no rebuild needed).
+
+Supported providers: `tavily`, `brave`, `perplexity`, `exa`, `duckduckgo`, `searxng`.
+
+### Verifying browser tool
+
+The browser tool (headless Chromium) is always on. The `chromium` package is installed in the Dockerfile. To confirm Chromium is reachable:
+
+```bash
+docker compose exec openclaw-gateway /usr/bin/chromium --version
+# Expect: Chromium <version>
+```
+
+The template sets `noSandbox: true` because the container runs without kernel capabilities for sandboxing. This is the standard configuration for Docker-hosted Chromium.
+
+### Verifying web_fetch
+
+`web_fetch` is always enabled (`tools.web.fetch.enabled: true` in the rendered config). It uses readability mode with a 50 KB character cap and a 30 s timeout. No env var needed.
+
+---
+
+## 12. Video generation (Google Veo)
+
+### Verifying Veo is configured
+
+```bash
+docker compose exec openclaw-gateway cat /home/agent/.openclaw/openclaw.json \
+  | jq '.agents.defaults | {videoGenerationModel, mediaGenerationAutoProviderFallback}'
+# Expect:
+# {
+#   "videoGenerationModel": "google/veo-3.1-fast-generate-preview",
+#   "mediaGenerationAutoProviderFallback": true
+# }
+```
+
+### Verifying GEMINI_API_KEY is present
+
+```bash
+docker compose exec openclaw-gateway printenv GEMINI_API_KEY | head -c 8
+# Should print the first 8 chars of your key (non-empty)
+```
+
+If empty, set `GEMINI_API_KEY=<your key>` in `.env` and `docker compose up -d`.
+
+### Overriding the model per-deployment
+
+Edit `agents.defaults.videoGenerationModel` in `config/openclaw.json.tmpl` and rebuild:
+
+```bash
+# Available: veo-3.1-fast-generate-preview (default), veo-3.1-generate-preview,
+#            veo-3.1-lite-generate-preview, veo-3.0-generate-001, veo-2.0-generate-001
+docker compose up -d --build
+```
+
+---
+
+## 13. Canva MCP
+
+### Checking auth token cache
+
+The Canva MCP server authenticates via `mcp-remote`'s OAuth cache at `~/.mcp-auth/` on the host (bind-mounted into the gateway container):
+
+```bash
+ls -la ~/.mcp-auth/
+# Should show cache files for mcp.canva.com
+```
+
+### Re-auth when tokens expire
+
+If the Canva MCP starts failing (tool calls return auth errors), re-run the one-time OAuth on the host:
+
+```bash
+npx -y mcp-remote@latest https://mcp.canva.com/mcp
+# Complete the OAuth flow in the browser, then Ctrl+C.
+# Tokens are refreshed in ~/.mcp-auth/ automatically.
+```
+
+No container restart is needed — the gateway's `mcp-remote` process reads the updated token cache. If issues persist, restart the gateway:
+
+```bash
+docker compose restart openclaw-gateway
+```
+
+### Confirming Canva server is configured
+
+```bash
+docker compose exec openclaw-gateway cat /home/agent/.openclaw/openclaw.json \
+  | jq '.mcp.servers.canva'
+# Expect: { "command": "npx", "args": ["-y", "mcp-remote@latest", "https://mcp.canva.com/mcp"], ... }
+```
+
+---
+
+## 14. Auto-clone on first dispatch (TASK_2026_007 Stage 0.5)
+
+`setupWorktree()` in `daemon/src/harness/worktree.ts` now auto-clones a GitHub repo if the workspace path doesn't exist. The clone uses `GITHUB_TOKEN` via transient `GIT_CONFIG_COUNT` env variables — the token is never written to `.git/config`.
+
+### What the dispatch log shows
+
+When auto-clone fires, the dispatch log entry for that dispatch will contain:
+
+```
+[worktree] workspace not found at <path> — auto-cloning <repo>
+[worktree] clone complete: <path>
+```
+
+### Diagnosing auto-clone failures
+
+Auto-clone fails when:
+
+- `GITHUB_TOKEN` is empty or lacks read access to the repo — check `.env`
+- The project's `repoSlug` field is missing or malformed — check the `projects` row: `SELECT repo_slug FROM projects WHERE slug='<slug>';`
+- The target path's parent directory is not writable by uid 1000 inside the container — check the `OPENCLAW_PROJECTS_DIR` bind-mount
+
+```bash
+# Check the dispatch log for clone errors:
+docker compose exec openclaw-daemon sqlite3 /data/specs.db \
+  "SELECT ts, level, message FROM dispatch_log
+    WHERE dispatch_id='<id>' AND message LIKE '%worktree%'
+    ORDER BY ts;"
+```
+
+---
+
 ## Three-container deployment (TASK_2026_006 Batch 5b)
 
 The openclaw stack runs as **three independent compose services**:
