@@ -140,7 +140,17 @@ export async function readProject(slug: string): Promise<Project | null> {
   const projects = await listProjects();
   const match = projects.find((p) => p.slug === slug);
   if (!match) return null;
-  return { slug: match.slug, path: match.path, hasSpecs: true };
+  // v0 of the worktree hook is leader-only: followers don't synthesize
+  // `githubRepo` / `defaultBranch` from the aggregated list (those fields
+  // aren't on /api/projects yet). Setting null keeps follower-side dispatch
+  // on the pre-worktree code path — same behaviour as a non-github project.
+  return {
+    slug: match.slug,
+    path: match.path,
+    hasSpecs: true,
+    githubRepo: null,
+    defaultBranch: null,
+  };
 }
 
 export async function listTasksForProject(slug: string): Promise<TaskSummary[]> {

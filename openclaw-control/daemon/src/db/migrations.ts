@@ -26,7 +26,7 @@
 
 import type { Database } from 'better-sqlite3';
 import { openOnce, closeAll } from './client.js';
-import { CURRENT_VERSION, SCHEMA_V1, SCHEMA_V3 } from './schema.js';
+import { CURRENT_VERSION, SCHEMA_V1, SCHEMA_V3, SCHEMA_V4 } from './schema.js';
 
 function hasSchemaVersionTable(db: Database): boolean {
   const row = db
@@ -110,6 +110,27 @@ function applyV3(db: Database): void {
 }
 
 /**
+ * Apply the v3 → v4 step: additive ALTER TABLE statements adding
+ * `github_repo` and `default_branch` columns to `projects`. Backs the
+ * agent-as-developer dispatcher worktree hook. Each ALTER runs inside the
+ * same transaction as the version-row insert.
+ */
+function applyV4(db: Database): void {
+  const apply = db.transaction((statements: readonly string[]) => {
+    for (let i = 0; i < statements.length; i++) {
+      try {
+        db.exec(statements[i]);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(`migration v4 step ${i + 1}/${statements.length} failed: ${message}`);
+      }
+    }
+    db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(4);
+  });
+  apply(SCHEMA_V4);
+}
+
+/**
  * Apply all missing migrations up to CURRENT_VERSION. Idempotent.
  *
  * Each step's CREATE/DROP and the version-row insert run in a single
@@ -131,7 +152,10 @@ export function runMigrations(db: Database): void {
     applyV3(db);
     have = 3;
   }
-  // Future: if (have < 4) applyV4(db); ...
+  if (have < 4) {
+    applyV4(db);
+    have = 4;
+  }
 }
 
 /**

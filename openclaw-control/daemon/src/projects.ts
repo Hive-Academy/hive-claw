@@ -20,6 +20,16 @@ export interface Project {
    */
   path: string;
   hasSpecs: boolean;
+  /**
+   * Canonical GitHub repo "owner/name" the dispatcher should treat as a
+   * worktree base. When set AND `path` is a valid git working dir, the
+   * invoker creates a per-task worktree under `<path>/.worktrees/<task-id>`
+   * on branch `agent/<agent-id>/<task-id>` and overrides ptah's `cwd` to
+   * that path. When null, dispatch behaves exactly as before (no worktree).
+   */
+  githubRepo: string | null;
+  /** Base branch the worktree is cut from. Falls back to `main` at the invoker. */
+  defaultBranch: string | null;
 }
 
 async function exists(p: string): Promise<boolean> {
@@ -65,7 +75,13 @@ export async function discoverProjects(): Promise<Project[]> {
     const workspace = row.workspace && row.workspace.startsWith('/')
       ? row.workspace
       : await resolveWorkspace(row.slug);
-    projects.push({ slug: row.slug, path: workspace, hasSpecs: true });
+    projects.push({
+      slug: row.slug,
+      path: workspace,
+      hasSpecs: true,
+      githubRepo: row.githubRepo,
+      defaultBranch: row.defaultBranch,
+    });
   }
   return projects.sort((a, b) => a.slug.localeCompare(b.slug));
 }
@@ -76,7 +92,13 @@ export async function getProject(slug: string): Promise<Project | null> {
   const workspace = row.workspace && row.workspace.startsWith('/')
     ? row.workspace
     : await resolveWorkspace(slug);
-  return { slug: row.slug, path: workspace, hasSpecs: true };
+  return {
+    slug: row.slug,
+    path: workspace,
+    hasSpecs: true,
+    githubRepo: row.githubRepo,
+    defaultBranch: row.defaultBranch,
+  };
 }
 
 /**
@@ -97,5 +119,12 @@ export const listProjects = discoverProjects;
 export async function ensureProject(slug: string): Promise<Project> {
   ProjectsRepo.upsert({ slug, name: slug });
   const workspace = await resolveWorkspace(slug);
-  return { slug, path: workspace, hasSpecs: true };
+  const row = ProjectsRepo.get(slug);
+  return {
+    slug,
+    path: workspace,
+    hasSpecs: true,
+    githubRepo: row?.githubRepo ?? null,
+    defaultBranch: row?.defaultBranch ?? null,
+  };
 }

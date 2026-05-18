@@ -147,6 +147,15 @@ services:
       # Read-only — the daemon only tails them. Without this mount the
       # sessions endpoint 500s with ENOENT.
       - ${HOME}/.claude/projects:/home/agent/.claude/projects:ro
+      # Project workspaces (TASK_2026_007 Stage 0.5). Identity-mounted at the
+      # same path on host and container so:
+      #   - daemon's setupWorktree() can run `git worktree add` against the
+      #     project clone at <OPENCLAW_PROJECTS_DIR>/<project>/
+      #   - ptah on the host receives the same absolute path as `cwd` and
+      #     sees the same files (the bridge does not need to translate).
+      # When unset the default `${HOME}/projects` keeps the mount declaration
+      # valid even on hosts that haven't adopted the new flow.
+      - ${OPENCLAW_PROJECTS_DIR:-${HOME}/projects}:${OPENCLAW_PROJECTS_DIR:-${HOME}/projects}:rw
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:7878/api/health || exit 1"]
       interval: 10s

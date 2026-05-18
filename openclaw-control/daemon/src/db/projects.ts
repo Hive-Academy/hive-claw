@@ -3,6 +3,11 @@
  *
  * Prepared statements are cached at module load (lazy via `getDb()`)
  * per implementation-plan.md §3 line 410.
+ *
+ * v4 additions: `github_repo` + `default_branch` — set when the project is
+ * a real git repo the invoker should treat as a worktree base. Both null on
+ * existing rows (back-compat); the invoker only branches on a non-null
+ * `github_repo`.
  */
 
 import type { Statement } from 'better-sqlite3';
@@ -12,6 +17,8 @@ export interface ProjectRow {
   slug: string;
   name: string;
   workspace: string | null;
+  githubRepo: string | null;
+  defaultBranch: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -20,12 +27,20 @@ interface RawProjectRow {
   slug: string;
   name: string;
   workspace: string | null;
+  github_repo: string | null;
+  default_branch: string | null;
   created_at: string;
   updated_at: string;
 }
 
 interface Statements {
-  upsert: Statement<{ slug: string; name: string; workspace: string | null }>;
+  upsert: Statement<{
+    slug: string;
+    name: string;
+    workspace: string | null;
+    github_repo: string | null;
+    default_branch: string | null;
+  }>;
   get: Statement<{ slug: string }>;
   list: Statement<[]>;
 }
@@ -37,15 +52,17 @@ function stmts(): Statements {
   const db = getDb();
   cached = {
     upsert: db.prepare(`
-      INSERT INTO projects (slug, name, workspace, updated_at)
-      VALUES (@slug, @name, @workspace, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      INSERT INTO projects (slug, name, workspace, github_repo, default_branch, updated_at)
+      VALUES (@slug, @name, @workspace, @github_repo, @default_branch, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
       ON CONFLICT(slug) DO UPDATE SET
         name = excluded.name,
         workspace = excluded.workspace,
+        github_repo = excluded.github_repo,
+        default_branch = excluded.default_branch,
         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
     `),
-    get: db.prepare(`SELECT slug, name, workspace, created_at, updated_at FROM projects WHERE slug = @slug`),
-    list: db.prepare(`SELECT slug, name, workspace, created_at, updated_at FROM projects ORDER BY slug ASC`),
+    get: db.prepare(`SELECT slug, name, workspace, github_repo, default_branch, created_at, updated_at FROM projects WHERE slug = @slug`),
+    list: db.prepare(`SELECT slug, name, workspace, github_repo, default_branch, created_at, updated_at FROM projects ORDER BY slug ASC`),
   };
   return cached;
 }
@@ -55,6 +72,8 @@ function toProjectRow(raw: RawProjectRow): ProjectRow {
     slug: raw.slug,
     name: raw.name,
     workspace: raw.workspace,
+    githubRepo: raw.github_repo,
+    defaultBranch: raw.default_branch,
     createdAt: raw.created_at,
     updatedAt: raw.updated_at,
   };
@@ -64,6 +83,8 @@ export interface UpsertProjectInput {
   slug: string;
   name: string;
   workspace?: string | null;
+  githubRepo?: string | null;
+  defaultBranch?: string | null;
 }
 
 export const ProjectsRepo = {
@@ -72,6 +93,8 @@ export const ProjectsRepo = {
       slug: opts.slug,
       name: opts.name,
       workspace: opts.workspace ?? null,
+      github_repo: opts.githubRepo ?? null,
+      default_branch: opts.defaultBranch ?? null,
     });
   },
 
