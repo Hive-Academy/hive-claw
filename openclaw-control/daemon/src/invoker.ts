@@ -3,6 +3,7 @@ import type { Project } from './projects.js';
 import type { TaskSummary } from './phase.js';
 import { broadcast } from './sse.js';
 import { spawnPtahForAgent } from './harness/ptahLauncher.js';
+import { setupWorktree } from './harness/worktree.js';
 import { DispatchRepo } from './db/index.js';
 import * as leaderClient from './leaderClient.js';
 
@@ -79,9 +80,24 @@ export async function invokeClaudeForTask(opts: InvokeOptions): Promise<InvokeRe
     broadcast('invoker.started', { taskId: opts.task.id, agentId: opts.agentId });
     logToDispatch(opts.dispatchId, `invoker started agent=${opts.agentId}`);
 
+    // Worktree hook — when the project is a registered github repo, set up a
+    // per-task git worktree on a fresh branch and use it as ptah's cwd. When
+    // the project is non-github (or any git/FS step fails), this is a no-op
+    // that returns project.path unchanged. See harness/worktree.ts.
+    const wt = await setupWorktree(opts.project, opts.agentId, opts.task.id);
+    logToDispatch(opts.dispatchId, wt.note, wt.worktreePath ? 'info' : 'warn');
+    if (wt.worktreePath) {
+      broadcast('invoker.worktree', {
+        taskId: opts.task.id,
+        agentId: opts.agentId,
+        path: wt.worktreePath,
+        branch: wt.branch,
+      });
+    }
+
     const result = await spawnPtahForAgent({
       agentId: opts.agentId,
-      cwd: opts.project.path,
+      cwd: wt.cwd,
       prompt: opts.prompt,
       taskId: opts.task.id,
       dispatchId: opts.dispatchId,

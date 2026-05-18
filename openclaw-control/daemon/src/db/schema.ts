@@ -25,7 +25,7 @@
  *        runaway-loop CD2 from code-logic-review.md.
  */
 
-export const CURRENT_VERSION = 3;
+export const CURRENT_VERSION = 4;
 
 /**
  * v3 statements — additive migration introducing the `extension_install_requests`
@@ -38,6 +38,28 @@ export const CURRENT_VERSION = 3;
  *   DROP TABLE IF EXISTS extension_install_requests;
  *   DELETE FROM schema_version WHERE version = 3;
  */
+/**
+ * v4 statements — additive migration adding the two columns needed for the
+ * agent-as-developer dispatcher worktree hook (Stage 0.5 of TASK_2026_007).
+ *
+ *   github_repo     — canonical "owner/name". When set, the invoker creates
+ *                     a per-task git worktree under `<project.workspace>/.worktrees/<task-id>`
+ *                     on branch `agent/<agent-id>/<task-id>` and overrides
+ *                     the spawned ptah `cwd` to that worktree. When null,
+ *                     dispatch behaves exactly as before (back-compat).
+ *   default_branch  — base branch the worktree is cut from. Defaults to
+ *                     `main` at the invoker layer when this column is null.
+ *
+ * Reversibility (operator backout):
+ *   ALTER TABLE projects DROP COLUMN default_branch;
+ *   ALTER TABLE projects DROP COLUMN github_repo;
+ *   DELETE FROM schema_version WHERE version = 4;
+ */
+export const SCHEMA_V4: readonly string[] = [
+  `ALTER TABLE projects ADD COLUMN github_repo TEXT`,
+  `ALTER TABLE projects ADD COLUMN default_branch TEXT`,
+];
+
 export const SCHEMA_V3: readonly string[] = [
   `CREATE TABLE extension_install_requests (
      id                  INTEGER PRIMARY KEY AUTOINCREMENT,

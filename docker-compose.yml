@@ -48,6 +48,8 @@ services:
       DISCORD_TOKEN_HORUS: ${DISCORD_TOKEN_HORUS:-}
       DISCORD_TOKEN_CHAPPIE: ${DISCORD_TOKEN_CHAPPIE:-}
       ZERNIO_API_KEY: ${ZERNIO_API_KEY:-}
+      WEB_SEARCH_PROVIDER: ${WEB_SEARCH_PROVIDER:-}
+      WEB_SEARCH_API_KEY: ${WEB_SEARCH_API_KEY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     security_opt:
@@ -79,6 +81,10 @@ services:
       # The daemon shares the same mount so the local memory backend
       # (resolveBackend) can read/write private agent files.
       - ${OPENCLAW_LOCAL_MEMORY_DIR:-${HOME}/.claude/local-memory}:/home/agent/.claude/local-memory:rw
+      # mcp-remote OAuth token cache — populated by a one-time `npx mcp-remote`
+      # run on the host (see .env.example §"Canva MCP"). mcp-remote inside the
+      # container reads/refreshes tokens from this path automatically.
+      - ${HOME}/.mcp-auth:/home/agent/.mcp-auth:rw
       # Agent workspaces — bind-mounted so file writes (drafts, canvas, etc.)
       # are visible on the host filesystem. See docs/ARCHITECTURE.md line 163.
       - ${WORKSPACE_DIR:-${HOME}/projects}:/home/agent/.openclaw/workspace:rw
@@ -150,8 +156,19 @@ services:
       # The daemon's memory.ts resolveBackend() routes private agent files to
       # this path; without the mount, PUTs to persona.md / secrets.md fail.
       - ${OPENCLAW_LOCAL_MEMORY_DIR:-${HOME}/.claude/local-memory}:/home/agent/.claude/local-memory:rw
-      # Host project workspace — shared with gateway so both tiers see the same files.
-      - ${WORKSPACE_DIR:-${HOME}/projects}:/workspace:rw
+      # Claude Code session JSONLs (used by /api/sessions + watcher.ts).
+      # Read-only — the daemon only tails them. Without this mount the
+      # sessions endpoint 500s with ENOENT.
+      - ${HOME}/.claude/projects:/home/agent/.claude/projects:ro
+      # Project workspaces (TASK_2026_007 Stage 0.5). Identity-mounted at the
+      # same path on host and container so:
+      #   - daemon's setupWorktree() can run `git worktree add` against the
+      #     project clone at <OPENCLAW_PROJECTS_DIR>/<project>/
+      #   - ptah on the host receives the same absolute path as `cwd` and
+      #     sees the same files (the bridge does not need to translate).
+      # When unset the default `${HOME}/projects` keeps the mount declaration
+      # valid even on hosts that haven't adopted the new flow.
+      - ${OPENCLAW_PROJECTS_DIR:-${HOME}/projects}:${OPENCLAW_PROJECTS_DIR:-${HOME}/projects}:rw
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:7878/api/health || exit 1"]
       interval: 10s

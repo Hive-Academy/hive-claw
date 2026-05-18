@@ -7,11 +7,11 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { config } from './config.js';
-import { listSessions, tailSession, newestSessionForProject } from './sessions.js';
+import { agentActivity, listSessions, tailSession, newestSessionForProject } from './sessions.js';
 import { attachSse, broadcast } from './sse.js';
 import { registerAuth, requireAuth, currentUser, isOAuthConfigured } from './auth.js';
 import { MemoryError } from './memory.js';
-import { publishHandoff, publishHarnessSync } from './bus.js';
+import { publishAgentStatus, publishHandoff, publishHarnessSync } from './bus.js';
 import { harnessHash } from './harness/types.js';
 import { materializeAgent, materializeAll } from './harness/materialize.js';
 import { spawnPtahForAgent } from './harness/ptahLauncher.js';
@@ -19,6 +19,7 @@ import {
   PRIVATE_AGENT_FILES,
   isTerminalState,
   getReadOnlyDb,
+  ProjectsRepo,
   UnknownDispatchError,
   DispatchStateError,
   InstallRequestsRepo,
@@ -187,6 +188,39 @@ export function buildApp() {
   // follower share the same handler shape — the facade dispatches to repos
   // on the leader and to leaderClient HTTP relays on a follower (CD1 fix).
   app.get('/api/projects', { preHandler: guard }, async () => storage.listProjects());
+
+  // Create / upsert a project. Bearer-authed (dashboard cookie OR plugin
+  // Bearer): the dashboard "New project" form and the plugin's
+  // `create_project` tool both land here. Leader-only.
+  app.post<{
+    Body: { slug?: unknown; name?: unknown; workspace?: unknown };
+  }>('/api/projects', { preHandler: guard }, async (req, reply) => {
+    if (!config.leader) {
+      return reply.code(409).send({ error: 'projects can only be created on the leader' });
+    }
+    const body = req.body ?? {};
+    const slug = typeof body.slug === 'string' ? body.slug.trim() : '';
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    const workspace =
+      typeof body.workspace === 'string' && body.workspace.trim().length > 0
+        ? body.workspace.trim()
+        : null;
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(slug)) {
+      return reply
+        .code(400)
+        .send({ error: 'slug must match [a-z0-9][a-z0-9-]{0,63} (kebab-case, ≤64 chars)' });
+    }
+    if (name.length === 0 || name.length > 200) {
+      return reply.code(400).send({ error: 'name required (1–200 chars)' });
+    }
+    if (workspace && !workspace.startsWith('/')) {
+      return reply.code(400).send({ error: 'workspace must be an absolute path' });
+    }
+    ProjectsRepo.upsert({ slug, name, workspace });
+    const row = ProjectsRepo.get(slug);
+    broadcast('project.created', { slug, name, workspace: workspace ?? null });
+    return reply.code(201).send(row);
+  });
 
   app.get<{ Params: { slug: string } }>(
     '/api/projects/:slug/tasks',
@@ -674,6 +708,50 @@ export function buildApp() {
   // --- agents -----------------------------------------------------------
   app.get('/api/agents', { preHandler: guard }, async () => storage.listAgentsList());
 
+  // Per-agent activity summary — the dashboard Agents page uses this to
+  // show "Now: <tool> · Ns ago" next to each agent. Read from the agent's
+  // newest session JSONL inside the gateway's openclaw-state volume.
+  app.get<{ Params: { id: string } }>(
+    '/api/agents/:id/activity',
+    { preHandler: guard },
+    async (req, reply) => {
+      const id = req.params.id;
+      if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) {
+        return reply.code(400).send({ error: 'invalid agent id' });
+      }
+      return agentActivity(id);
+    },
+  );
+
+  // Plugin heartbeat: the openclaw-control-plugin POSTs here every ~30s for
+  // each agent id in `OPENCLAW_LOCAL_AGENT_IDS` so the dashboard can show
+  // "online" instead of "unknown". Replaces the bot-bridge Redis publish
+  // that disappeared with the cutover. Bearer-only.
+  app.post<{
+    Params: { id: string };
+    Body: { status?: unknown; busyWith?: unknown };
+  }>('/api/agents/:id/heartbeat', { preHandler: guard }, async (req, reply) => {
+    const id = req.params.id;
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) {
+      return reply.code(400).send({ error: 'invalid agent id' });
+    }
+    const body = req.body ?? {};
+    const rawStatus = typeof body.status === 'string' ? body.status : 'online';
+    const status: 'online' | 'busy' | 'offline' =
+      rawStatus === 'busy' || rawStatus === 'offline' ? rawStatus : 'online';
+    const busyWith =
+      typeof body.busyWith === 'string' && body.busyWith.trim().length > 0
+        ? body.busyWith.slice(0, 200)
+        : undefined;
+    await publishAgentStatus({
+      agentId: id,
+      status,
+      busyWith,
+      lastSeen: new Date().toISOString(),
+    });
+    return reply.send({ ok: true });
+  });
+
   // POST /api/agents/:id/harness/sync — TASK_2026_002 B3.
   //
   // Re-reads the persona's harness.yaml from shared memory, computes the
@@ -706,11 +784,11 @@ export function buildApp() {
   // --- sessions ---------------------------------------------------------
   app.get('/api/sessions', { preHandler: guard }, async () => listSessions());
 
-  app.get<{ Querystring: { lines?: string }; Params: { projectKey: string } }>(
-    '/api/sessions/:projectKey/latest',
+  app.get<{ Querystring: { lines?: string }; Params: { agentId: string } }>(
+    '/api/sessions/:agentId/latest',
     { preHandler: guard },
     async (req, reply) => {
-      const sess = await newestSessionForProject(req.params.projectKey);
+      const sess = await newestSessionForProject(req.params.agentId);
       if (!sess) return reply.code(404).send({ error: 'no session' });
       const events = await tailSession(sess.filePath, Number(req.query.lines ?? 50));
       return { session: sess, events };
@@ -1196,6 +1274,21 @@ export function buildApp() {
     '/api/extensions/install-requests/pending',
     { preHandler: guard },
     async () => ({ requests: InstallRequestsRepo.listPending() }),
+  );
+
+  // Terminal-state history (approved/rejected/applied/failed), newest-first.
+  // The dashboard "History" tab uses this to surface failed installs which
+  // would otherwise vanish from the pending list with no operator feedback.
+  app.get<{ Querystring: { limit?: string } }>(
+    '/api/extensions/install-requests/history',
+    { preHandler: guard },
+    async (req) => {
+      const limitRaw = req.query?.limit;
+      const limit = limitRaw ? Number(limitRaw) : 100;
+      return {
+        requests: InstallRequestsRepo.listHistory(Number.isFinite(limit) ? limit : 100),
+      };
+    },
   );
 
   app.get<{ Params: { id: string } }>(

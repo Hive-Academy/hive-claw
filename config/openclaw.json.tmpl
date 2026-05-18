@@ -2,7 +2,9 @@
   "agents": {
     "defaults": {
       "model": { "primary": "${LLM_PROVIDER}/${LLM_MODEL}" },
-      "timeoutSeconds": 600
+      "timeoutSeconds": 600,
+      "videoGenerationModel": "google/veo-3.1-fast-generate-preview",
+      "mediaGenerationAutoProviderFallback": true
     },
     "list": [
       {
@@ -33,24 +35,32 @@
           "token": "${DISCORD_TOKEN_ANUBIS}",
           "enabled": true,
           "name": "Anubis",
-          "healthMonitor": { "enabled": true }
+          "healthMonitor": { "enabled": true },
+          "groupPolicy": "allowlist",
+          "guilds": {
+            "${DISCORD_GUILD_ID}": { "requireMention": true }
+          }
         },
         "horus": {
           "token": "${DISCORD_TOKEN_HORUS}",
           "enabled": true,
           "name": "Horus",
-          "healthMonitor": { "enabled": true }
+          "healthMonitor": { "enabled": true },
+          "groupPolicy": "allowlist",
+          "guilds": {
+            "${DISCORD_GUILD_ID}": { "requireMention": true }
+          }
         },
         "chappie": {
           "token": "${DISCORD_TOKEN_CHAPPIE}",
           "enabled": true,
           "name": "Chappie",
-          "healthMonitor": { "enabled": true }
+          "healthMonitor": { "enabled": true },
+          "groupPolicy": "allowlist",
+          "guilds": {
+            "${DISCORD_GUILD_ID}": { "requireMention": true }
+          }
         }
-      },
-      "groupPolicy": "allowlist",
-      "guilds": {
-        "${DISCORD_GUILD_ID}": { "requireMention": true }
       }
     }
   },
@@ -70,6 +80,10 @@
       "zernio": {
         "command": "npx",
         "args": ["-y", "mcp-remote@latest", "https://mcp.zernio.com/mcp", "--header", "Authorization: Bearer ${ZERNIO_API_KEY}"],
+        "connectionTimeoutMs": 30000
+      "canva": {
+        "command": "npx",
+        "args": ["-y", "mcp-remote@latest", "https://mcp.canva.com/mcp"],
         "connectionTimeoutMs": 30000
       }
     },
@@ -93,14 +107,47 @@
     },
     "trustedProxies": ["127.0.0.1", "::1"]
   },
+  "tools": {
+    "web": {
+      "search": {
+        "enabled": true,
+        "provider": "${WEB_SEARCH_PROVIDER}",
+        "maxResults": 5,
+        "timeoutSeconds": 30,
+        "cacheTtlMinutes": 15
+      },
+      "fetch": {
+        "enabled": true,
+        "readability": true,
+        "timeoutSeconds": 30,
+        "maxChars": 50000
+      }
+    }
+  },
+  "browser": {
+    "enabled": true,
+    "headless": true,
+    "noSandbox": true,
+    "evaluateEnabled": true,
+    "executablePath": "/usr/bin/chromium",
+    "tabCleanup": {
+      "enabled": true,
+      "idleMinutes": 60,
+      "maxTabsPerSession": 4
+    }
+  },
   "plugins": {
     "entries": {
       "bonjour": { "enabled": false },
-      "openclaw-control-plugin": { "enabled": true }
+      "openclaw-control-plugin": { "enabled": true },
+      "discord": { "enabled": true }
     }
   },
   "commands": {
     "useAccessGroups": false
+  },
+  "messages": {
+    "visibleReplies": "automatic"
   },
   "update": { "checkOnStart": false },
   "meta": {

@@ -62,7 +62,21 @@ export const config = {
     path.join(process.env.OPENCLAW_LOCAL_MEMORY ?? path.join(home, '.claude', 'local-memory'), 'agents'),
 
   // --- claude code session JSONLs (host's, mounted read-only) ---
+  // Pre-cutover Claude-Code sessions; still referenced by `watcher.ts` for
+  // legacy session tailing. Not used by the dashboard "Live sessions" page
+  // anymore (that reads `openclawAgentsRoot` below post-cutover).
   claudeProjectsRoot: path.join(home, '.claude', 'projects'),
+
+  /**
+   * Openclaw's per-agent session JSONL root. After the TASK_2026_006
+   * cutover, agent conversations live at
+   *   `<openclawAgentsRoot>/<agentId>/sessions/<sessionId>.jsonl`
+   * (plus a sibling `.trajectory.jsonl`). The daemon container bind-mounts
+   * the gateway's `openclaw-state` volume read-only at
+   * `/home/agent/.openclaw`, which is the default below.
+   */
+  openclawAgentsRoot:
+    process.env.OPENCLAW_AGENTS_ROOT ?? '/home/agent/.openclaw/agents',
 
   jwtSecret: process.env.OPENCLAW_JWT_SECRET ?? 'dev-secret-change-me',
   cookieName: 'openclaw_session',

@@ -3,6 +3,7 @@ import { inject, Injectable } from '@angular/core';
 import { Observable } from 'rxjs';
 import type {
   Agent,
+  AgentActivity,
   Dispatch,
   DispatchState,
   HealthStatus,
@@ -137,8 +138,12 @@ export class ApiService {
     return this.http.get<SessionInfo[]>('/api/sessions', { withCredentials: true });
   }
 
-  tailSession(projectKey: string, lines = 100): Observable<SessionTail> {
-    return this.http.get<SessionTail>(`/api/sessions/${projectKey}/latest?lines=${lines}`, { withCredentials: true });
+  tailSession(agentId: string, lines = 100): Observable<SessionTail> {
+    return this.http.get<SessionTail>(`/api/sessions/${agentId}/latest?lines=${lines}`, { withCredentials: true });
+  }
+
+  agentActivity(id: string): Observable<AgentActivity> {
+    return this.http.get<AgentActivity>(`/api/agents/${id}/activity`, { withCredentials: true });
   }
 
   memories(scope: string): Observable<MemoryEntry[]> {
@@ -160,6 +165,7 @@ export class ApiService {
 
 export type {
   Agent,
+  AgentActivity,
   Dispatch,
   DispatchState,
   HealthStatus,

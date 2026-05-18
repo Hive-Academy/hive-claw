@@ -1,5 +1,15 @@
-import { ChangeDetectionStrategy, Component, OnInit, computed, inject, signal } from '@angular/core';
-import { ApiService, Agent } from '../services/api.service';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  OnDestroy,
+  OnInit,
+  computed,
+  effect,
+  inject,
+  signal,
+} from '@angular/core';
+import { ApiService, Agent, AgentActivity } from '../services/api.service';
+import { SseService } from '../services/sse.service';
 import { ToastService } from '../services/toast.service';
 import { SkeletonComponent } from '../components/skeleton.component';
 
@@ -93,6 +103,30 @@ import { SkeletonComponent } from '../components/skeleton.component';
                   </div>
                 }
 
+                @if (activityFor(a.id); as act) {
+                  @if (act.lastTool) {
+                    <div class="mt-3 rounded bg-base-300/60 p-2 space-y-1">
+                      <div class="flex items-center gap-2 flex-wrap text-xs">
+                        <span class="text-base-content/60">Now:</span>
+                        <span class="badge badge-info badge-sm font-mono">{{ act.lastTool }}</span>
+                        <span class="text-base-content/50">· {{ formatRelative(act.lastToolAt || act.lastEventTs) }}</span>
+                      </div>
+                      @if (toolBreakdown(act); as tb) {
+                        <div class="flex flex-wrap gap-1">
+                          @for (e of tb; track e.name) {
+                            <span class="badge badge-ghost badge-xs font-mono">{{ e.name }}×{{ e.n }}</span>
+                          }
+                        </div>
+                      }
+                    </div>
+                  } @else if (act.lastTextPreview) {
+                    <p class="mt-3 text-xs italic text-base-content/60 line-clamp-2">
+                      "{{ act.lastTextPreview }}"
+                      <span class="text-base-content/40">· {{ formatRelative(act.lastEventTs) }}</span>
+                    </p>
+                  }
+                }
+
                 <div class="flex flex-wrap gap-2 mt-3">
                   @if (a.ownedHere) {
                     <span class="badge badge-success badge-sm">✓ owned here</span>
@@ -124,13 +158,37 @@ import { SkeletonComponent } from '../components/skeleton.component';
     </div>
   `,
 })
-export class AgentsComponent implements OnInit {
+export class AgentsComponent implements OnInit, OnDestroy {
   private api = inject(ApiService);
+  private sse = inject(SseService);
   private toast = inject(ToastService);
+
   agents = signal<Agent[]>([]);
   loading = signal(true);
   query = signal('');
   syncing = signal<string | null>(null);
+
+  /** Activity summaries keyed by agentId. Populated on load + on SSE bumps. */
+  private activity = signal<Map<string, AgentActivity>>(new Map());
+  private lastSeenSessionEventTs = 0;
+  private refreshTimer: ReturnType<typeof setInterval> | null = null;
+
+  constructor() {
+    // Live refresh: every `session.message` SSE event bumps the activity
+    // summary for the matching agent. Cheap because each request reads only
+    // the tail of one JSONL.
+    effect(() => {
+      const events = this.sse.events();
+      // Find the newest session.message we haven't acted on.
+      const newest = events.find((e) => e.type === 'session.message');
+      if (!newest || newest.ts <= this.lastSeenSessionEventTs) return;
+      this.lastSeenSessionEventTs = newest.ts;
+      const agentId = newest.data?.agentId;
+      if (typeof agentId === 'string' && agentId.length > 0) {
+        this.refreshActivity(agentId);
+      }
+    });
+  }
 
   filtered = computed(() => {
     const q = this.query().toLowerCase().trim();
@@ -146,10 +204,50 @@ export class AgentsComponent implements OnInit {
   busyCount = computed(() => this.agents().filter((a) => a.status === 'busy').length);
   offlineCount = computed(() => this.agents().filter((a) => a.status === 'offline').length);
 
+  activityFor(id: string): AgentActivity | undefined {
+    return this.activity().get(id);
+  }
+
+  toolBreakdown(act: AgentActivity): Array<{ name: string; n: number }> {
+    const entries = Object.entries(act.recentToolCounts ?? {});
+    if (entries.length === 0) return [];
+    return entries
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([name, n]) => ({ name, n }));
+  }
+
   ngOnInit() {
     this.api.agents().subscribe({
-      next: (a) => { this.agents.set(a); this.loading.set(false); },
+      next: (a) => {
+        this.agents.set(a);
+        this.loading.set(false);
+        // Kick off an activity fetch for every agent we know about.
+        for (const ag of a) this.refreshActivity(ag.id);
+      },
       error: () => this.loading.set(false),
+    });
+    // Slow-tick refresh as a backstop in case the SSE stream is delayed or
+    // the page is left idle — every 60s, re-fetch activity for every known
+    // agent. Cheap; the daemon endpoint only tails a few KB of JSONL.
+    this.refreshTimer = setInterval(() => {
+      for (const ag of this.agents()) this.refreshActivity(ag.id);
+    }, 60_000);
+  }
+
+  ngOnDestroy() {
+    if (this.refreshTimer) clearInterval(this.refreshTimer);
+  }
+
+  private refreshActivity(id: string): void {
+    this.api.agentActivity(id).subscribe({
+      next: (a) => {
+        const next = new Map(this.activity());
+        next.set(id, a);
+        this.activity.set(next);
+      },
+      // Soft failure — keep the existing cache rather than blanking the row.
+      error: () => {},
     });
   }
 
@@ -160,6 +258,17 @@ export class AgentsComponent implements OnInit {
       case 'offline': return 'badge-error';
       default: return 'badge-ghost';
     }
+  }
+
+  formatRelative(iso: string | null | undefined): string {
+    if (!iso) return '';
+    const t = Date.parse(iso);
+    if (!Number.isFinite(t)) return iso;
+    const secs = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (secs < 60) return `${secs}s ago`;
+    if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+    if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+    return new Date(t).toLocaleString();
   }
 
   sync(id: string) {

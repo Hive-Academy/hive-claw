@@ -12,8 +12,10 @@ export default defineConfig({
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/SETUP' },
+      { text: 'Follower Setup', link: '/FOLLOWER_SETUP' },
       { text: 'Architecture', link: '/ARCHITECTURE' },
       { text: 'Configuration', link: '/CONFIGURATION' },
+      { text: 'Playbooks', link: '/PLAYBOOKS' },
       { text: 'GitHub', link: 'https://github.com/Hive-Academy/hive-claw' },
     ],
 
@@ -23,7 +25,9 @@ export default defineConfig({
         items: [
           { text: 'Home', link: '/' },
           { text: 'Setup', link: '/SETUP' },
+          { text: 'Follower Setup', link: '/FOLLOWER_SETUP' },
           { text: 'Control Plane', link: '/OPENCLAW_CONTROL' },
+          { text: 'Playbooks', link: '/PLAYBOOKS' },
         ],
       },
       {
@@ -40,6 +44,7 @@ export default defineConfig({
         items: [
           { text: 'Security', link: '/SECURITY' },
           { text: 'Troubleshooting', link: '/TROUBLESHOOTING' },
+          { text: 'Cutover Runbook', link: '/CUTOVER_RUNBOOK' },
         ],
       },
       {

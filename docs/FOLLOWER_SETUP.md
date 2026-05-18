@@ -176,6 +176,8 @@ Open `.env` in your editor and set the **follower-specific** variables.
 The keys below are the minimum delta from `.env.example`; everything else
 can stay at the template default.
 
+**Follower hosting Horus:**
+
 ```bash
 # Leader/follower mode — REQUIRED on a follower
 OPENCLAW_LEADER=0
@@ -184,10 +186,10 @@ OPENCLAW_LEADER_URL=https://leader.tailnet.ts.net      # the URL you verified in
 # Service token — MUST match the leader's value byte-for-byte
 OPENCLAW_INTERNAL_TOKEN=<paste the value from §3.2>
 
-# This machine's agent ownership (single persona shown; CSV for multiple)
+# This machine's agent ownership
 OPENCLAW_LOCAL_AGENT_IDS=horus
 
-# Per-persona Discord bot token (uppercase id) — see §6
+# Per-persona Discord bot token — see §6
 DISCORD_TOKEN_HORUS=<bot token from Discord Developer Portal>
 
 # Host home for identity-bind-mounted ptah path. MUST be a real path on
@@ -208,10 +210,22 @@ OPENCLAW_PTAH_BRIDGE_URL=http://host.docker.internal:8744
 DISCORD_CLIENT_ID=
 DISCORD_CLIENT_SECRET=
 
-# Optional: only if you want the leader's bot token in this machine's
-# config for some reason. Normally leave empty on a follower — the
-# follower's openclaw will NOT have that persona's binding active.
+# Leave the other personas' tokens empty on a Horus machine
 DISCORD_TOKEN_ANUBIS=
+DISCORD_TOKEN_CHAPPIE=
+```
+
+**Follower hosting Chappie (add these on top of the Horus template, or as a separate machine):**
+
+```bash
+OPENCLAW_LOCAL_AGENT_IDS=chappie     # or "horus,chappie" if co-hosted
+
+# Chappie Discord bot token
+DISCORD_TOKEN_CHAPPIE=<bot token from Discord Developer Portal>
+
+# Zernio API key — required for Chappie's social media publishing tools
+# Get a key at https://zernio.com/agents (free tier covers 2 accounts)
+ZERNIO_API_KEY=<your key>
 ```
 
 **Hard-fails to know about** before you run compose:
@@ -316,7 +330,7 @@ only thing preventing arbitrary local processes from invoking it; on a
 multi-tenant host, add a firewall rule restricting `:8744` to the docker
 bridge subnet (typically `172.17.0.0/16`).
 
-### 3.8 Authenticate `gh` and `ptah` on the host (optional)
+### 3.8 Authenticate `gh`, `ptah`, and Canva MCP on the host (optional / Canva required if used)
 
 If the persona's harness lists the GitHub MCP server or any ptah-driven
 orchestration, authenticate on the **host** so the bind-mounted configs
@@ -330,6 +344,17 @@ ptah auth login         # writes ~/.ptah/ (bind-mounted into the container, read
 `gh auth login` only persists state inside `~/.config/gh/` when
 `GH_AUTH_MODE=file` (the `.env.example` default). The `keyring` mode does
 NOT cross the container boundary.
+
+**Canva MCP — one-time OAuth per host.** The Canva MCP server uses browser OAuth via `mcp-remote`. Run this **once on each follower host's machine** before bringing the stack up:
+
+```bash
+npx -y mcp-remote@latest https://mcp.canva.com/mcp
+# Complete the Canva OAuth flow in the browser that opens, then Ctrl+C.
+```
+
+Tokens are cached in `~/.mcp-auth/` on the host. `docker-compose.yml` bind-mounts that directory into the gateway container at `/home/agent/.mcp-auth:rw`. The `mcp-remote` process inside the container refreshes tokens automatically — no repeat auth unless tokens are revoked. The bind-mount is already declared in `docker-compose.yml`; no additional config is needed.
+
+This step is required **per host machine**, not just on the leader.
 
 ### 3.9 Build the image
 
@@ -399,7 +424,7 @@ elsewhere:
    personas in `agents.list[]` and configures each persona's Discord bot
    account under `channels.discord.accounts.<persona>`. The template is
    the same on every machine in the fleet (it's a checked-in file, post
-   Batch 6 ships `anubis` + `horus` by default).
+   The template ships `anubis`, `horus`, and `chappie` by default).
 2. **The Discord bot token** for a persona must be set in the `.env` of
    the machine that runs that persona, as `DISCORD_TOKEN_<UPPER_ID>`. The
    other machines leave that token empty (or omit the variable entirely).
@@ -537,7 +562,11 @@ per-agent.
 
 ---
 
-## 7. Adding a third (or Nth) persona
+## 7. Adding a fourth (or Nth) persona
+
+The fleet currently ships three personas: **anubis** (leader), **horus** (follower), and **chappie** (follower). All three are already declared in `config/openclaw.json.tmpl`, `shared-specs/memory/agents/`, and `.env.example`. To run them, follow §3 — no template changes needed.
+
+To add a **new** persona beyond the three above, follow the two-scope change below.
 
 There are two scopes of change.
 
@@ -633,6 +662,8 @@ validates, no impact on the personas that machine does host.
 | Follower never claims a dispatch | SSE subscription broken, or token wrong, or persona not in `OPENCLAW_LOCAL_AGENT_IDS`. | Run §5.3 — if 401, fix the token. If stream is fine but no dispatch events arrive, verify the leader has the assignment with `sqlite3 /data/specs.db "SELECT id,assigned_agent FROM tasks WHERE id='<task>'"`. |
 | Clock skew warnings, dispatches show out-of-order timestamps | Host clock drift between leader and follower. SQLite stores timestamps with `strftime('%Y-%m-%dT%H:%M:%fZ','now')` — the leader's clock wins for `claimed_at`, but the follower's log timestamps will look weird. | `timedatectl set-ntp true` on both hosts. Leader and follower should agree to within a second. |
 | Materialized ptah configs missing or written to wrong path | `OPENCLAW_HOST_HOME` doesn't match the actual host home, so the identity-bind-mount `${OPENCLAW_HOST_HOME}/.ptah:${OPENCLAW_HOST_HOME}/.ptah:rw` lands on a path neither side has. | Set `OPENCLAW_HOST_HOME` to your real `$HOME`; `docker compose up -d`. |
+| Chappie's Zernio tools not available in chat | `ZERNIO_API_KEY` is empty on the Chappie machine. The `mcp.servers.zernio` entry needs the key at runtime. | Set `ZERNIO_API_KEY` in `.env` on the Chappie machine; `docker compose up -d`. |
+| Canva MCP tools fail with 401 on follower | The Canva OAuth token cache (`~/.mcp-auth/`) hasn't been populated on this follower's host. | Run `npx -y mcp-remote@latest https://mcp.canva.com/mcp` on the follower's host and complete the OAuth flow. Then restart the gateway: `docker compose restart openclaw-gateway`. |
 | Daemon refuses to boot with `dbVersion` complaint on a follower | Followers do not run migrations. The leader's `dbVersion` is probed via HTTP; if the leader is mid-upgrade, the follower may flag a mismatch. | Wait for the leader to finish booting; restart the follower. |
 | Dashboard at `:7878` returns `local-dev` user without prompting | This is the loopback fallback when `DISCORD_CLIENT_ID` is empty. Fine on a follower used only for local debug; do **not** expose the follower's dashboard publicly. | Either set Discord OAuth credentials on the follower (rare) or keep the dashboard on loopback. |
 

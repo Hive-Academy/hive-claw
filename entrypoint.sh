@@ -51,6 +51,8 @@ TEMPLATE="/etc/openclaw/openclaw.json.tmpl"
 : "${DISCORD_TOKEN_CHAPPIE:=}"
 : "${GITHUB_TOKEN:=}"
 : "${ZERNIO_API_KEY:=}"
+: "${WEB_SEARCH_PROVIDER:=}"
+: "${WEB_SEARCH_API_KEY:=}"
 : "${OPENCLAW_AUTH_TOKEN:=}"
 
 if [ -z "$OPENCLAW_AUTH_TOKEN" ]; then
@@ -132,6 +134,7 @@ OPENCLAW_NOW="$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")"
 export LLM_PROVIDER LLM_MODEL LLM_PROVIDERS_JSON \
        DISCORD_GUILD_ID DISCORD_BOT_TOKEN \
        DISCORD_TOKEN_ANUBIS DISCORD_TOKEN_HORUS DISCORD_TOKEN_CHAPPIE GITHUB_TOKEN ZERNIO_API_KEY \
+       WEB_SEARCH_PROVIDER WEB_SEARCH_API_KEY \
        OPENCLAW_AUTH_TOKEN OPENCLAW_VERSION OPENCLAW_NOW
 
 mkdir -p "$CONFIG_DIR"
@@ -157,7 +160,7 @@ CONFIG_FILE_NEW="${CONFIG_FILE}.new"
 
 render_template() {
     local out="$1"
-    envsubst '${LLM_PROVIDER} ${LLM_MODEL} ${LLM_PROVIDERS_JSON} ${DISCORD_GUILD_ID} ${DISCORD_BOT_TOKEN} ${DISCORD_TOKEN_ANUBIS} ${DISCORD_TOKEN_HORUS} ${DISCORD_TOKEN_CHAPPIE} ${GITHUB_TOKEN} ${ZERNIO_API_KEY} ${OPENCLAW_AUTH_TOKEN} ${OPENCLAW_VERSION} ${OPENCLAW_NOW}' \
+    envsubst '${LLM_PROVIDER} ${LLM_MODEL} ${LLM_PROVIDERS_JSON} ${DISCORD_GUILD_ID} ${DISCORD_BOT_TOKEN} ${DISCORD_TOKEN_ANUBIS} ${DISCORD_TOKEN_HORUS} ${DISCORD_TOKEN_CHAPPIE} ${GITHUB_TOKEN} ${ZERNIO_API_KEY} ${WEB_SEARCH_PROVIDER} ${WEB_SEARCH_API_KEY} ${OPENCLAW_AUTH_TOKEN} ${OPENCLAW_VERSION} ${OPENCLAW_NOW}' \
         < "$TEMPLATE" > "$out"
 
     # ---------- Scope to OPENCLAW_LOCAL_AGENT_IDS ----------
@@ -204,6 +207,27 @@ render_template() {
         jq '.channels.discord.enabled = false
             | (.channels.discord.accounts // {}) |= with_entries(.value.enabled = false)' \
            "$out" > "${out}.tmp" && mv "${out}.tmp" "$out"
+    fi
+
+    # Web search wiring.
+    #
+    # As of openclaw 2026.5.x, provider-owned web-search config (apiKey, etc.)
+    # lives under plugins.entries.<providerId>.config.webSearch rather than
+    # tools.web.search.apiKey. The template renders the non-secret search
+    # config (enabled/provider/maxResults/...); we inject the API key here
+    # against the dynamic provider id (tavily/exa/perplexity/brave/...).
+    #
+    # When either var is unset, disable the search tool entirely.
+    if [ -z "${WEB_SEARCH_PROVIDER:-}" ] || [ -z "${WEB_SEARCH_API_KEY:-}" ]; then
+        jq '.tools.web.search.enabled = false' "$out" > "${out}.tmp" && mv "${out}.tmp" "$out"
+    else
+        jq --arg provider "$WEB_SEARCH_PROVIDER" --arg key "$WEB_SEARCH_API_KEY" '
+              .plugins.entries[$provider] = (
+                (.plugins.entries[$provider] // {})
+                | .enabled = true
+                | .config = ((.config // {}) | .webSearch = ((.webSearch // {}) | .apiKey = $key))
+              )
+            ' "$out" > "${out}.tmp" && mv "${out}.tmp" "$out"
     fi
 
     if ! jq empty "$out" 2>/dev/null; then
@@ -274,6 +298,31 @@ jq 'walk(
         )
       else . end
     )' "$CONFIG_FILE" || cat "$CONFIG_FILE"
+
+# ---------- Externalized channel plugins (idempotent) ----------
+# Discord was extracted from openclaw core into `@openclaw/discord` as of
+# openclaw 2026.5.2 (see CHANGELOG). Without it, channels.discord shows up
+# as "not installed" in `openclaw channels list --all` and configured bots
+# never come online — the gateway logs a config warning and keeps running.
+# The plugin uses `workspace:*` deps in its package.json, so a plain
+# `npm install` fails at image build with EUNSUPPORTEDPROTOCOL; the only
+# supported installer is `openclaw plugins install`, which links its peer
+# openclaw at install time. We run it here as the agent user (HOME is
+# already /home/agent) so the package lands in
+# /home/agent/.openclaw/npm/node_modules/@openclaw/discord — under the
+# openclaw-state volume, so the install survives across container restarts
+# and follower machines.
+DISCORD_PLUGIN_VERSION="2026.5.7"
+DISCORD_PLUGIN_DIR="${HOME}/.openclaw/npm/node_modules/@openclaw/discord"
+if [ ! -f "${DISCORD_PLUGIN_DIR}/package.json" ] \
+   || [ "$(jq -r '.version // empty' "${DISCORD_PLUGIN_DIR}/package.json" 2>/dev/null)" != "${DISCORD_PLUGIN_VERSION}" ]; then
+    echo "[entrypoint] Installing @openclaw/discord@${DISCORD_PLUGIN_VERSION} (one-time per volume)"
+    openclaw plugins install "@openclaw/discord@${DISCORD_PLUGIN_VERSION}" --force 2>&1 \
+        | sed 's/^/  /' \
+        || echo "[entrypoint] WARNING: discord plugin install failed; channels.discord will be 'not installed'"
+else
+    echo "[entrypoint] @openclaw/discord@${DISCORD_PLUGIN_VERSION} already installed"
+fi
 
 # Probe whichever provider endpoint we ended up with.
 case "$LLM_PROVIDER" in

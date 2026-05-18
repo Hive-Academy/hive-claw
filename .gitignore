@@ -32,3 +32,4 @@ docs/.vitepress/cache/
 # PRIVATE_AGENT_FILES (persona.md, secrets.md, *.json) live here and never
 # traverse HTTP or git. See CLAUDE.md and docs/SECURITY.md.
 local-memory/
+.openclaw-extract/**

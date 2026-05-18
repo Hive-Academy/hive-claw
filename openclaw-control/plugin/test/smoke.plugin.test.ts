@@ -1,5 +1,5 @@
 // Plugin smoke test — instantiates the plugin's `register(api)` with a mock
-// api that records `registerTool` calls. Asserts exactly 12 tools register
+// api that records `registerTool` calls. Asserts exactly 13 tools register
 // (invoke_ptah + 6 daemon CRUD + 5 install/clawhub per Batch 8c), with the
 // expected names, and that `start_harness_setup` is NOT present (amendment
 // §3.10 removes it entirely).
@@ -45,18 +45,19 @@ function buildMockApi(): { api: PluginApi; registered: RegisteredTool[] } {
 }
 
 describe("plugin smoke — register()", () => {
-  it("registers exactly 12 tools with the expected names", () => {
+  it("registers exactly 13 tools with the expected names", () => {
     const { api, registered } = buildMockApi();
     entry.register(api);
 
     const names = registered.map((r) => r.name);
     assert.equal(
       registered.length,
-      12,
-      `expected 12 tools, got ${registered.length}: ${names.join(", ")}`,
+      13,
+      `expected 13 tools, got ${registered.length}: ${names.join(", ")}`,
     );
     assert.deepEqual(names.sort(), [
       "approve_task",
+      "create_project",
       "create_task",
       "get_task",
       "handoff_task",
@@ -90,7 +91,7 @@ describe("plugin smoke — register()", () => {
     assert.equal(names.includes("dispatch_orchestration_task"), false);
   });
 
-  it("emits a logger.info line announcing 12 tools registered", () => {
+  it("emits a logger.info line announcing 13 tools registered", () => {
     const messages: string[] = [];
     const api: PluginApi = {
       logger: {
@@ -99,8 +100,10 @@ describe("plugin smoke — register()", () => {
       registerTool: () => {},
     };
     entry.register(api);
-    assert.equal(messages.length, 1);
-    assert.match(messages[0]!, /registered 12 tools/);
+    // Two info lines are now emitted: the "registered N tools" line and a
+    // separate heartbeat-init line. Assert the count + that one of them is
+    // the tool-count announcement.
+    assert.ok(messages.some((m) => /registered 13 tools/.test(m)));
   });
 
   it("plugin entry has the expected id/name/description shape", () => {
