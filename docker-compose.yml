@@ -81,6 +81,10 @@ services:
       # The daemon shares the same mount so the local memory backend
       # (resolveBackend) can read/write private agent files.
       - ${OPENCLAW_LOCAL_MEMORY_DIR:-${HOME}/.claude/local-memory}:/home/agent/.claude/local-memory:rw
+      # mcp-remote OAuth token cache — populated by a one-time `npx mcp-remote`
+      # run on the host (see .env.example §"Canva MCP"). mcp-remote inside the
+      # container reads/refreshes tokens from this path automatically.
+      - ${HOME}/.mcp-auth:/home/agent/.mcp-auth:rw
       # Agent workspaces — bind-mounted so file writes (drafts, canvas, etc.)
       # are visible on the host filesystem. See docs/ARCHITECTURE.md line 163.
       - ${WORKSPACE_DIR:-${HOME}/projects}:/home/agent/.openclaw/workspace:rw

@@ -73,6 +73,11 @@
         "command": "npx",
         "args": ["-y", "mcp-remote@latest", "https://mcp.zernio.com/mcp", "--header", "Authorization: Bearer ${ZERNIO_API_KEY}"],
         "connectionTimeoutMs": 30000
+      },
+      "canva": {
+        "command": "npx",
+        "args": ["-y", "mcp-remote@latest", "https://mcp.canva.com/mcp"],
+        "connectionTimeoutMs": 30000
       }
     },
     "sessionIdleTtlMs": 600000
