@@ -47,13 +47,6 @@ function loadMcpServers(): Record<string, McpServerConfig> {
  * does support them, but the SDK's wrapper overrides the internal fetch and
  * discards constructor headers. This transport bypasses both problems.
  */
- * Lightweight SSE transport that uses native `fetch` so we can inject custom
- * headers (e.g. `Authorization: Bearer`). The stock `SSEClientTransport` from
- * `@modelcontextprotocol/sdk` relies on `EventSource` which does not support
- * custom headers in the browser spec; in Node.js the `eventsource` package
- * does support them, but the SDK's wrapper overrides the internal fetch and
- * discards constructor headers. This transport bypasses both problems.
- */
 class FetchSseTransport {
   private _url: URL;
   private _headers: Record<string, string>;
@@ -150,7 +143,7 @@ class FetchSseTransport {
           (separator = buffer.indexOf("\r\n\r\n")) !== -1
         ) {
           const eventText = buffer.slice(0, separator);
-          buffer = buffer.slice(separator + 2);
+          buffer = buffer.slice(separator + (buffer.charAt(separator) === "\r" ? 4 : 2));
           this._handleEvent(eventText);
         }
       }

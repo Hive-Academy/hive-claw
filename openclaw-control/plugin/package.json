@@ -20,8 +20,11 @@
     "openclaw": ">=2026.4.24"
   },
   "dependencies": {
-    "undici": "^6.0.0",
     "@sinclair/typebox": "^0.34.49"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.4.24",
+    "@modelcontextprotocol/sdk": ">=1.0.0"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

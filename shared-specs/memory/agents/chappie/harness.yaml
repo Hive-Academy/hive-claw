@@ -11,6 +11,7 @@ chatTier:
   skills:
     - social-digest
     - social-media-guide
+    - long-task-workflow
     - technical-content-writer
   subagents:
     - name: content-drafter
@@ -68,6 +69,7 @@ orchestrationTier:
   skills:
     - social-digest
     - social-media-guide
+    - long-task-workflow
     - technical-content-writer
   subagents:
     - name: social-publisher
@@ -139,6 +141,7 @@ orchestrationTier:
         - "-y"
         - "mcp-remote@latest"
         - "https://mcp.zernio.com/mcp"
+        - "--header"
         - "Authorization: Bearer ${ZERNIO_API_KEY}"
     - id: canva
       command: npx

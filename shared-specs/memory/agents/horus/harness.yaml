@@ -13,6 +13,7 @@ chatTier:
   skills:
     - security-review
     - simplify
+    - long-task-workflow
   subagents:
     - name: pr-diff-triage
       description: Quick triage of PR diffs against OWASP Top 10.
@@ -30,6 +31,7 @@ chatTier:
 orchestrationTier:
   skills:
     - security-review
+    - long-task-workflow
   subagents:
     - name: security-review
       description: Deep security review for orchestration runs.

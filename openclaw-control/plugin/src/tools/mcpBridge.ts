@@ -159,7 +159,7 @@ class FetchSseTransport {
           (separator = buffer.indexOf("\r\n\r\n")) !== -1
         ) {
           const eventText = buffer.slice(0, separator);
-          buffer = buffer.slice(separator + 2);
+          buffer = buffer.slice(separator + (buffer.charAt(separator) === "\r" ? 4 : 2));
           this._handleEvent(eventText);
         }
       }
