@@ -307,4 +307,26 @@ export const daemon = {
       // logger captures the failed call shape on its side if it cares.
     }
   },
+
+  // -------------------------------------------------------------------------
+  // TASK_2026_007 B8 — project/task mutation surface for chat-tier tools.
+  // -------------------------------------------------------------------------
+  createProject: (body: { slug: string; name: string; workspace?: string }) =>
+    call<{ slug: string; name: string }>('POST', '/api/projects', body),
+
+  deleteProject: (slug: string) =>
+    call<{ ok: true }>('DELETE', `/api/projects/${encodeURIComponent(slug)}`),
+
+  deleteTask: (slug: string, taskId: string) =>
+    call<{ ok: true; cancelledDispatches: number; warning?: string }>(
+      'DELETE',
+      `/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(taskId)}`,
+    ),
+
+  updateTask: (slug: string, taskId: string, body: { assignedAgent: string }) =>
+    call<{ ok: true; taskId: string; assignedAgent: string }>(
+      'PUT',
+      `/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(taskId)}`,
+      body,
+    ),
 };

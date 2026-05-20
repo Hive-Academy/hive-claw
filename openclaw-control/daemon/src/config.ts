@@ -78,6 +78,17 @@ export const config = {
   openclawAgentsRoot:
     process.env.OPENCLAW_AGENTS_ROOT ?? '/home/agent/.openclaw/agents',
 
+  /**
+   * Comma-separated list of sibling-daemon URLs to aggregate sessions from.
+   * On the leader, set to the URLs of all follower daemons so the dashboard
+   * shows sessions from every machine in one view.
+   * Example: http://machine2:7878,http://machine3:7878
+   */
+  followerUrls: (process.env.OPENCLAW_FOLLOWER_URLS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
+
   jwtSecret: process.env.OPENCLAW_JWT_SECRET ?? 'dev-secret-change-me',
   cookieName: 'openclaw_session',
   /** Service token for internal callers (bot-bridge, dispatched agents). */

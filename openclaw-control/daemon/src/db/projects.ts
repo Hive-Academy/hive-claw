@@ -43,6 +43,8 @@ interface Statements {
   }>;
   get: Statement<{ slug: string }>;
   list: Statement<[]>;
+  delete: Statement<{ slug: string }>;
+  update: Statement<{ slug: string; name: string | null; workspace: string | null; default_branch: string | null }>;
 }
 
 let cached: Statements | null = null;
@@ -63,6 +65,15 @@ function stmts(): Statements {
     `),
     get: db.prepare(`SELECT slug, name, workspace, github_repo, default_branch, created_at, updated_at FROM projects WHERE slug = @slug`),
     list: db.prepare(`SELECT slug, name, workspace, github_repo, default_branch, created_at, updated_at FROM projects ORDER BY slug ASC`),
+    delete: db.prepare(`DELETE FROM projects WHERE slug = @slug`),
+    update: db.prepare(`
+      UPDATE projects SET
+        name = COALESCE(@name, name),
+        workspace = COALESCE(@workspace, workspace),
+        default_branch = COALESCE(@default_branch, default_branch),
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      WHERE slug = @slug
+    `),
   };
   return cached;
 }
@@ -106,6 +117,21 @@ export const ProjectsRepo = {
   list(): ProjectRow[] {
     const rows = stmts().list.all() as RawProjectRow[];
     return rows.map(toProjectRow);
+  },
+
+  delete(slug: string): boolean {
+    const result = stmts().delete.run({ slug });
+    return result.changes > 0;
+  },
+
+  update(slug: string, fields: { name?: string; workspace?: string; defaultBranch?: string }): ProjectRow | null {
+    stmts().update.run({
+      slug,
+      name: fields.name ?? null,
+      workspace: fields.workspace ?? null,
+      default_branch: fields.defaultBranch ?? null,
+    });
+    return ProjectsRepo.get(slug);
   },
 };
 

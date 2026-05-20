@@ -344,5 +344,86 @@ export function list(): ToolDef[] {
         });
       },
     },
+    // -------------------------------------------------------------------------
+    // TASK_2026_007 B8 — project/task mutation tools.
+    // -------------------------------------------------------------------------
+    {
+      name: 'create_project',
+      description: 'Create a new project in the daemon. Returns { ok: true, slug, name } on success.',
+      parameters: {
+        type: 'object',
+        properties: {
+          slug: { type: 'string', description: 'Project slug (kebab-case, a-z0-9, max 64 chars).' },
+          name: { type: 'string', description: 'Human-readable project name.' },
+          workspace: { type: 'string', description: 'Optional absolute path to the project workspace on disk.' },
+        },
+        required: ['slug', 'name'],
+        additionalProperties: false,
+      },
+      handler: async (args: Record<string, unknown>) => {
+        const slug = requireString(args, 'slug', 'create_project');
+        const name = requireString(args, 'name', 'create_project');
+        const workspace = optionalString(args, 'workspace');
+        const result = await daemon.createProject({ slug, name, workspace });
+        return JSON.stringify({ ok: true, slug: result.slug ?? slug, name: result.name ?? name });
+      },
+    },
+    {
+      name: 'delete_project',
+      description: 'Delete a project by slug. Irreversible. Returns { ok: true, slug }.',
+      parameters: {
+        type: 'object',
+        properties: {
+          project: { type: 'string', description: 'Project slug to delete.' },
+        },
+        required: ['project'],
+        additionalProperties: false,
+      },
+      handler: async (args: Record<string, unknown>) => {
+        const slug = requireString(args, 'project', 'delete_project');
+        await daemon.deleteProject(slug);
+        return JSON.stringify({ ok: true, slug });
+      },
+    },
+    {
+      name: 'delete_task',
+      description: 'Delete a task and cancel all its pending dispatches. Returns { ok: true, taskId, cancelledDispatches }.',
+      parameters: {
+        type: 'object',
+        properties: {
+          project: { type: 'string', description: 'Project slug.' },
+          taskId: { type: 'string', description: 'Task id.' },
+        },
+        required: ['project', 'taskId'],
+        additionalProperties: false,
+      },
+      handler: async (args: Record<string, unknown>) => {
+        const slug = requireString(args, 'project', 'delete_task');
+        const taskId = requireString(args, 'taskId', 'delete_task');
+        const result = await daemon.deleteTask(slug, taskId);
+        return JSON.stringify({ ok: true, taskId, cancelledDispatches: result.cancelledDispatches });
+      },
+    },
+    {
+      name: 'update_task',
+      description: "Update a task's assigned agent. Returns { ok: true, taskId, assignedAgent }.",
+      parameters: {
+        type: 'object',
+        properties: {
+          project: { type: 'string', description: 'Project slug.' },
+          taskId: { type: 'string', description: 'Task id.' },
+          assignedAgent: { type: 'string', description: 'Agent id to assign the task to.' },
+        },
+        required: ['project', 'taskId', 'assignedAgent'],
+        additionalProperties: false,
+      },
+      handler: async (args: Record<string, unknown>) => {
+        const slug = requireString(args, 'project', 'update_task');
+        const taskId = requireString(args, 'taskId', 'update_task');
+        const assignedAgent = requireString(args, 'assignedAgent', 'update_task');
+        const result = await daemon.updateTask(slug, taskId, { assignedAgent });
+        return JSON.stringify({ ok: true, taskId: result.taskId, assignedAgent: result.assignedAgent });
+      },
+    },
   ];
 }

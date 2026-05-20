@@ -4,11 +4,12 @@ import { SseService, SseEvent } from '../services/sse.service';
 import { ApiService, SessionInfo, SessionTail } from '../services/api.service';
 import { SkeletonComponent } from '../components/skeleton.component';
 import { ToastService } from '../services/toast.service';
+import { MarkdownComponent } from '../components/markdown.component';
 
 @Component({
   selector: 'oc-sessions',
   standalone: true,
-  imports: [DecimalPipe, SkeletonComponent],
+  imports: [DecimalPipe, SkeletonComponent, MarkdownComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="space-y-4">
@@ -89,7 +90,52 @@ import { ToastService } from '../services/toast.service';
               </div>
               <div class="space-y-1 max-h-[70vh] overflow-y-auto pr-1">
                 @for (e of t.events; track $index) {
-                  <pre class="text-xs font-mono bg-base-300 rounded p-2 break-all whitespace-pre-wrap overflow-x-auto">{{ stringify(e) }}</pre>
+                  @let role = e.role ?? e.type ?? '';
+                  @if (role === 'user') {
+                    <div class="flex flex-col items-start gap-1 py-1">
+                      <div class="flex items-center gap-2">
+                        <span class="badge badge-ghost badge-sm">User</span>
+                        @if (e.ts) {
+                          <span class="text-xs text-base-content/40">{{ formatTs(e.ts) }}</span>
+                        }
+                      </div>
+                      <div class="bg-base-300 rounded p-2 text-sm max-w-[90%] whitespace-pre-wrap">{{ e.preview ?? '' }}</div>
+                    </div>
+                  } @else if (role === 'assistant') {
+                    <div class="flex flex-col items-end gap-1 py-1">
+                      <div class="flex items-center gap-2">
+                        @if (e.ts) {
+                          <span class="text-xs text-base-content/40">{{ formatTs(e.ts) }}</span>
+                        }
+                        <span class="badge badge-primary badge-sm">Assistant</span>
+                      </div>
+                      <div class="bg-primary/10 border border-primary/20 rounded p-2 max-w-[90%]">
+                        @if (e.preview && !e.preview.startsWith('[tool:')) {
+                          <oc-md [source]="e.preview" />
+                        } @else if (e.preview?.startsWith('[tool:')) {
+                          <span class="font-mono text-xs text-base-content/60">{{ e.preview }}</span>
+                        } @else {
+                          <span class="text-base-content/30 text-xs italic">no text content</span>
+                        }
+                      </div>
+                    </div>
+                  } @else if (isToolRole(role)) {
+                    <details class="text-xs py-1">
+                      <summary class="cursor-pointer flex items-center gap-2 p-1 hover:bg-base-300 rounded select-none">
+                        <span class="badge badge-ghost badge-xs">{{ role === 'tool_use' || role === 'tool' ? 'Tool call' : 'Tool result' }}</span>
+                        <span class="font-mono text-base-content/70">{{ toolLabel(e) }}</span>
+                        @if (e.ts) {
+                          <span class="text-base-content/40 ml-auto">{{ formatTs(e.ts) }}</span>
+                        }
+                      </summary>
+                      <pre class="font-mono bg-base-300 rounded p-2 mt-1 overflow-x-auto whitespace-pre-wrap break-all text-xs">{{ stringify(e.raw) }}</pre>
+                    </details>
+                  } @else {
+                    <details class="text-xs py-1">
+                      <summary class="cursor-pointer text-base-content/40 select-none">{{ role || 'event' }} ({{ e.type ?? 'unknown' }})</summary>
+                      <pre class="font-mono bg-base-300 rounded p-2 mt-1 overflow-x-auto whitespace-pre-wrap break-all text-xs">{{ stringify(e.raw) }}</pre>
+                    </details>
+                  }
                 }
                 @if (t.events.length === 0) {
                   <p class="text-sm text-base-content/50">No events in this session yet.</p>
@@ -180,11 +226,36 @@ export class SessionsComponent implements OnInit, OnDestroy {
     this.tail.set(null);
   }
 
+  isToolRole(role: string): boolean {
+    return role === 'tool' || role === 'tool_use' || role === 'tool_result' || role === 'toolResult';
+  }
+
+  toolLabel(e: any): string {
+    // openclaw format: raw.message.toolName
+    // Claude Code format: raw.message.content[].type==='tool_use' .name
+    const msg = e.raw?.message;
+    if (msg?.toolName) return msg.toolName;
+    if (Array.isArray(msg?.content)) {
+      const tu = msg.content.find((c: any) => c?.type === 'tool_use');
+      if (tu?.name) return tu.name;
+    }
+    return msg?.toolCallId ?? 'tool';
+  }
+
   stringify(e: unknown): string {
     try {
       return JSON.stringify(e, null, 2);
     } catch {
       return String(e);
     }
+  }
+
+  formatTs(ts: string | number): string {
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return String(ts);
+    const diffMs = Date.now() - d.getTime();
+    if (diffMs < 60_000) return `${Math.floor(diffMs / 1000)}s ago`;
+    if (diffMs < 3_600_000) return `${Math.floor(diffMs / 60_000)}m ago`;
+    return d.toLocaleTimeString();
   }
 }

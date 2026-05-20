@@ -222,6 +222,98 @@ export function buildApp() {
     return reply.code(201).send(row);
   });
 
+  app.delete<{ Params: { slug: string } }>(
+    '/api/projects/:slug',
+    { preHandler: guard },
+    async (req, reply) => {
+      if (!config.leader) {
+        return reply.code(409).send({ error: 'projects can only be deleted on the leader' });
+      }
+      const { slug } = req.params;
+      if (slug.includes('..') || slug.includes('/') || slug.includes('\\')) {
+        return reply.code(400).send({ error: 'invalid slug' });
+      }
+      const result = await storage.deleteProject(slug);
+      if (!result) return reply.code(404).send({ error: 'project not found' });
+      broadcast('project.deleted', { slug });
+      return { ok: true };
+    },
+  );
+
+  app.put<{
+    Params: { slug: string };
+    Body: { name?: unknown; workspace?: unknown; defaultBranch?: unknown };
+  }>(
+    '/api/projects/:slug',
+    { preHandler: guard },
+    async (req, reply) => {
+      if (!config.leader) {
+        return reply.code(409).send({ error: 'projects can only be updated on the leader' });
+      }
+      const { slug } = req.params;
+      const body = req.body ?? {};
+      const fields: { name?: string; workspace?: string; defaultBranch?: string } = {};
+      if (typeof body.name === 'string' && body.name.trim().length > 0) {
+        fields.name = body.name.trim();
+      }
+      if (typeof body.workspace === 'string') {
+        fields.workspace = body.workspace.trim();
+      }
+      if (typeof body.defaultBranch === 'string') {
+        fields.defaultBranch = body.defaultBranch.trim();
+      }
+      const updated = await storage.updateProject(slug, fields);
+      if (!updated) return reply.code(404).send({ error: 'project not found' });
+      return updated;
+    },
+  );
+
+  app.delete<{ Params: { slug: string; taskId: string } }>(
+    '/api/projects/:slug/tasks/:taskId',
+    { preHandler: guard },
+    async (req, reply) => {
+      if (!config.leader) {
+        return reply.code(409).send({ error: 'task mutations are only available on the leader' });
+      }
+      const project = await storage.readProject(req.params.slug);
+      if (!project) return reply.code(404).send({ error: 'project not found' });
+      const result = await storage.deleteTask(req.params.slug, req.params.taskId);
+      if (!result) return reply.code(404).send({ error: 'task not found' });
+      broadcast('task.deleted', { slug: req.params.slug, taskId: req.params.taskId });
+      const response: Record<string, unknown> = {
+        ok: true,
+        cancelledDispatches: result.cancelledDispatches,
+      };
+      if (result.wasInProgress) {
+        response.warning = 'task was IN_PROGRESS';
+      }
+      return response;
+    },
+  );
+
+  app.put<{
+    Params: { slug: string; taskId: string };
+    Body: { assignedAgent?: unknown };
+  }>(
+    '/api/projects/:slug/tasks/:taskId',
+    { preHandler: guard },
+    async (req, reply) => {
+      if (!config.leader) {
+        return reply.code(409).send({ error: 'task mutations are only available on the leader' });
+      }
+      const project = await storage.readProject(req.params.slug);
+      if (!project) return reply.code(404).send({ error: 'project not found' });
+      const body = req.body ?? {};
+      if (typeof body.assignedAgent !== 'string' || body.assignedAgent.trim().length === 0) {
+        return reply.code(400).send({ error: 'assignedAgent (non-empty string) required' });
+      }
+      const assignedAgent = body.assignedAgent.trim();
+      const result = await storage.updateTaskAgent(req.params.slug, req.params.taskId, assignedAgent);
+      if (!result) return reply.code(404).send({ error: 'task not found' });
+      return result;
+    },
+  );
+
   app.get<{ Params: { slug: string } }>(
     '/api/projects/:slug/tasks',
     { preHandler: guard },
@@ -782,16 +874,61 @@ export function buildApp() {
   );
 
   // --- sessions ---------------------------------------------------------
-  app.get('/api/sessions', { preHandler: guard }, async () => listSessions());
+
+  // Fetch sessions from a sibling daemon (follower or peer) using the
+  // internal bearer token. Returns [] on any network/auth error so one
+  // unreachable follower doesn't break the whole list.
+  async function fetchFollowerSessions(baseUrl: string): Promise<import('./sessions.js').SessionFile[]> {
+    try {
+      const res = await fetch(`${baseUrl}/api/sessions`, {
+        headers: { Authorization: `Bearer ${config.internalToken}` },
+        signal: AbortSignal.timeout(4_000),
+      });
+      if (!res.ok) return [];
+      return (await res.json()) as import('./sessions.js').SessionFile[];
+    } catch {
+      return [];
+    }
+  }
+
+  app.get('/api/sessions', { preHandler: guard }, async () => {
+    const local = await listSessions();
+    if (config.followerUrls.length === 0) return local;
+    // Fan out to all configured follower daemons in parallel.
+    const remote = (await Promise.all(config.followerUrls.map(fetchFollowerSessions))).flat();
+    // Merge and re-sort by mtime descending; deduplicate by filePath.
+    const seen = new Set(local.map((s) => s.filePath));
+    const merged = [...local, ...remote.filter((s) => !seen.has(s.filePath))];
+    return merged.sort((a, b) => b.mtime.localeCompare(a.mtime));
+  });
 
   app.get<{ Querystring: { lines?: string }; Params: { agentId: string } }>(
     '/api/sessions/:agentId/latest',
     { preHandler: guard },
     async (req, reply) => {
+      const lines = Number(req.query.lines ?? 50);
+      // Try local first.
       const sess = await newestSessionForProject(req.params.agentId);
-      if (!sess) return reply.code(404).send({ error: 'no session' });
-      const events = await tailSession(sess.filePath, Number(req.query.lines ?? 50));
-      return { session: sess, events };
+      if (sess) {
+        const events = await tailSession(sess.filePath, lines);
+        return { session: sess, events };
+      }
+      // Not local — proxy to the first follower that owns this agent.
+      for (const baseUrl of config.followerUrls) {
+        try {
+          const res = await fetch(
+            `${baseUrl}/api/sessions/${encodeURIComponent(req.params.agentId)}/latest?lines=${lines}`,
+            {
+              headers: { Authorization: `Bearer ${config.internalToken}` },
+              signal: AbortSignal.timeout(6_000),
+            },
+          );
+          if (res.ok) return res.json();
+        } catch {
+          // try next follower
+        }
+      }
+      return reply.code(404).send({ error: 'no session' });
     },
   );
 

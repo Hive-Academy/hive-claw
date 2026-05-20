@@ -153,6 +153,10 @@ interface Statements {
   listFilenames: Statement<{ project_slug: string; task_id: string }>;
   deleteFile: Statement<{ project_slug: string; task_id: string; filename: string }>;
   touchTask: Statement<{ project_slug: string; id: string }>;
+  deleteTask: Statement<{ project_slug: string; id: string }>;
+  deleteTaskFiles: Statement<{ project_slug: string; task_id: string }>;
+  cancelPendingDispatches: Statement<{ project_slug: string; task_id: string }>;
+  updateAssignedAgent: Statement<{ project_slug: string; id: string; assigned_agent: string }>;
 }
 
 let cached: Statements | null = null;
@@ -216,6 +220,19 @@ function stmts(): Statements {
     `),
     touchTask: db.prepare(`
       UPDATE tasks SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      WHERE project_slug = @project_slug AND id = @id
+    `),
+    deleteTask: db.prepare(`DELETE FROM tasks WHERE project_slug = @project_slug AND id = @id`),
+    deleteTaskFiles: db.prepare(`DELETE FROM task_files WHERE project_slug = @project_slug AND task_id = @task_id`),
+    cancelPendingDispatches: db.prepare(`
+      UPDATE dispatches SET state = 'failed',
+        completed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      WHERE project_slug = @project_slug AND task_id = @task_id
+        AND state IN ('pending', 'taken')
+    `),
+    updateAssignedAgent: db.prepare(`
+      UPDATE tasks SET assigned_agent = @assigned_agent,
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
       WHERE project_slug = @project_slug AND id = @id
     `),
   };
@@ -481,6 +498,44 @@ export const TasksRepo = {
   /** FS-free phase derivation, exposed for callers that already have the rows. */
   deriveCurrentPhase(projectSlug: string, taskId: string): Phase {
     return recomputePhase(projectSlug, taskId);
+  },
+
+  /**
+   * Atomic: cancel pending/taken dispatches, delete task files, delete task row.
+   * Returns null when task not found.
+   */
+  deleteTask(
+    projectSlug: string,
+    taskId: string,
+  ): { cancelledDispatches: number; wasInProgress: boolean } | null {
+    const db = getDb();
+    const tx = db.transaction(() => {
+      const task = TasksRepo.get(projectSlug, taskId);
+      if (!task) return null;
+      const wasInProgress = task.currentPhase === 'IN_PROGRESS' || task.checkpointPending;
+      const cancelResult = stmts().cancelPendingDispatches.run({
+        project_slug: projectSlug,
+        task_id: taskId,
+      });
+      const cancelledDispatches = cancelResult.changes;
+      stmts().deleteTaskFiles.run({ project_slug: projectSlug, task_id: taskId });
+      stmts().deleteTask.run({ project_slug: projectSlug, id: taskId });
+      return { cancelledDispatches, wasInProgress };
+    });
+    return tx();
+  },
+
+  updateAssignedAgent(
+    projectSlug: string,
+    taskId: string,
+    assignedAgent: string,
+  ): boolean {
+    const result = stmts().updateAssignedAgent.run({
+      project_slug: projectSlug,
+      id: taskId,
+      assigned_agent: assignedAgent,
+    });
+    return result.changes > 0;
   },
 };
 

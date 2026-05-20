@@ -20,6 +20,16 @@ export interface ProjectSummary {
   checkpointCount: number;
 }
 
+export interface ProjectRow {
+  slug: string;
+  name: string;
+  workspace: string | null;
+  githubRepo: string | null;
+  defaultBranch: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface TaskSummary {
   id: string;
   project: string;

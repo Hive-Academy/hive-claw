@@ -24,6 +24,7 @@
 import { config } from './config.js';
 import {
   DispatchRepo,
+  ProjectsRepo,
   TasksRepo,
   getReadOnlyDb,
   isTerminalState,
@@ -32,6 +33,7 @@ import {
   type Dispatch,
   type DispatchState,
   type MemoryScope,
+  type ProjectRow,
 } from './db/index.js';
 import { discoverProjects, getProject, type Project } from './projects.js';
 import { listTasks, readTask, readTaskArtifacts, type TaskSummary } from './phase.js';
@@ -157,6 +159,79 @@ export async function readTaskArtifactsBy(
     return readTaskArtifacts(project, taskId);
   }
   return leaderClient.readTaskArtifacts(slug, taskId);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Project / task writes                                                       */
+/* -------------------------------------------------------------------------- */
+
+export async function deleteProject(
+  slug: string,
+): Promise<{ ok: true } | null> {
+  if (config.leader) {
+    const deleted = ProjectsRepo.delete(slug);
+    if (!deleted) return null;
+    return { ok: true };
+  }
+  const r = await leaderClient.rawRelay('DELETE', `/api/projects/${encodeURIComponent(slug)}`);
+  if (r.statusCode === 404) return null;
+  if (r.statusCode >= 200 && r.statusCode < 300) return { ok: true };
+  throw new Error(`deleteProject: unexpected leader status ${r.statusCode}`);
+}
+
+export async function updateProject(
+  slug: string,
+  fields: { name?: string; workspace?: string; defaultBranch?: string },
+): Promise<ProjectRow | null> {
+  if (config.leader) {
+    return ProjectsRepo.update(slug, fields);
+  }
+  const r = await leaderClient.rawRelay('PUT', `/api/projects/${encodeURIComponent(slug)}`, fields);
+  if (r.statusCode === 404) return null;
+  if (r.statusCode >= 200 && r.statusCode < 300) return r.body as ProjectRow;
+  throw new Error(`updateProject: unexpected leader status ${r.statusCode}`);
+}
+
+export async function deleteTask(
+  slug: string,
+  taskId: string,
+): Promise<{ ok: true; cancelledDispatches: number; wasInProgress: boolean } | null> {
+  if (config.leader) {
+    const result = TasksRepo.deleteTask(slug, taskId);
+    if (!result) return null;
+    return { ok: true, ...result };
+  }
+  const r = await leaderClient.rawRelay(
+    'DELETE',
+    `/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(taskId)}`,
+  );
+  if (r.statusCode === 404) return null;
+  if (r.statusCode >= 200 && r.statusCode < 300) {
+    return r.body as { ok: true; cancelledDispatches: number; wasInProgress: boolean };
+  }
+  throw new Error(`deleteTask: unexpected leader status ${r.statusCode}`);
+}
+
+export async function updateTaskAgent(
+  slug: string,
+  taskId: string,
+  assignedAgent: string,
+): Promise<{ ok: true; taskId: string; assignedAgent: string } | null> {
+  if (config.leader) {
+    const updated = TasksRepo.updateAssignedAgent(slug, taskId, assignedAgent);
+    if (!updated) return null;
+    return { ok: true, taskId, assignedAgent };
+  }
+  const r = await leaderClient.rawRelay(
+    'PUT',
+    `/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(taskId)}`,
+    { assignedAgent },
+  );
+  if (r.statusCode === 404) return null;
+  if (r.statusCode >= 200 && r.statusCode < 300) {
+    return r.body as { ok: true; taskId: string; assignedAgent: string };
+  }
+  throw new Error(`updateTaskAgent: unexpected leader status ${r.statusCode}`);
 }
 
 /* -------------------------------------------------------------------------- */
