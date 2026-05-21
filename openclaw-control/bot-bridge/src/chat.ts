@@ -284,9 +284,13 @@ async function buildToolRegistry(
   // TASK_2026_003 — opt-in Discord-native tools (`read_channel_history`,
   // `upload_attachment`). Agents with no `chatTier.tools` field in their
   // harness get an empty slice; the registry is unchanged for them.
+  const mcp = await mcpTools.listForAgent(agent.id).catch((err) => {
+    console.error('[chat] mcpTools.listForAgent failed:', (err as Error)?.message ?? err);
+    return [] as ToolDef[];
+  });
   return mergeToolRegistries(
     daemonTools.list(),
-    mcpTools.listForAgent(agent.id),
+    mcp,
     subagentTools.listForAgent(agent),
     discordTools.listForAgent(agent),
   );

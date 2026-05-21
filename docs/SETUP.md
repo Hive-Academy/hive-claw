@@ -75,7 +75,15 @@ One bot per agent. Each bot has its own application, its own token, and shows up
 3. **Bot → Reset Token** → copy. This is `DISCORD_TOKEN_<UPPER_AGENT_ID>` in `.env` (e.g. `DISCORD_TOKEN_ANUBIS`).
 4. **OAuth2 → URL Generator** → scopes: `bot`. Bot permissions: `View Channels`, `Send Messages`, `Read Message History`. Open the generated URL → invite to your server.
 
-Repeat for each agent (anubis on the leader, amun on Amun's machine, etc.).
+The fleet currently has three active agents. Create one bot per agent on whichever machine owns it:
+
+| Agent | Env var | Role | Notes |
+|---|---|---|---|
+| `anubis` | `DISCORD_TOKEN_ANUBIS` | Orchestrator / infra | Typically runs on the leader machine |
+| `horus` | `DISCORD_TOKEN_HORUS` | General-purpose assistant | Any follower machine |
+| `chappie` | `DISCORD_TOKEN_CHAPPIE` | Social media / content publisher | Needs `ZERNIO_API_KEY` on its machine |
+
+Repeat the four steps above for each bot you plan to run on this machine. Machines that don't host an agent leave its token empty — openclaw logs a sign-in failure for the empty token but the other personas are unaffected.
 
 ---
 
@@ -104,6 +112,9 @@ OPENCLAW_LOCAL_AGENT_IDS=anubis              # or whichever agent(s) this host o
 OPENCLAW_SPECS_DB_PATH=/data/specs.db        # default; rarely changed
 DISCORD_TOKEN_ANUBIS=...                     # one per local agent
 DOCKER_GID=985                               # from `stat -c '%g' /var/run/docker.sock`
+GEMINI_API_KEY=...                           # for Veo video generation (optional)
+WEB_SEARCH_PROVIDER=tavily                   # optional; leave blank to disable web search
+WEB_SEARCH_API_KEY=...                       # required when WEB_SEARCH_PROVIDER is set
 ```
 
 `setup.sh` will auto-generate `OPENCLAW_JWT_SECRET` and `OPENCLAW_INTERNAL_TOKEN` if you leave them empty. Note the generated `OPENCLAW_INTERNAL_TOKEN` value — you'll need to copy it to every follower's `.env`.
@@ -113,10 +124,13 @@ DOCKER_GID=985                               # from `stat -c '%g' /var/run/docke
 ```bash
 OPENCLAW_LEADER=0
 OPENCLAW_LEADER_URL=https://leader.tailnet.ts.net    # or http://leader.lan:7878
-OPENCLAW_LOCAL_AGENT_IDS=amun                        # disjoint from the leader's
+OPENCLAW_LOCAL_AGENT_IDS=horus                       # disjoint from the leader's
 OPENCLAW_INTERNAL_TOKEN=<paste the leader's value>   # MUST match
-DISCORD_TOKEN_AMUN=...                               # one per local agent
+DISCORD_TOKEN_HORUS=...                              # one per local agent
 DOCKER_GID=985                                       # same check as leader
+# Chappie-specific (only on the machine that hosts chappie):
+DISCORD_TOKEN_CHAPPIE=...
+ZERNIO_API_KEY=...
 ```
 
 If `OPENCLAW_LEADER=0` and `OPENCLAW_LEADER_URL` is empty, the daemon refuses to start (config-load hard-fail at `daemon/src/config.ts`).
@@ -170,7 +184,7 @@ This is destructive: in-flight tasks are lost. The user accepted this trade as p
 
 ---
 
-## Step 5 — Edit the agent persona
+## Step 5 — Edit the agent persona and provision agent files
 
 The bot won't be useful — and on a strict reading of the bot-bridge, won't even register — until the agent has a persona. The scaffold is full of placeholders.
 
@@ -186,6 +200,63 @@ On every boot, the gateway's entrypoint copies `local-memory/agents/<id>/persona
 
 - Your persona edits take effect on the next message (bot-bridge) **and** on the next container restart (gateway context files).
 - The workspace copy is re-materialized from the local-memory source on every boot — edit the source, not the workspace copy.
+
+### Setting up Horus
+
+On the machine hosting Horus:
+
+```bash
+mkdir -p ~/.claude/local-memory/agents/horus
+cp templates/agent-persona.md.tmpl ~/.claude/local-memory/agents/horus/persona.md
+$EDITOR ~/.claude/local-memory/agents/horus/persona.md
+```
+
+Horus's public `identity.md` is seeded at `shared-specs/memory/agents/horus/identity.md` and is served to all machines via the leader's API. The `harness.yaml` at `shared-specs/memory/agents/horus/harness.yaml` configures Horus's chat tier and orchestration tier.
+
+### Setting up Chappie
+
+On the machine hosting Chappie:
+
+```bash
+mkdir -p ~/.claude/local-memory/agents/chappie
+cp templates/agent-persona.md.tmpl ~/.claude/local-memory/agents/chappie/persona.md
+$EDITOR ~/.claude/local-memory/agents/chappie/persona.md
+```
+
+Chappie also requires `ZERNIO_API_KEY` in `.env` for the social media publishing tools. The public identity and harness are already seeded at `shared-specs/memory/agents/chappie/`.
+
+### Canva MCP one-time OAuth (gateway machine)
+
+The Canva MCP server uses browser OAuth rather than an API key. Run this **on the host machine** (where the gateway container runs) before starting the stack:
+
+```bash
+npx -y mcp-remote@latest https://mcp.canva.com/mcp
+```
+
+Complete the OAuth flow in the browser that opens, then Ctrl+C. Tokens land in `~/.mcp-auth/` which is bind-mounted into the gateway container at `/home/agent/.mcp-auth`. The `mcp-remote` process inside the container picks them up automatically and refreshes them on expiry. No env var is needed.
+
+If you're running multiple machines, repeat this step on each machine that hosts the gateway container.
+
+### Web search API key
+
+To enable the `web_search` tool, set both variables in `.env`:
+
+```bash
+WEB_SEARCH_PROVIDER=tavily        # or brave, perplexity, exa, duckduckgo, searxng
+WEB_SEARCH_API_KEY=<your key>
+```
+
+Leave either variable empty to disable web search. The `web_fetch` (URL fetching) and `browser` (headless Chromium) tools are always on regardless.
+
+### Gemini API key for video generation
+
+All three agents have the `generate_video` tool available via Google Veo. To enable it, add the key to `.env`:
+
+```bash
+GEMINI_API_KEY=<your key from Google AI Studio>
+```
+
+The key is auto-detected from the container environment by openclaw. No other config is needed. The default model is `veo-3.1-fast-generate-preview`.
 
 ---
 

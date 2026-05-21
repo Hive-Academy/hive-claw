@@ -8,6 +8,26 @@ The canonical doc for everything sitting on top of the openclaw gateway. If you 
 
 ## What it is
 
+### Built-in capabilities (gateway tier)
+
+All three agents in the fleet have access to these tools out of the box:
+
+- **Web search** — `tools.web.search` (enabled when `WEB_SEARCH_PROVIDER` + `WEB_SEARCH_API_KEY` are set). Supported providers: tavily, brave, perplexity, exa, duckduckgo, searxng.
+- **Web fetch** — `tools.web.fetch` (always on). Fetches and parses URLs with readability mode, 50 KB cap.
+- **Browser** — headless Chromium (`/usr/bin/chromium`, no-sandbox). Always on. Installed in the Dockerfile.
+- **Video generation** — `generate_video` via Google Veo (`GEMINI_API_KEY` required). Default model: `veo-3.1-fast-generate-preview`.
+- **Canva design tools** — via Canva MCP (`npx mcp-remote https://mcp.canva.com/mcp`). One-time browser OAuth on the host; no API key env var.
+- **GitHub** — GitHub MCP server (`GITHUB_TOKEN` required). Available to all agents.
+- **Zernio social media** — Zernio MCP (`ZERNIO_API_KEY` required). Used by Chappie for social publishing.
+
+### Three active agents
+
+| Agent | Role | Machine |
+|---|---|---|
+| **Anubis** | Orchestration, infra, control-plane work, multi-machine coordination. | Leader |
+| **Horus** | General-purpose assistant; delegates security reviews, handles ad-hoc tasks. | Follower |
+| **Chappie** | Social media publisher. Monitors GitHub repos, compiles digests, publishes via Zernio. | Follower |
+
 Three TypeScript processes shipped inside the same container as the openclaw gateway:
 
 | Process | Port | Role |
@@ -30,24 +50,27 @@ The whole thing runs inside the container `openclaw` started by `docker-compose.
 Each physical machine in the fleet runs the same image. They differ only in `.env`:
 
 ```
-┌─ Anubis (leader) ─────────────────┐  ┌─ Amun (follower) ─────────────────────┐
-│  OPENCLAW_LEADER=1                │  │  OPENCLAW_LEADER=0                    │
-│  OPENCLAW_LOCAL_AGENT_IDS=anubis  │  │  OPENCLAW_LOCAL_AGENT_IDS=amun        │
-│  /data/specs.db (SQLite, WAL)     │  │  OPENCLAW_LEADER_URL=https://anubis…  │
-│  DISCORD_TOKEN_ANUBIS=...         │  │  DISCORD_TOKEN_AMUN=...               │
-│                                   │  │                                       │
-│  daemon → continuation loop ON    │  │  daemon → continuation loop OFF       │
-│         → dispatch worker ON      │  │         → dispatch worker ON          │
-│         → owns the spec DB        │  │         → HTTP client of the leader   │
-│         → dashboard (public)      │  │         → dashboard (loopback only)   │
-│         → bot-bridge: anubis      │  │         → bot-bridge: amun            │
-└─────────────────┬─────────────────┘  └─────────────────┬─────────────────────┘
-                  │                                       │
-                  │  Bearer ${OPENCLAW_INTERNAL_TOKEN}    │
-                  │  HTTPS or LAN  →  /api/dispatches/*   │
-                  │                   /api/memories/*     │
-                  │                   /api/stream         │
-                  └───────────────────────────────────────┘
+┌─ Anubis (leader) ──────────────────┐  ┌─ Horus/Chappie (follower) ───────────────────┐
+│  OPENCLAW_LEADER=1                 │  │  OPENCLAW_LEADER=0                           │
+│  OPENCLAW_LOCAL_AGENT_IDS=anubis   │  │  OPENCLAW_LOCAL_AGENT_IDS=horus,chappie      │
+│  /data/specs.db (SQLite, WAL)      │  │  OPENCLAW_LEADER_URL=https://anubis…         │
+│  DISCORD_TOKEN_ANUBIS=...          │  │  DISCORD_TOKEN_HORUS=...                     │
+│  GEMINI_API_KEY=...                │  │  DISCORD_TOKEN_CHAPPIE=...                   │
+│  WEB_SEARCH_PROVIDER=tavily        │  │  ZERNIO_API_KEY=...                          │
+│  WEB_SEARCH_API_KEY=...            │  │                                              │
+│                                    │  │  daemon → continuation loop OFF              │
+│  daemon → continuation loop ON     │  │         → dispatch worker ON                 │
+│         → dispatch worker ON       │  │         → HTTP client of the leader          │
+│         → owns the spec DB         │  │         → dashboard (loopback only)          │
+│         → dashboard (public)       │  │         → bot-bridge: horus, chappie         │
+│         → bot-bridge: anubis       │  │                                              │
+└──────────────────┬─────────────────┘  └──────────────────┬───────────────────────────┘
+                   │                                        │
+                   │  Bearer ${OPENCLAW_INTERNAL_TOKEN}     │
+                   │  HTTPS or LAN  →  /api/dispatches/*    │
+                   │                   /api/memories/*      │
+                   │                   /api/stream          │
+                   └────────────────────────────────────────┘
 ```
 
 Exactly one machine sets `OPENCLAW_LEADER=1`. That machine is the only one running the **continuation loop** (the thing that walks each task through `CONTEXT → DESCRIPTION → PLAN → … → DONE` and inserts new dispatches into the DB). The leader also opens the SQLite database at `/data/specs.db`. Followers do **not** open any local DB — they run only the **dispatch worker**, which subscribes to the leader's SSE channel `/api/stream?topics=dispatch`, claims dispatches via `POST /api/dispatches/:id/claim`, runs the work locally, and reports completion via `POST /api/dispatches/:id/done`.
@@ -304,7 +327,11 @@ For the full env reference see [CONFIGURATION.md](CONFIGURATION.md). Highest-imp
 | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | (empty) | OAuth app credentials. Empty → local-dev fallback only. |
 | `DISCORD_REDIRECT_URI` | `http://localhost:7878/auth/discord/callback` | Must match the Discord Developer Portal exactly. |
 | `DISCORD_ALLOWED_USER_IDS` | (empty) | CSV allowlist. **Set this** if exposing publicly. |
-| `DISCORD_TOKEN_<ID>` | (none) | Per-agent bot token. Required for any agent the bot-bridge should run. |
+| `DISCORD_TOKEN_ANUBIS` / `DISCORD_TOKEN_HORUS` / `DISCORD_TOKEN_CHAPPIE` | (none) | Per-agent bot token. Required for any agent the bot-bridge should run on this machine. |
+| `WEB_SEARCH_PROVIDER` | (empty → search disabled) | Search provider for the gateway's `web_search` tool. Both this and `WEB_SEARCH_API_KEY` must be set to enable search. |
+| `WEB_SEARCH_API_KEY` | (empty → search disabled) | API key for the selected search provider. |
+| `GEMINI_API_KEY` | (empty → Veo disabled) | Google Gemini key for Veo video generation. Auto-detected by openclaw from container env. |
+| `ZERNIO_API_KEY` | (empty → Zernio MCP disabled) | API key for the Zernio social media MCP server. Required on the machine hosting Chappie. |
 
 ---
 

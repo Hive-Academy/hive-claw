@@ -8,6 +8,7 @@ import type {
   DispatchState,
   HealthStatus,
   MemoryEntry,
+  ProjectRow,
   ProjectSummary,
   SessionInfo,
   SessionTail,
@@ -36,6 +37,40 @@ export class ApiService {
 
   projects(): Observable<ProjectSummary[]> {
     return this.http.get<ProjectSummary[]>('/api/projects', { withCredentials: true });
+  }
+
+  createProject(body: { slug: string; name: string; workspace?: string }): Observable<ProjectRow> {
+    return this.http.post<ProjectRow>('/api/projects', body, { withCredentials: true });
+  }
+
+  deleteProject(slug: string): Observable<{ ok: true }> {
+    return this.http.delete<{ ok: true }>(`/api/projects/${slug}`, { withCredentials: true });
+  }
+
+  updateProject(
+    slug: string,
+    body: Partial<{ name: string; workspace: string; defaultBranch: string }>,
+  ): Observable<ProjectRow> {
+    return this.http.put<ProjectRow>(`/api/projects/${slug}`, body, { withCredentials: true });
+  }
+
+  deleteTask(slug: string, taskId: string): Observable<{ ok: true; cancelledDispatches: number }> {
+    return this.http.delete<{ ok: true; cancelledDispatches: number }>(
+      `/api/projects/${slug}/tasks/${taskId}`,
+      { withCredentials: true },
+    );
+  }
+
+  updateTask(
+    slug: string,
+    taskId: string,
+    body: { assignedAgent?: string },
+  ): Observable<{ ok: true; taskId: string; assignedAgent: string }> {
+    return this.http.put<{ ok: true; taskId: string; assignedAgent: string }>(
+      `/api/projects/${slug}/tasks/${taskId}`,
+      body,
+      { withCredentials: true },
+    );
   }
 
   tasks(slug: string): Observable<TaskSummary[]> {
@@ -170,6 +205,7 @@ export type {
   DispatchState,
   HealthStatus,
   MemoryEntry,
+  ProjectRow,
   ProjectSummary,
   SessionInfo,
   SessionTail,

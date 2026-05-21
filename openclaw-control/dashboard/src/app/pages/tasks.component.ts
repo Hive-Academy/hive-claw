@@ -1,7 +1,7 @@
 import { ChangeDetectionStrategy, Component, OnInit, computed, inject, input, signal } from '@angular/core';
 import { RouterLink, Router } from '@angular/router';
 import { FormsModule } from '@angular/forms';
-import { ApiService, TaskSummary } from '../services/api.service';
+import { ApiService, TaskSummary, Agent } from '../services/api.service';
 import { ToastService } from '../services/toast.service';
 import { SkeletonComponent } from '../components/skeleton.component';
 
@@ -163,10 +163,21 @@ const COLLAPSED_PHASES_DEFAULT = new Set<string>(['DONE', 'QA_DONE']);
                             <span class="text-sm text-base-content/80 line-clamp-1">{{ t.title || '(no title)' }}</span>
                           </td>
                           <td>
-                            @if (t.assignedAgent) {
-                              <span class="badge badge-outline badge-sm">{{ t.assignedAgent }}</span>
+                            @if (reassigningTaskId() === t.id) {
+                              <select class="select select-xs select-bordered"
+                                (change)="reassignAgent(t, $any($event.target).value)"
+                                (blur)="reassigningTaskId.set(null)"
+                                (keydown.escape)="reassigningTaskId.set(null)">
+                                @for (a of agents(); track a.id) {
+                                  <option [value]="a.id" [selected]="a.id === t.assignedAgent">{{ a.id }}</option>
+                                }
+                              </select>
                             } @else {
-                              <span class="text-base-content/40">—</span>
+                              @if (t.assignedAgent) {
+                                <span class="badge badge-outline badge-sm cursor-pointer" (click)="startReassign(t, $event)">{{ t.assignedAgent }}</span>
+                              } @else {
+                                <span class="text-base-content/40 cursor-pointer text-sm" (click)="startReassign(t, $event)">—</span>
+                              }
                             }
                           </td>
                           <td class="hidden sm:table-cell">
@@ -176,11 +187,10 @@ const COLLAPSED_PHASES_DEFAULT = new Set<string>(['DONE', 'QA_DONE']);
                           </td>
                           <td class="hidden lg:table-cell text-xs text-base-content/60">{{ t.updatedAt }}</td>
                           <td class="text-right">
-                            <a
-                              [routerLink]="['/projects', slug(), 'tasks', t.id]"
-                              class="btn btn-xs btn-ghost"
-                              (click)="$event.stopPropagation()"
-                            >Open →</a>
+                            <div class="flex items-center gap-1 justify-end">
+                              <a [routerLink]="['/projects', slug(), 'tasks', t.id]" class="btn btn-xs btn-ghost" (click)="$event.stopPropagation()">Open →</a>
+                              <button class="btn btn-xs btn-error btn-outline" (click)="openDeleteModal(t, $event)">Delete</button>
+                            </div>
                           </td>
                         </tr>
                       }
@@ -191,6 +201,32 @@ const COLLAPSED_PHASES_DEFAULT = new Set<string>(['DONE', 'QA_DONE']);
             </table>
           </div>
         </div>
+      }
+
+      <!-- Delete task modal -->
+      @if (showDeleteModal()) {
+        <dialog open class="modal modal-open">
+          <div class="modal-box">
+            <h3 class="font-bold text-lg text-error">Delete task?</h3>
+            <p class="mt-2">Task <span class="font-mono font-bold">{{ deleteTarget()?.id }}</span>
+              (phase: <span class="font-mono">{{ deleteTarget()?.phase }}</span>) will be permanently deleted.</p>
+            @if (deleteTarget()?.phase === 'IN_PROGRESS' || deleteTarget()?.checkpointPending) {
+              <div class="alert alert-warning mt-3 text-sm">
+                This task is actively running. Deleting it will cancel all pending dispatches.
+              </div>
+            } @else {
+              <p class="text-sm text-base-content/60 mt-1">Pending dispatches for this task will be cancelled.</p>
+            }
+            <div class="modal-action">
+              <button class="btn btn-ghost btn-sm" (click)="closeDeleteModal()">Cancel</button>
+              <button class="btn btn-error btn-sm" [disabled]="deleting()" (click)="confirmDeleteTask()">
+                @if (deleting()) { <span class="loading loading-spinner loading-xs"></span> }
+                Delete
+              </button>
+            </div>
+          </div>
+          <div class="modal-backdrop" (click)="closeDeleteModal()"></div>
+        </dialog>
       }
     </div>
   `,
@@ -209,6 +245,12 @@ export class TasksComponent implements OnInit {
   newDesc = '';
   newAgent = '';
   collapsed = signal<Set<string>>(new Set(COLLAPSED_PHASES_DEFAULT));
+
+  showDeleteModal = signal(false);
+  deleteTarget = signal<TaskSummary | null>(null);
+  deleting = signal(false);
+  reassigningTaskId = signal<string | null>(null);
+  agents = signal<Agent[]>([]);
 
   filtered = computed(() => {
     const q = this.query.toLowerCase().trim();
@@ -248,7 +290,13 @@ export class TasksComponent implements OnInit {
     return badge.replace('badge-', 'text-');
   }
 
-  ngOnInit() { this.refresh(); }
+  ngOnInit() {
+    this.refresh();
+    this.api.agents().subscribe({
+      next: (a) => this.agents.set(a),
+      error: () => { /* non-fatal */ },
+    });
+  }
 
   refresh() {
     this.loading.set(true);
@@ -278,6 +326,62 @@ export class TasksComponent implements OnInit {
       error: (err) => {
         this.creating.set(false);
         this.toast.error(err?.error?.error || 'Create failed');
+      },
+    });
+  }
+
+  openDeleteModal(t: TaskSummary, event: Event) {
+    event.stopPropagation();
+    this.deleteTarget.set(t);
+    this.showDeleteModal.set(true);
+  }
+
+  closeDeleteModal() {
+    this.showDeleteModal.set(false);
+    this.deleteTarget.set(null);
+  }
+
+  confirmDeleteTask() {
+    const target = this.deleteTarget();
+    if (!target) return;
+    this.deleting.set(true);
+    this.api.deleteTask(this.slug(), target.id).subscribe({
+      next: () => {
+        this.deleting.set(false);
+        this.closeDeleteModal();
+        this.tasks.update((list) => list.filter((t) => t.id !== target.id));
+        this.toast.success(`Task ${target.id} deleted`);
+      },
+      error: (err) => {
+        this.deleting.set(false);
+        this.toast.error(err?.error?.error ?? 'Delete failed');
+        this.closeDeleteModal();
+      },
+    });
+  }
+
+  startReassign(t: TaskSummary, event: Event) {
+    event.stopPropagation();
+    this.reassigningTaskId.set(t.id);
+  }
+
+  reassignAgent(t: TaskSummary, newAgentId: string) {
+    if (newAgentId === t.assignedAgent) {
+      this.reassigningTaskId.set(null);
+      return;
+    }
+    this.api.updateTask(this.slug(), t.id, { assignedAgent: newAgentId }).subscribe({
+      next: (result) => {
+        this.reassigningTaskId.set(null);
+        this.tasks.update((list) =>
+          list.map((task) =>
+            task.id === t.id ? { ...task, assignedAgent: result.assignedAgent } : task,
+          ),
+        );
+      },
+      error: (err) => {
+        this.reassigningTaskId.set(null);
+        this.toast.error(err?.error?.error ?? 'Reassign failed');
       },
     });
   }
